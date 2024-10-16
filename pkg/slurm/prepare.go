@@ -353,11 +353,6 @@ func prepareMounts(
 
 	}
 
-	mountedData += "--bind " + config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + "command_" + container.Name + ".sh" +
-		":" + "/tmp/" + "command_" + container.Name + ".sh "
-	mountedData += "--bind " + config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + "args_" + container.Name + ".sh" +
-		":" + "/tmp/" + "args_" + container.Name + ".sh"
-
 	if last := len(mountedData) - 1; last >= 0 && mountedData[last] == ',' {
 		mountedData = mountedData[:last]
 	}
@@ -482,74 +477,49 @@ func produceSLURMScript(
 
 	log.G(Ctx).Debug("--- Writing file")
 
-	var stringToBeWritten string
+	var stringToBeWritten strings.Builder
 
-	stringToBeWritten += sbatch_macros
+	stringToBeWritten.WriteString(sbatch_macros)
 
 	for _, singularityCommand := range commands {
 
-		cmdString := ""
+		stringToBeWritten.WriteString("\n")
+		stringToBeWritten.WriteString(strings.Join(singularityCommand.singularityCommand[:], " "))
 
-		f3, err := os.Create(path + "/" + "command_" + singularityCommand.containerName + ".sh")
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return "", err
-		}
-		defer f3.Close()
-
-		f2, err := os.Create(path + "/" + "args_" + singularityCommand.containerName + ".sh")
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return "", err
-		}
-		defer f2.Close()
-
-		if len(singularityCommand.containerArgs) != 0 {
-			if singularityCommand.containerCommand != nil {
-				cmdString = strings.Join(singularityCommand.containerCommand, " ") + " \"$(cat /tmp/args_" + singularityCommand.containerName + ".sh)\""
-			} else {
-				cmdString = "/bin/sh -c \"$(cat /tmp/args_" + singularityCommand.containerName + ".sh)\""
+		if singularityCommand.containerCommand != nil {
+			// Case the pod specified a container entrypoint array to override.
+			for _, commandEntry := range singularityCommand.containerCommand {
+				stringToBeWritten.WriteString(" ")
+				// We convert from GO array to shell command, so escaping is important to avoid space, quote issues and injection vulnerabilities.
+				stringToBeWritten.WriteString(shellescape.Quote(commandEntry))
 			}
-		} else {
-			cmdString = strings.Join(singularityCommand.containerCommand, " ")
+		}
+		if singularityCommand.containerArgs != nil {
+			// Case the pod specified a container command array to override.
+			for _, argsEntry := range singularityCommand.containerArgs {
+				stringToBeWritten.WriteString(" ")
+				// We convert from GO array to shell command, so escaping is important to avoid space, quote issues and injection vulnerabilities.
+				stringToBeWritten.WriteString(shellescape.Quote(argsEntry))
+			}
 		}
 
-		_, err = f3.WriteString(cmdString)
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return "", err
-		} else {
-			log.G(Ctx).Debug("---- Written command file " + f3.Name())
-		}
-
-		argString := strings.Join(singularityCommand.containerArgs, " ")
-		_, err = f2.WriteString(argString)
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return "", err
-		} else {
-			log.G(Ctx).Debug("---- Written arguments file " + f2.Name())
-		}
-
-		os.Chmod(f2.Name(), 0777|os.ModePerm)
-		os.Chmod(f3.Name(), 0777|os.ModePerm)
-
-		if singularityCommand.isInitContainer {
-			stringToBeWritten += "\n" + strings.Join(singularityCommand.singularityCommand[:], " ") + " " +
-				"/bin/sh" + " /tmp/" + "command_" + singularityCommand.containerName + ".sh" +
-				" &> " + path + "/" + singularityCommand.containerName + ".out; " +
-				"echo $? > " + path + "/" + singularityCommand.containerName + ".status"
-		} else {
-			stringToBeWritten += "\n" + strings.Join(singularityCommand.singularityCommand[:], " ") + " " +
-				"/bin/sh" + " /tmp/" + "command_" + singularityCommand.containerName + ".sh" +
-				" &> " + path + "/" + singularityCommand.containerName + ".out; " +
-				"echo $? > " + path + "/" + singularityCommand.containerName + ".status; sleep 30 &"
+		stringToBeWritten.WriteString(" &> ")
+		stringToBeWritten.WriteString(path)
+		stringToBeWritten.WriteString("/")
+		stringToBeWritten.WriteString(singularityCommand.containerName)
+		stringToBeWritten.WriteString(".out; ")
+		stringToBeWritten.WriteString("echo $? > " + path + "/" + singularityCommand.containerName + ".status")
+		
+		if ! singularityCommand.isInitContainer {
+			// Not init containers are run in parallel.
+			stringToBeWritten.WriteString("; sleep 30 &")
 		}
 	}
 
-	stringToBeWritten += "\n" + postfix
+	stringToBeWritten.WriteString("\n")
+	stringToBeWritten.WriteString(postfix)
 
-	_, err = f.WriteString(stringToBeWritten)
+	_, err = f.WriteString(stringToBeWritten.String())
 
 	if err != nil {
 		log.G(Ctx).Error(err)
