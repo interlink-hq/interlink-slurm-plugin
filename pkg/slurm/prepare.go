@@ -186,50 +186,50 @@ func (h *SidecarHandler) LoadJIDs() error {
 }
 
 func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) ([]string, []string, error) {
-		envs := []string{}
-		// For debugging purpose only
-		envs_data := []string{}
-	
-		envfilePath := (config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + "envfile.properties")
-		log.G(Ctx).Info("-- Appending envs using envfile " + envfilePath)
-		envs = append(envs, "--env-file")
-		envs = append(envs, envfilePath)
-		
-		envfile, err := os.Create(envfilePath)
+	envs := []string{}
+	// For debugging purpose only
+	envs_data := []string{}
+
+	envfilePath := (config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + "envfile.properties")
+	log.G(Ctx).Info("-- Appending envs using envfile " + envfilePath)
+	envs = append(envs, "--env-file")
+	envs = append(envs, envfilePath)
+
+	envfile, err := os.Create(envfilePath)
+	if err != nil {
+		log.G(Ctx).Error(err)
+		return nil, nil, err
+	}
+	defer envfile.Close()
+
+	for _, envVar := range container.Env {
+		// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
+		// singularity reads the env-file and parse it like a bash string, so shellescape will escape any quote properly.
+		tmpValue := shellescape.Quote(envVar.Value)
+		tmp := (envVar.Name + "=" + tmpValue)
+
+		envs_data = append(envs_data, tmp)
+
+		_, err := envfile.WriteString(tmp + "\n")
 		if err != nil {
 			log.G(Ctx).Error(err)
 			return nil, nil, err
+		} else {
+			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " key " + envVar.Name + " value " + tmpValue)
 		}
-		defer envfile.Close()
-		
-		for _, envVar := range container.Env {
-			// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
-			// singularity reads the env-file and parse it like a bash string, so shellescape will escape any quote properly.
-			tmpValue :=  shellescape.Quote(envVar.Value)
-			tmp := (envVar.Name + "=" + tmpValue)
-			
-			envs_data = append(envs_data, tmp)
-			
-			_, err := envfile.WriteString(tmp + "\n")
-			if err != nil {
-				log.G(Ctx).Error(err)
-				return nil, nil, err
-			} else {
-				log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " key " + envVar.Name + " value " + tmpValue)
-			}
-		}
-		
-		// All env variables are written, we flush it now. 
-		err = envfile.Sync()
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return nil, nil, err
-		}
-		
-		// Calling Close() in case of error. If not error, the defer will close it again but it should be idempotent.
-		envfile.Close()
-		
-		return envs, envs_data, nil
+	}
+
+	// All env variables are written, we flush it now.
+	err = envfile.Sync()
+	if err != nil {
+		log.G(Ctx).Error(err)
+		return nil, nil, err
+	}
+
+	// Calling Close() in case of error. If not error, the defer will close it again but it should be idempotent.
+	envfile.Close()
+
+	return envs, envs_data, nil
 }
 
 // prepareEnvs reads all Environment variables from a container and append them to a envfile.properties. The values are bash-escaped.
@@ -509,8 +509,8 @@ func produceSLURMScript(
 		stringToBeWritten.WriteString(singularityCommand.containerName)
 		stringToBeWritten.WriteString(".out; ")
 		stringToBeWritten.WriteString("echo $? > " + path + "/" + singularityCommand.containerName + ".status")
-		
-		if ! singularityCommand.isInitContainer {
+
+		if !singularityCommand.isInitContainer {
 			// Not init containers are run in parallel.
 			stringToBeWritten.WriteString("; sleep 30 &")
 		}

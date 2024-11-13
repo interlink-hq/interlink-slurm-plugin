@@ -112,3 +112,21 @@ func (h *SidecarHandler) handleError(ctx context.Context, w http.ResponseWriter,
 	w.Write([]byte("Some errors occurred while creating container. Check Slurm Sidecar's logs"))
 	log.G(h.Ctx).Error(err)
 }
+
+func (h *SidecarHandler) logErrorVerbose(context string, ctx context.Context, w http.ResponseWriter, err error) {
+	errWithContext := fmt.Errorf("error context: %s type: %s %w", context, fmt.Sprintf("%#v", err), err)
+	log.G(h.Ctx).Error(errWithContext)
+	h.handleError(ctx, w, http.StatusInternalServerError, errWithContext)
+}
+
+func GetSessionContext(r *http.Request) string {
+	sessionContext := r.Header.Get("InterLink-Http-Session")
+	if sessionContext == "" {
+		sessionContext = "NoSessionFound#0"
+	}
+	return sessionContext
+}
+
+func GetSessionContextMessage(sessionContext string) string {
+	return "HTTP InterLink session " + sessionContext + ": "
+}

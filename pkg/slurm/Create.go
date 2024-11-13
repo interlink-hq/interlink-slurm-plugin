@@ -83,7 +83,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
 		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
 		singularityCommand := ""
-		if container.Command != nil && len(container.Command) != 0 {
+		if len(container.Command) != 0 {
 			singularityCommand = "exec"
 		} else {
 			singularityCommand = "run"
