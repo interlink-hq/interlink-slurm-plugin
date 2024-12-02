@@ -82,7 +82,8 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
 				// With test, exit_code is better than DerivedEC, because for canceled jobs, it gives 15 while DerivedEC gives 0.
-				cmd := []string{"--noheader", "-a", "-j ", (*h.JIDs)[uid].JID, "-O", "StateCompact,exit_code"}
+				// states=all or else some jobs are hidden, then it is impossible to get job exit code.
+				cmd := []string{"--noheader", "-a", "--states=all", "-O", "StateCompact,exit_code", "-j ", (*h.JIDs)[uid].JID}
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
 					Args:    cmd,
