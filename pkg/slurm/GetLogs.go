@@ -24,7 +24,7 @@ import (
 )
 
 // Logs in follow mode (get logs until the death of the container) with "kubectl -f".
-func (h *SidecarHandler) GetLogsFollowMode(w http.ResponseWriter, r *http.Request, path string, req commonIL.LogStruct, containerOutputPath string, containerOutput []byte, sessionContext string) error {
+func (h *SidecarHandler) GetLogsFollowMode(spanCtx context.Context, podUid string, w http.ResponseWriter, r *http.Request, path string, req commonIL.LogStruct, containerOutputPath string, containerOutput []byte, sessionContext string) error {
 	// Follow until this file exist, that indicates the end of container, thus the end of following.
 	containerStatusPath := path + "/" + req.ContainerName + ".status"
 	// Get the offset of what we read.
@@ -50,7 +50,7 @@ func (h *SidecarHandler) GetLogsFollowMode(w http.ResponseWriter, r *http.Reques
 				} else {
 					log.G(h.Ctx).Error(sessionContextMessage, "wrote file not found but could not flush because server does not support Flusher.")
 				}
-				time.Sleep(5 * time.Second)
+				time.Sleep(4 * time.Second)
 				continue
 			} else {
 				// Case unknown error.
@@ -108,11 +108,16 @@ func (h *SidecarHandler) GetLogsFollowMode(w http.ResponseWriter, r *http.Reques
 				// Nothing more to read, but in follow mode, is the container still alive?
 				if isContainerDead {
 					// Container already marked as dead, and we tried to get logs one last time. Exiting the loop.
-					log.G(h.Ctx).Info(sessionContextMessage, "Container is found dead and no more logs are found at this step, exiting following mode...")
+					log.G(h.Ctx).Info(sessionContextMessage, "Container was found dead and no more logs are found at this step, exiting following mode...")
 					break
 				}
-				// Checking if container is dead (meaning the status file exist).
-				if _, err := os.Stat(containerStatusPath); errors.Is(err, os.ErrNotExist) {
+				// Checking if container is dead (meaning the job ID is not in context anymore, OR if the status file exist).
+				if !checkIfJidExists(spanCtx, (h.JIDs), podUid) {
+					// The JID disappeared, so the container is dead, probably from a POD delete request. Trying to get the latest log one last time.
+					// Because the moment we found this, there might be some more logs to read.
+					isContainerDead = true
+					log.G(h.Ctx).Info(sessionContextMessage, "Container is found dead thanks to missing JID, reading last logs...")
+				} else if _, err := os.Stat(containerStatusPath); errors.Is(err, os.ErrNotExist) {
 					// The status file of the container does not exist, so the container is still alive. Continuing to follow logs.
 					// Sleep because otherwise it can be a stress to file system to always read it when it has nothing.
 					log.G(h.Ctx).Debug(sessionContextMessage, "EOF of container logs, sleeping 4s before retrying...")
@@ -121,7 +126,7 @@ func (h *SidecarHandler) GetLogsFollowMode(w http.ResponseWriter, r *http.Reques
 					// The status file exist, so the container is dead. Trying to get the latest log one last time.
 					// Because the moment we found the status file, there might be some more logs to read.
 					isContainerDead = true
-					log.G(h.Ctx).Info(sessionContextMessage, "Container is found dead, reading last logs...")
+					log.G(h.Ctx).Info(sessionContextMessage, "Container is found dead thanks to status file, reading last logs...")
 				}
 				continue
 			} else {
@@ -277,7 +282,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Opts.Follow {
-		err := h.GetLogsFollowMode(w, r, path, req, containerOutputPath, containerOutput, sessionContext)
+		err := h.GetLogsFollowMode(spanCtx, req.PodUID, w, r, path, req, containerOutputPath, containerOutput, sessionContext)
 		if err != nil {
 			h.logErrorVerbose(sessionContextMessage+"follow mode error", spanCtx, w, err)
 		}
@@ -296,7 +301,7 @@ func (h *SidecarHandler) ReadLogs(logsPath string, span trace.Span, ctx context.
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			log.G(h.Ctx).Info(sessionContextMessage, "file ", logsPath, " not found.")
-			output = make([]byte, 0, 0)
+			output = make([]byte, 0)
 		} else {
 			span.AddEvent("Error retrieving logs")
 			h.logErrorVerbose(sessionContextMessage+"error during ReadFile() of readLogs() in GetLogsHandler of file "+logsPath, ctx, w, err)

@@ -26,7 +26,11 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 	defer commonIL.SetDurationSpan(start, span)
 
-	log.G(h.Ctx).Info("Slurm Sidecar: received Stop call")
+	// For debugging purpose, when we have many kubectl logs, we can differentiate each one.
+	sessionContext := GetSessionContext(r)
+	sessionContextMessage := GetSessionContextMessage(sessionContext)
+
+	log.G(h.Ctx).Info(sessionContextMessage, "Slurm Sidecar: received Stop call")
 	statusCode := http.StatusOK
 
 	bodyBytes, err := io.ReadAll(r.Body)

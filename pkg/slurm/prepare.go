@@ -401,21 +401,19 @@ func produceSLURMScript(
 
 	f, err := os.Create(path + "/job.sh")
 	if err != nil {
-		log.G(Ctx).Error(err)
-		return "", err
-	}
-	err = os.Chmod(path+"/job.sh", 0774)
-	if err != nil {
+		log.G(Ctx).Error("Unable to create file ", path, "/job.sh")
 		log.G(Ctx).Error(err)
 		return "", err
 	}
 	defer f.Close()
 
+	err = os.Chmod(path+"/job.sh", 0774)
 	if err != nil {
-		log.G(Ctx).Error("Unable to create file " + path + "/job.sh")
+		log.G(Ctx).Error("Unable to chmod file ", path, "/job.sh")
+		log.G(Ctx).Error(err)
 		return "", err
 	} else {
-		log.G(Ctx).Debug("--- Created file " + path + "/job.sh")
+		log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
 	}
 
 	var sbatchFlagsFromArgo []string
@@ -640,23 +638,35 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	err := os.RemoveAll(path)
 	jid := (*JIDs)[podUID].JID
 	removeJID(podUID, JIDs)
 
+	errFirstAttempt := os.RemoveAll(path)
 	span.SetAttributes(
 		attribute.String("delete.pod.uid", podUID),
 		attribute.String("delete.jid", jid),
 	)
 
-	if err != nil {
-		log.G(Ctx).Error(err)
-		span.AddEvent("Failed to delete SLURM Job " + (*JIDs)[podUID].JID + " for Pod " + podUID)
-	} else {
-		span.AddEvent("SLURM Job " + jid + " for Pod " + podUID + " successfully deleted")
-	}
+	if errFirstAttempt != nil {
+		log.G(Ctx).Debug("Attempt 1 of deletion failed, not really an error! Probably log file still opened, waiting for close... Error: ", errFirstAttempt)
+		// We expect first rm of directory to possibly fail, in case for eg logs are in follow mode, so opened. The removeJID will end the follow loop,
+		// maximum after the loop period of 4s. So we ignore the error and attempt a second time after being sure the loop has ended.
+		time.Sleep(5 * time.Second)
 
-	return err
+		errSecondAttempt := os.RemoveAll(path)
+		if errSecondAttempt != nil {
+			log.G(Ctx).Error("Attempt 2 of deletion failed: ", errSecondAttempt)
+			span.AddEvent("Failed to delete SLURM Job " + jid + " for Pod " + podUID)
+			return errSecondAttempt
+		} else {
+			log.G(Ctx).Info("Attempt 2 of deletion succeeded!")
+		}
+	}
+	span.AddEvent("SLURM Job " + jid + " for Pod " + podUID + " successfully deleted")
+
+	// We ignore the deletion error because it is already logged, and because InterLink can still be opening files (eg logs in follow mode).
+	// Once InterLink will not use files, all files will be deleted then.
+	return nil
 }
 
 // mountData is called by prepareMounts and creates files and directory according to their definition in the pod structure.
