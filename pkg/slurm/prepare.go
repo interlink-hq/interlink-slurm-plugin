@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -920,11 +921,34 @@ func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid stri
 }
 
 // getExitCode returns the exit code read from the .status file of a specific container and returns it as an int32 number
-func getExitCode(ctx context.Context, path string, ctName string) (int32, error) {
-	exitCode, err := os.ReadFile(path + "/" + ctName + ".status")
+func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, sessionContextMessage string) (int32, error) {
+	statusFilePath := path + "/" + ctName + ".status"
+	exitCode, err := os.ReadFile(statusFilePath)
 	if err != nil {
-		log.G(ctx).Error(err)
-		return 0, err
+		if errors.Is(err, fs.ErrNotExist) {
+			// Case job terminated before the container script has the time to write status file (eg: canceled jobs).
+			log.G(ctx).Warning(sessionContextMessage, "file ", statusFilePath, " not found despite the job being in terminal state. Workaround: using Slurm job exit code:", exitCodeMatch)
+
+			exitCodeInt, errAtoi := strconv.Atoi(exitCodeMatch)
+			if errAtoi != nil {
+				errWithContext := fmt.Errorf(sessionContextMessage+"error during Atoi() of getExitCode() of file %s exitCodeMatch: %s error: %s %w", statusFilePath, exitCodeMatch, fmt.Sprintf("%#v", errAtoi), errAtoi)
+				log.G(ctx).Error(errWithContext)
+				return 11, errWithContext
+			}
+
+			errWriteFile := os.WriteFile(statusFilePath, []byte(exitCodeMatch), 0644)
+			if errWriteFile != nil {
+				errWithContext := fmt.Errorf(sessionContextMessage+"error during WriteFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", errWriteFile), errWriteFile)
+				log.G(ctx).Error(errWithContext)
+				return 12, errWithContext
+			}
+
+			return int32(exitCodeInt), nil
+		} else {
+			errWithContext := fmt.Errorf(sessionContextMessage+"error during ReadFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", err), err)
+			log.G(ctx).Error(errWithContext)
+			return 21, errWithContext
+		}
 	}
 	exitCodeInt, err := strconv.Atoi(strings.Replace(string(exitCode), "\n", "", -1))
 	if err != nil {
