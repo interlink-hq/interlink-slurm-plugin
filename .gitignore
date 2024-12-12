@@ -1,2 +1,5 @@
 envs.sh
 bin
+# Eclipse IDE
+.project
+.settings
