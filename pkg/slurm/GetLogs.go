@@ -24,7 +24,17 @@ import (
 )
 
 // Logs in follow mode (get logs until the death of the container) with "kubectl -f".
-func (h *SidecarHandler) GetLogsFollowMode(spanCtx context.Context, podUid string, w http.ResponseWriter, r *http.Request, path string, req commonIL.LogStruct, containerOutputPath string, containerOutput []byte, sessionContext string) error {
+func (h *SidecarHandler) GetLogsFollowMode(
+	spanCtx context.Context,
+	podUid string,
+	w http.ResponseWriter,
+	r *http.Request,
+	path string,
+	req commonIL.LogStruct,
+	containerOutputPath string,
+	containerOutput []byte,
+	sessionContext string,
+) error {
 	// Follow until this file exist, that indicates the end of container, thus the end of following.
 	containerStatusPath := path + "/" + req.ContainerName + ".status"
 	// Get the offset of what we read.
