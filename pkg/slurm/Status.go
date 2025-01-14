@@ -28,7 +28,7 @@ import (
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	spanCtx, span := tracer.Start(h.Ctx, "StatusSLURM", trace.WithAttributes(
+	spanCtx, span := tracer.Start(h.Ctx, "Status", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()

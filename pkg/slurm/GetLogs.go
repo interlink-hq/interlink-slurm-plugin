@@ -153,7 +153,7 @@ func (h *SidecarHandler) GetLogsFollowMode(
 func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	spanCtx, span := tracer.Start(h.Ctx, "GetLogsSLURM", trace.WithAttributes(
+	spanCtx, span := tracer.Start(h.Ctx, "GetLogs", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()

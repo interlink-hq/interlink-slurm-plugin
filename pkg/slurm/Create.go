@@ -24,7 +24,7 @@ import (
 func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	spanCtx, span := tracer.Start(h.Ctx, "CreateSLURM", trace.WithAttributes(
+	spanCtx, span := tracer.Start(h.Ctx, "Create", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()
