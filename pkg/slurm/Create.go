@@ -109,7 +109,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			resourceLimits.Memory += MemoryLimit
 		}
 
-		mounts, err := prepareMounts(spanCtx, h.Config, data, container, filesPath)
+		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
 		log.G(h.Ctx).Debug(mounts)
 		if err != nil {
 			statusCode = http.StatusInternalServerError
