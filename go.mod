@@ -4,6 +4,10 @@ go 1.22
 
 toolchain go1.22.4
 
+//replace github.com/intertwin-eu/interlink => C:\Users\username\Custom\data\git\interlink
+// TODO: to be replaced when a proper tag is done in github.com/intertwin-eu/interlink
+replace github.com/intertwin-eu/interlink v0.0.0-20240829090340-24c45973f3ec => github.com/antoinetran/interlink v0.3.7-patchI45V034
+
 require (
 	al.essio.dev/pkg/shellescape v1.5.0
 	github.com/alexellis/go-execute v0.6.0
