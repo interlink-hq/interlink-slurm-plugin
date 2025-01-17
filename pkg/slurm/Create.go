@@ -89,7 +89,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			singularityCommand = "run"
 		}
 
-		commstr1 := []string{h.Config.SingularityPath, singularityCommand, "--containall", "--nv", singularityMounts, singularityOptions}
+		// no-eval is important so that singularity does not evaluate env var, because the shellquote has already done the safety check.
+		commstr1 := []string{h.Config.SingularityPath, singularityCommand, "--no-eval", "--containall", "--nv", singularityMounts, singularityOptions}
 
 		image := ""
 
