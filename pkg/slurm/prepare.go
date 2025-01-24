@@ -205,7 +205,7 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 
 	for _, envVar := range container.Env {
 		// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
-		// singularity reads the env-file and parse it like a bash string, so shellescape will escape any quote properly.
+		// singularity reads the env-file and parse it like a shell string, so shellescape will escape any quote properly.
 		tmpValue := shellescape.Quote(envVar.Value)
 		tmp := (envVar.Name + "=" + tmpValue)
 
@@ -233,7 +233,7 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 	return envs, envs_data, nil
 }
 
-// prepareEnvs reads all Environment variables from a container and append them to a envfile.properties. The values are bash-escaped.
+// prepareEnvs reads all Environment variables from a container and append them to a envfile.properties. The values are sh-escaped.
 // It returns the slice containing, if there are Environment variables, the arguments for envfile and its path, or else an empty array.
 func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) []string {
 	start := time.Now().UnixMicro()
@@ -480,9 +480,86 @@ func produceSLURMScript(
 
 	stringToBeWritten.WriteString(sbatch_macros)
 
+	sbatch_common_funcs_macros := `
+
+####
+# Functions
+####
+
+runInitCtn() {
+  ctn="$1"
+  shift
+  printf "%s\n" "$(date -Is --utc) Running ${ctn}..."
+  time ( "$@" ) &> ${workingPath}/${ctn}.out
+  exitCode="$?"
+  printf "%s\n" "${exitCode}" > ${workingPath}/${ctn}.status
+  if test "${exitCode}" != 0 ; then
+    printf "%s\n" "$(date -Is --utc) InitContainer ${ctn} failed with status ${exitCode}" >&2
+    # InitContainers are fail-fast.
+    exit "${exitCode}"
+  fi
+}
+
+runCtn() {
+  ctn="$1"
+  shift
+  # This subshell below is NOT POSIX shell compatible, it needs for example bash.
+  time ( "$@" ) &> ${workingPath}/${ctn}.out &
+  pid="$!"
+  printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
+  pidCtns="${pidCtns} ${pid}:${ctn}"
+}
+
+waitCtns() {
+  # POSIX shell substring test below. Also, container name follows DNS pattern (hyphen alphanumeric, so no ":" inside)
+  # pidCtn=12345:container-name-rfc-dns
+  # ${pidCtn%:*} => 12345
+  # ${pidCtn#*:} => container-name-rfc-dns
+  for pidCtn in ${pidCtns} ; do
+    pid="${pidCtn%:*}"
+    ctn="${pidCtn#*:}"
+    printf "%s\n" "$(date -Is --utc) Waiting for container ${ctn} pid ${pid}..."
+    wait "${pid}"
+    exitCode="$?"
+    printf "%s\n" "${exitCode}" > ${workingPath}/${ctn}.status
+    printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} ended with status ${exitCode}."
+    test "${highestExitCode}" -lt "${exitCode}" && highestExitCode="${exitCode}"
+  done
+}
+
+endScript() {
+  printf "%s\n" "$(date -Is --utc) End of script, highest exit code ${highestExitCode}, sleeping 30s in case of..."
+  # For some reason, the status files does not have the time for being written in some HPC, because slurm kills the job too soon.
+  sleep 30
+
+  exit "${highestExitCode}"
+}
+
+####
+# Main
+####
+
+highestExitCode=0
+
+	`
+	stringToBeWritten.WriteString(sbatch_common_funcs_macros)
+
+	// Adding the workingPath as variable.
+	stringToBeWritten.WriteString("\nworkingPath=")
+	stringToBeWritten.WriteString(path)
+	stringToBeWritten.WriteString("\n")
+
 	for _, singularityCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
+
+		if singularityCommand.isInitContainer {
+			stringToBeWritten.WriteString("runInitCtn ")
+		} else {
+			stringToBeWritten.WriteString("runCtn ")
+		}
+		stringToBeWritten.WriteString(singularityCommand.containerName)
+		stringToBeWritten.WriteString(" ")
 		stringToBeWritten.WriteString(strings.Join(singularityCommand.singularityCommand[:], " "))
 
 		if singularityCommand.containerCommand != nil {
@@ -501,22 +578,13 @@ func produceSLURMScript(
 				stringToBeWritten.WriteString(shellescape.Quote(argsEntry))
 			}
 		}
-
-		stringToBeWritten.WriteString(" &> ")
-		stringToBeWritten.WriteString(path)
-		stringToBeWritten.WriteString("/")
-		stringToBeWritten.WriteString(singularityCommand.containerName)
-		stringToBeWritten.WriteString(".out; ")
-		stringToBeWritten.WriteString("echo $? > " + path + "/" + singularityCommand.containerName + ".status")
-
-		if !singularityCommand.isInitContainer {
-			// Not init containers are run in parallel.
-			stringToBeWritten.WriteString("; sleep 30 &")
-		}
 	}
 
 	stringToBeWritten.WriteString("\n")
 	stringToBeWritten.WriteString(postfix)
+
+	// Waits for all containers to end, then exit with the highest exit code.
+	stringToBeWritten.WriteString("\nwaitCtns\nendScript\n")
 
 	_, err = f.WriteString(stringToBeWritten.String())
 
