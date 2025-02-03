@@ -9,7 +9,7 @@ require (
 	github.com/alexellis/go-execute v0.6.0
 	github.com/containerd/containerd v1.7.6
 	github.com/google/uuid v1.6.0
-	github.com/intertwin-eu/interlink 0.3.8-pre1
+	github.com/intertwin-eu/interlink v0.0.0-20250203130222-964ed80a8c1a
 	github.com/sirupsen/logrus v1.9.3
 	github.com/virtual-kubelet/virtual-kubelet v1.11.0
 	go.opentelemetry.io/otel v1.27.0
