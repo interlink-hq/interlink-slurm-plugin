@@ -64,10 +64,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
-		singularityPrefix := SlurmConfigInst.SingularityPrefix
-		if singularityAnnotation, ok := metadata.Annotations["slurm-job.vk.io/singularity-commands"]; ok {
-			singularityPrefix += " " + singularityAnnotation
-		}
 
 		singularityMounts := ""
 		if singMounts, ok := metadata.Annotations["slurm-job.vk.io/singularity-mounts"]; ok {
@@ -122,14 +118,24 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		envs := prepareEnvs(spanCtx, h.Config, data, container)
 
 		image = container.Image
-		if image_uri, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
-			if !strings.HasPrefix(image, image_uri) {
-				image = image_uri + container.Image
-			} else {
-				log.G(h.Ctx).Warning("- image-uri annotation specified but already present in the image name. Prefix won't be added.")
-			}
+		imagePrefix := h.Config.ImagePrefix
+
+		imagePrefixAnnotationFound := false
+		if imagePrefixAnnotation, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
+			// This takes precedence over ImagePrefix
+			imagePrefix = imagePrefixAnnotation
+			imagePrefixAnnotationFound = true
+		}
+		log.G(h.Ctx).Info("imagePrefix from annotation? ", imagePrefixAnnotationFound, " value: ", imagePrefix)
+
+		// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
+		// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
+		if strings.HasPrefix(image, "/") {
+			log.G(h.Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
+		} else if !strings.HasPrefix(image, imagePrefix) {
+			image = imagePrefix + container.Image
 		} else {
-			log.G(h.Ctx).Info("- image-uri annotation not specified for path in remote filesystem")
+			log.G(h.Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
 		}
 
 		log.G(h.Ctx).Debug("-- Appending all commands together...")

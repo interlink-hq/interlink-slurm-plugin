@@ -98,7 +98,7 @@ SbatchPath: "/usr/bin/sbatch"
 ScancelPath: "/usr/bin/scancel"
 SqueuePath: "/usr/bin/squeue"
 CommandPrefix: ""
-SingularityPrefix: ""
+ImagePrefix: ""
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"
@@ -133,6 +133,7 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | SbatchPath | path to your Slurm's sbatch binary |
 | ScancelPath | path to your Slurm's scancel binary |
 | CommandPrefix | here you can specify a prefix for the programmatically generated script (for the slurm plugin). Basically, if you want to run anything before the script itself, put it here. |
+| ImagePrefix | here you can specify a prefix if you want to prefix the container image name. For example: "docker://". This will do something only if the prefix is not added yet, and if there is no "/" as the first letter of the image name (e.g.: "/root/image.tgz"), which would be an absolute path. Warning: using this field will not allow relative path anymore (e.g.: ./image.tgz and ImagePrefix set to "docker://" will generate "docker://./image.tgz instead of relative path. Use absolute path instead of relative path). Warning2: the the container annotation "slurm-job.vk.io/image-root" is set, this take precedence over ImagePrefix.|
 | ExportPodData | Set it to true if you want to export Pod's ConfigMaps and Secrets as mountpoints in your Singularity Container |
 | DataRootFolder | Specify where to store the exported ConfigMaps/Secrets locally |
 | Namespace | Namespace where Pods in your K8S will be registered |

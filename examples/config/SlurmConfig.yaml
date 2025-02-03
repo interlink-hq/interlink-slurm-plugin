@@ -4,8 +4,12 @@ SbatchPath: "/usr/bin/sbatch"
 ScancelPath: "/usr/bin/scancel"
 SqueuePath: "/usr/bin/squeue"
 CommandPrefix: ""
+<<<<<<< HEAD
 SingularityPrefix: ""
 SingularityPath: "singularity"
+=======
+ImagePrefix: "docker://"
+>>>>>>> 90693cc (fix #30 image prefix docker:// - replaced SingularityPrefix to)
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"
