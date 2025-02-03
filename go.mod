@@ -4,16 +4,12 @@ go 1.22
 
 toolchain go1.22.4
 
-//replace github.com/intertwin-eu/interlink => C:\Users\username\Custom\data\git\interlink
-// TODO: to be replaced when a proper tag is done in github.com/intertwin-eu/interlink
-replace github.com/intertwin-eu/interlink v0.0.0-20240829090340-24c45973f3ec => github.com/antoinetran/interlink v0.3.7-patchI45V034
-
 require (
 	al.essio.dev/pkg/shellescape v1.5.0
 	github.com/alexellis/go-execute v0.6.0
 	github.com/containerd/containerd v1.7.6
 	github.com/google/uuid v1.6.0
-	github.com/intertwin-eu/interlink v0.0.0-20240829090340-24c45973f3ec
+	github.com/intertwin-eu/interlink 0.3.8-pre1
 	github.com/sirupsen/logrus v1.9.3
 	github.com/virtual-kubelet/virtual-kubelet v1.11.0
 	go.opentelemetry.io/otel v1.27.0
