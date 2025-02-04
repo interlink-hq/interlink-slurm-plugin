@@ -285,14 +285,8 @@ func getRetrievedProjectedVolumeMap(retrievedContainer *commonIL.RetrievedContai
 			return &retrievedProjectedVolumeMap, nil
 		}
 	}
-
-	// This should not happen. Error case: building context for error log.
-	var retrievedProjectedVolumeMapKeys []string
-	for _, retrievedProjectedVolumeMap := range retrievedContainer.ProjectedVolumeMaps {
-		retrievedProjectedVolumeMapKeys = append(retrievedProjectedVolumeMapKeys, retrievedProjectedVolumeMap.Name)
-	}
-	return nil, fmt.Errorf("could not find projectedVolumeMap %s in container %s in pod %s current projectedVolumeMaps keys %s",
-		projectedVolumeMapName, containerName, podName, strings.Join(retrievedProjectedVolumeMapKeys, ","))
+	// This should not happen, either this is an error or the flag DisableProjectedVolumes is true in VK. Building context for log.
+	return nil, nil
 }
 
 func getRetrievedSecret(retrievedContainer *commonIL.RetrievedContainer, secretName string, containerName string, podName string) (*v1.Secret, error) {
@@ -411,10 +405,20 @@ func prepareMounts(
 			if err != nil {
 				return "", err
 			}
-
-			err = prepareMountsSimpleVolume(Ctx, config, container, workingPath, *retrievedProjectedVolumeMap, volumeMount, volume, &mountedDataSB)
-			if err != nil {
-				return "", err
+			if retrievedProjectedVolumeMap == nil {
+				// This should not happen, either this is an error or the flag DisableProjectedVolumes is true in VK. Building context for log.
+				var retrievedProjectedVolumeMapKeys []string
+				for _, retrievedProjectedVolumeMap := range retrievedContainer.ProjectedVolumeMaps {
+					retrievedProjectedVolumeMapKeys = append(retrievedProjectedVolumeMapKeys, retrievedProjectedVolumeMap.Name)
+				}
+				log.G(Ctx).Warningf("projected volumes not found %s in container %s in pod %s, current projectedVolumeMaps keys %s ."+
+					"either this is an error or this is because InterLink VK has DisableProjectedVolumes set to true.",
+					volume.Name, container.Name, podName, strings.Join(retrievedProjectedVolumeMapKeys, ","))
+			} else {
+				err = prepareMountsSimpleVolume(Ctx, config, container, workingPath, *retrievedProjectedVolumeMap, volumeMount, volume, &mountedDataSB)
+				if err != nil {
+					return "", err
+				}
 			}
 
 		case volume.Secret != nil:
