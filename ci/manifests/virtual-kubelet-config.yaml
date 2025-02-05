@@ -12,6 +12,7 @@ data:
     VerboseLogging: true
     ErrorsOnlyLogging: false
     ServiceAccount: "virtual-kubelet"
+    DisableProjectedVolumes: true
     Namespace: interlink 
     VKTokenFile: ""
     CPU: "100"
