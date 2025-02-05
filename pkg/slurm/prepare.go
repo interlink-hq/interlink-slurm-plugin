@@ -422,7 +422,7 @@ func prepareMounts(
 			}
 
 		case volume.Secret != nil:
-			retrievedSecret, err := getRetrievedSecret(retrievedContainer, volume.Name, container.Name, podName)
+			retrievedSecret, err := getRetrievedSecret(retrievedContainer,  volume.Secret.SecretName, container.Name, podName)
 			if err != nil {
 				return "", err
 			}
