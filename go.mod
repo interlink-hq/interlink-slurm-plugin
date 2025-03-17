@@ -9,7 +9,7 @@ require (
 	github.com/alexellis/go-execute v0.6.0
 	github.com/containerd/containerd v1.7.6
 	github.com/google/uuid v1.6.0
-	github.com/intertwin-eu/interlink v0.0.0-20250203130222-964ed80a8c1a
+	github.com/intertwin-eu/interlink v0.0.0-20250224124522-4ef0fd684e54
 	github.com/sirupsen/logrus v1.9.3
 	github.com/virtual-kubelet/virtual-kubelet v1.11.0
 	go.opentelemetry.io/otel v1.27.0
@@ -22,8 +22,6 @@ require (
 	k8s.io/apimachinery v0.29.1
 	k8s.io/client-go v0.29.1
 )
-
-replace github.com/intertwin-eu/interlink => /var/home/dciangot/git/interLink
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
