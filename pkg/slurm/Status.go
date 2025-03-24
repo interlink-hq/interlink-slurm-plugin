@@ -98,6 +98,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 				if execReturn.Stderr != "" {
 					span.AddEvent("squeue returned error " + execReturn.Stderr + " for Job " + (*h.JIDs)[uid].JID + ".\nGetting status from files")
 					log.G(h.Ctx).Error(sessionContextMessage, "ERR: ", execReturn.Stderr)
+					var statusb []byte
 					for _, ct := range pod.Spec.Containers {
 						log.G(h.Ctx).Info(sessionContextMessage, "getting exit status from  "+path+"/run-"+ct.Name+".status")
 						file, err := os.Open(path + "/run-" + ct.Name + ".status")
@@ -108,7 +109,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							return
 						}
 						defer file.Close()
-						statusb, err := io.ReadAll(file)
+						statusb, err = io.ReadAll(file)
 						if err != nil {
 							statusCode = http.StatusInternalServerError
 							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to read container status: %s", err))
@@ -121,7 +122,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							statusCode = http.StatusInternalServerError
 							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to convert container status: %s", err))
 							log.G(h.Ctx).Error()
-							status = 500
+							return
 						}
 
 						containerStatuses = append(
