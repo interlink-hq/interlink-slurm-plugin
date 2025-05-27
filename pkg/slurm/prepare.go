@@ -422,7 +422,7 @@ func prepareMounts(
 			}
 
 		case volume.Secret != nil:
-			retrievedSecret, err := getRetrievedSecret(retrievedContainer,  volume.Secret.SecretName, container.Name, podName)
+			retrievedSecret, err := getRetrievedSecret(retrievedContainer, volume.Secret.SecretName, container.Name, podName)
 			if err != nil {
 				return "", err
 			}
@@ -444,6 +444,53 @@ func prepareMounts(
 
 			for _, mntData := range edPath {
 				mountedDataSB.WriteString(mntData)
+			}
+
+		case volume.HostPath != nil:
+
+			log.G(Ctx).Info("Handling hostPath volume: ", volume.Name)
+
+			// For hostPath volumes, we just need to bind mount the host path to the container path.
+			hostPath := volume.HostPath.Path
+			containerPath := volumeMount.MountPath
+
+			if hostPath == "" || containerPath == "" {
+				err := fmt.Errorf("hostPath or containerPath is empty for volume %s in pod %s", volume.Name, podName)
+				log.G(Ctx).Error(err)
+				return "", err
+			}
+
+			if volume.Name != volumeMount.Name {
+				log.G(Ctx).Warningf("Volume name %s does not match volumeMount name %s in pod %s", volume.Name, volumeMount.Name, podName)
+				continue
+			}
+
+			if volume.HostPath.Type != nil && *volume.HostPath.Type == v1.HostPathDirectory {
+				if _, err := os.Stat(hostPath); os.IsNotExist(err) {
+					err := fmt.Errorf("hostPath directory %s does not exist for volume %s in pod %s", hostPath, volume.Name, podName)
+					log.G(Ctx).Error(err)
+					return "", err
+				}
+			} else if *volume.HostPath.Type == v1.HostPathDirectoryOrCreate {
+				if _, err := os.Stat(hostPath); os.IsNotExist(err) {
+					err = os.MkdirAll(hostPath, os.ModePerm)
+					if err != nil {
+						log.G(Ctx).Error(err)
+						return "", err
+					}
+				}
+			} else {
+				err := fmt.Errorf("unsupported hostPath type %s for volume %s in pod %s", *volume.HostPath.Type, volume.Name, podName)
+				log.G(Ctx).Error(err)
+				return "", err
+			}
+
+			mountedDataSB.WriteString(" --bind ")
+			mountedDataSB.WriteString(hostPath + ":" + containerPath)
+
+			// if the read-only flag is set, we add it to the mountedDataSB
+			if volumeMount.ReadOnly {
+				mountedDataSB.WriteString(":ro")
 			}
 
 		default:
