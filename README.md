@@ -164,6 +164,7 @@ within the SLURM config file.
 ### :storage: HostPath Volume Support
 
 The SLURM sidecar plugin has been updated to support Pods that require a HostPath volume. This allows you to run Pods that need access to specific directories on the host machine, which is useful for scenarios where data needs to be shared between the host and the Pod.
+It is also possible to specify if the volume is read-only or not, by setting the `readOnly` field in the `volumeMounts` section of the Pod spec.
 The following is an example of a Pod that uses a HostPath volume:
 
 ```yaml
