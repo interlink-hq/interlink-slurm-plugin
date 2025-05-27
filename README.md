@@ -168,6 +168,7 @@ It is also possible to specify if the volume is read-only or not, by setting the
 The following is an example of a Pod that uses a HostPath volume:
 
 ```yaml
+
 apiVersion: v1
 kind: Pod
 metadata:
