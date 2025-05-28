@@ -159,3 +159,54 @@ within the SLURM config file.
 | CUSTOMKUBECONF | path to a service account kubeconfig |
 | TSOCKS | true or false, to use tsocks library allowing proxy networking. Working on Slurm sidecar at the moment. Overwrites Tsocks. |
 | TSOCKSPATH | path to your tsocks library. Overwrites TsocksPath. |
+
+
+### :storage: HostPath Volume Support
+
+The SLURM sidecar plugin has been updated to support Pods that require a HostPath volume. This allows you to run Pods that need access to specific directories on the host machine, which is useful for scenarios where data needs to be shared between the host and the Pod.
+It is also possible to specify if the volume is read-only or not, by setting the `readOnly` field in the `volumeMounts` section of the Pod spec.
+The following is an example of a Pod that uses a HostPath volume:
+
+```yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-pod
+  namespace: interlink
+  annotations: {"slurm-job.knoc.io/flags": "--job-name=test-pod"}
+
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: vk-slurm-node # specify the virtual node name where the pod should run
+
+  containers:
+  - name: hello-world
+    image: docker://ghcr.io/grycap/cowsay
+    volumeMounts:
+    - mountPath: /foo
+      name: hostpath-volume
+      readOnly: true
+    command: ["/bin/cat"]
+    args: ["/foo/test"]
+    imagePullPolicy: Always
+    resources:
+      limits:
+        memory: "8G"
+        cpu: "2"
+  
+  volumes:
+  - name: hostpath-volume
+    hostPath:
+      path: /data/foo # directory location on host
+      type: DirectoryOrCreate # this field is optional
+
+  dnsPolicy: ClusterFirst
+
+  tolerations:
+    - key: virtual-node.interlink/no-schedule
+      operator: Exists
+      effect: NoSchedule
+      
+```
