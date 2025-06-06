@@ -952,7 +952,7 @@ func mountDataSimpleVolume(
 			containerPath = filepath.Join(volumeMount.MountPath, key)
 		}
 
-		bind := fullPath + ":" + x	 + mode + " "
+		bind := fullPath + ":" + containerPath + mode + " "
 		volumesHostToContainerPaths = append(volumesHostToContainerPaths, bind)
 
 		if os.Getenv("SHARED_FS") != "true" {
