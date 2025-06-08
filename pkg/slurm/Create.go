@@ -39,20 +39,17 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: fix interlink to send single request, no 1 item-long lists
-	var dataList []commonIL.RetrievedPodData
+	var data commonIL.RetrievedPodData
 
 	//to be changed to commonIL.CreateStruct
 	var returnedJID CreateStruct //returnValue
 	var returnedJIDBytes []byte
-	err = json.Unmarshal(bodyBytes, &dataList)
+	err = json.Unmarshal(bodyBytes, &data)
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		return
 	}
-
-	data := dataList[0]
 
 	containers := data.Pod.Spec.InitContainers
 	containers = append(containers, data.Pod.Spec.Containers...)
