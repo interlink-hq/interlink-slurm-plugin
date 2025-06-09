@@ -3,3 +3,6 @@ bin
 # Eclipse IDE
 .project
 .settings
+
+# Claude Code documentation
+CLAUDE.md
