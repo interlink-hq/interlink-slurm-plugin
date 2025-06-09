@@ -79,7 +79,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			singularityOptions = singOpts
 		}
 
-		commstr1 := []string{"singularity", "exec", "--containall", "--nv", singularityMounts, singularityOptions}
+		commstr1 := []string{h.Config.SingularityPath, "exec", "--containall", "--nv", singularityMounts, singularityOptions}
 
 		image := ""
 
