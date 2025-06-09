@@ -6,6 +6,7 @@ type SlurmConfig struct {
 	Sbatchpath        string `yaml:"SbatchPath"`
 	Scancelpath       string `yaml:"ScancelPath"`
 	Squeuepath        string `yaml:"SqueuePath"`
+	Sinfopath         string `yaml:"SinfoPath"`
 	Sidecarport       string `yaml:"SidecarPort"`
 	Socket            string `yaml:"Socket"`
 	ExportPodData     bool   `yaml:"ExportPodData"`
