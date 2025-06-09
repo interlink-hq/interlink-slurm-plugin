@@ -197,7 +197,7 @@ func main() {
 	mutex.HandleFunc("/create", SidecarAPIs.SubmitHandler)
 	mutex.HandleFunc("/delete", SidecarAPIs.StopHandler)
 	mutex.HandleFunc("/getLogs", SidecarAPIs.GetLogsHandler)
-	mutex.HandleFunc("/ping", SidecarAPIs.PingHandler)
+	mutex.HandleFunc("/system-info", SidecarAPIs.SystemInfoHandler)
 
 	SidecarAPIs.CreateDirectories()
 	SidecarAPIs.LoadJIDs()

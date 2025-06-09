@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	exec "github.com/alexellis/go-execute/pkg/v1"
 	"github.com/containerd/containerd/log"
 
 	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
@@ -15,8 +14,8 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
-// PingResponse represents the response structure for the ping endpoint
-type PingResponse struct {
+// SystemInfoResponse represents the response structure for the system-info endpoint
+type SystemInfoResponse struct {
 	Status         string `json:"status"`
 	Timestamp      string `json:"timestamp"`
 	SlurmConnected bool   `json:"slurm_connected"`
@@ -24,20 +23,20 @@ type PingResponse struct {
 	Error          string `json:"error,omitempty"`
 }
 
-// PingHandler provides a health check endpoint that includes sinfo -s output
+// SystemInfoHandler provides a system information endpoint that includes sinfo -s output
 // This allows monitoring the SLURM cluster status and node availability
-func (h *SidecarHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
+func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	_, span := tracer.Start(h.Ctx, "Ping", trace.WithAttributes(
+	_, span := tracer.Start(h.Ctx, "SystemInfo", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()
 	defer commonIL.SetDurationSpan(start, span)
 
-	log.G(h.Ctx).Info("Slurm Sidecar: received Ping call")
+	log.G(h.Ctx).Info("Slurm Sidecar: received SystemInfo call")
 
-	response := PingResponse{
+	response := SystemInfoResponse{
 		Status:    "ok",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -60,29 +59,12 @@ func (h *SidecarHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
-		log.G(h.Ctx).Error("Failed to marshal ping response: ", err)
+		log.G(h.Ctx).Error("Failed to marshal system info response: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"status":"error","error":"failed to marshal response"}`))
 		return
 	}
 
 	w.Write(responseBytes)
-	log.G(h.Ctx).Info("Ping response sent successfully")
-}
-
-// getSinfoSummary executes 'sinfo -s' command and returns the output
-func (h *SidecarHandler) getSinfoSummary() (string, error) {
-	cmd := []string{"-s"}
-	shell := exec.ExecTask{
-		Command: h.Config.Sinfopath,
-		Args:    cmd,
-		Shell:   true,
-	}
-
-	execReturn, err := shell.Execute()
-	if err != nil {
-		return "", err
-	}
-
-	return execReturn.Stdout, nil
+	log.G(h.Ctx).Info("SystemInfo response sent successfully")
 }
