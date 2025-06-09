@@ -5,6 +5,7 @@ ScancelPath: "/usr/bin/scancel"
 SqueuePath: "/usr/bin/squeue"
 CommandPrefix: ""
 SingularityPrefix: ""
+SingularityPath: "singularity"
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"
