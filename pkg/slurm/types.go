@@ -10,6 +10,7 @@ type SlurmConfig struct {
 	Socket            string `yaml:"Socket"`
 	ExportPodData     bool   `yaml:"ExportPodData"`
 	Commandprefix     string `yaml:"CommandPrefix"`
+	ImagePrefix       string `yaml:"ImagePrefix"`
 	DataRootFolder    string `yaml:"DataRootFolder"`
 	Namespace         string `yaml:"Namespace"`
 	Tsocks            bool   `yaml:"Tsocks"`

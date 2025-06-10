@@ -28,11 +28,15 @@ import (
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	spanCtx, span := tracer.Start(h.Ctx, "StatusSLURM", trace.WithAttributes(
+	spanCtx, span := tracer.Start(h.Ctx, "Status", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()
 	defer commonIL.SetDurationSpan(start, span)
+
+	// For debugging purpose, when we have many kubectl logs, we can differentiate each one.
+	sessionContext := GetSessionContext(r)
+	sessionContextMessage := GetSessionContextMessage(sessionContext)
 
 	var req []*v1.Pod
 	var resp []commonIL.PodStatus
@@ -66,7 +70,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 		if execReturn.Stderr != "" {
 			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, errors.New("unable to retrieve job status: "+execReturn.Stderr))
+			h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
 			return
 		}
 
@@ -76,11 +80,15 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			path := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
-				cmd := []string{"--noheader", "-a", "-j " + (*h.JIDs)[uid].JID}
+				// Eg of output: "R 0"
+				// With test, exit_code is better than DerivedEC, because for canceled jobs, it gives 15 while DerivedEC gives 0.
+				// states=all or else some jobs are hidden, then it is impossible to get job exit code.
+				cmd := []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j ", (*h.JIDs)[uid].JID}
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
 					Args:    cmd,
-					Shell:   true,
+					// true to be able to add prefix to squeue, but this is ugly
+					Shell: true,
 				}
 				execReturn, _ := shell.Execute()
 				timeNow = time.Now()
@@ -89,13 +97,13 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 				if execReturn.Stderr != "" {
 					span.AddEvent("squeue returned error " + execReturn.Stderr + " for Job " + (*h.JIDs)[uid].JID + ".\nGetting status from files")
-					log.G(h.Ctx).Error("ERR: ", execReturn.Stderr)
+					log.G(h.Ctx).Error(sessionContextMessage, "ERR: ", execReturn.Stderr)
 					for _, ct := range pod.Spec.Containers {
-						log.G(h.Ctx).Info("Getting exit status from  " + path + "/" + ct.Name + ".status")
+						log.G(h.Ctx).Info(sessionContextMessage, "getting exit status from  "+path+"/"+ct.Name+".status")
 						file, err := os.Open(path + "/" + ct.Name + ".status")
 						if err != nil {
 							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf("unable to retrieve container status: %s", err))
+							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to retrieve container status: %s", err))
 							log.G(h.Ctx).Error()
 							return
 						}
@@ -103,7 +111,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						statusb, err := io.ReadAll(file)
 						if err != nil {
 							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf("unable to read container status: %s", err))
+							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to read container status: %s", err))
 							log.G(h.Ctx).Error()
 							return
 						}
@@ -111,7 +119,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						status, err := strconv.Atoi(strings.Replace(string(statusb), "\n", "", -1))
 						if err != nil {
 							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf("unable to convert container status: %s", err))
+							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to convert container status: %s", err))
 							log.G(h.Ctx).Error()
 							status = 500
 						}
@@ -133,13 +141,25 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 					resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 				} else {
-					pattern := `(CD|CG|F|PD|PR|R|S|ST)`
-					re := regexp.MustCompile(pattern)
-					match := re.FindString(execReturn.Stdout)
+					statePattern := `(CD|CG|F|PD|PR|R|S|ST)`
+					stateRe := regexp.MustCompile(statePattern)
+					stateMatch := stateRe.FindString(execReturn.Stdout)
 
-					log.G(h.Ctx).Info("JID: " + (*h.JIDs)[uid].JID + " | Status: " + match + " | Pod: " + pod.Name + " | UID: " + string(pod.UID))
+					// If the job is not in terminal state, the exit code has no meaning, however squeue returns 0 for exit code in this case. Just ignore the value.
+					// Magic REGEX that matches any number from 0 to 255 included. Eg: match 2, 255, does not match 256, 02, -1.
+					// Adds whitespace because otherwise it will take too few letter. Eg: for "123", it will take only "1". With \s, it will take "123 ".
+					// Then we only keep the number part, not the last space.
+					exitCodePattern := `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
+					exitCodeRe := regexp.MustCompile(exitCodePattern)
+					// Eg: exitCodeMatchSlice = "123 "
+					exitCodeMatchSlice := exitCodeRe.FindStringSubmatch(execReturn.Stdout)
+					// Only keep the number part. Eg: exitCodeMatch = "123"
+					exitCodeMatch := exitCodeMatchSlice[1]
 
-					switch match {
+					//log.G(h.Ctx).Info("JID: " + (*h.JIDs)[uid].JID + " | Status: " + stateMatch + " | Pod: " + pod.Name + " | UID: " + string(pod.UID))
+					log.G(h.Ctx).Infof("%sJID: %s | Status: %s | Job exit code (if applicable): %s | Pod: %s | UID: %s", sessionContextMessage, (*h.JIDs)[uid].JID, stateMatch, exitCodeMatch, pod.Name, string(pod.UID))
+
+					switch stateMatch {
 					case "CD":
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
@@ -152,7 +172,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -189,7 +209,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -216,7 +236,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -259,7 +279,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -280,7 +300,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -303,7 +323,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		cachedStatus = resp
 		timer = time.Now()
 	} else {
-		log.G(h.Ctx).Debug("Cached status")
+		log.G(h.Ctx).Debug(sessionContextMessage, "Cached status")
 		resp = cachedStatus
 	}
 

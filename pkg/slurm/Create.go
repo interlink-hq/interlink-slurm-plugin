@@ -24,7 +24,7 @@ import (
 func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
-	spanCtx, span := tracer.Start(h.Ctx, "CreateSLURM", trace.WithAttributes(
+	spanCtx, span := tracer.Start(h.Ctx, "Create", trace.WithAttributes(
 		attribute.Int64("start.timestamp", start),
 	))
 	defer span.End()
@@ -39,20 +39,17 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: fix interlink to send single request, no 1 item-long lists
-	var dataList []commonIL.RetrievedPodData
+	var data commonIL.RetrievedPodData
 
 	//to be changed to commonIL.CreateStruct
 	var returnedJID CreateStruct //returnValue
 	var returnedJIDBytes []byte
-	err = json.Unmarshal(bodyBytes, &dataList)
+	err = json.Unmarshal(bodyBytes, &data)
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		return
 	}
-
-	data := dataList[0]
 
 	containers := data.Pod.Spec.InitContainers
 	containers = append(containers, data.Pod.Spec.Containers...)
@@ -64,10 +61,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
-		singularityPrefix := SlurmConfigInst.SingularityPrefix
-		if singularityAnnotation, ok := metadata.Annotations["slurm-job.vk.io/singularity-commands"]; ok {
-			singularityPrefix += " " + singularityAnnotation
-		}
 
 		singularityMounts := ""
 		if singMounts, ok := metadata.Annotations["slurm-job.vk.io/singularity-mounts"]; ok {
@@ -79,7 +72,18 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			singularityOptions = singOpts
 		}
 
-		commstr1 := []string{h.Config.SingularityPath, "exec", "--containall", "--nv", singularityMounts, singularityOptions}
+		// See https://github.com/interTwin-eu/interlink-slurm-plugin/issues/32#issuecomment-2416031030
+		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
+		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
+		singularityCommand := ""
+		if len(container.Command) != 0 {
+			singularityCommand = "exec"
+		} else {
+			singularityCommand = "run"
+		}
+
+		// no-eval is important so that singularity does not evaluate env var, because the shellquote has already done the safety check.
+		commstr1 := []string{h.Config.SingularityPath, singularityCommand, "--no-eval", "--containall", "--nv", singularityMounts, singularityOptions}
 
 		image := ""
 
@@ -98,7 +102,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			resourceLimits.Memory += MemoryLimit
 		}
 
-		mounts, err := prepareMounts(spanCtx, h.Config, data, container, filesPath)
+		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
 		log.G(h.Ctx).Debug(mounts)
 		if err != nil {
 			statusCode = http.StatusInternalServerError
@@ -106,19 +110,29 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			os.RemoveAll(filesPath)
 			return
 		}
-		
+
 		// prepareEnvs creates a file in the working directory, that must exist. This is created at prepareMounts.
 		envs := prepareEnvs(spanCtx, h.Config, data, container)
 
 		image = container.Image
-		if image_uri, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
-			if !strings.HasPrefix(image, image_uri) {
-				image = image_uri + container.Image
-			} else {
-				log.G(h.Ctx).Warning("- image-uri annotation specified but already present in the image name. Prefix won't be added.")
-			}
+		imagePrefix := h.Config.ImagePrefix
+
+		imagePrefixAnnotationFound := false
+		if imagePrefixAnnotation, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
+			// This takes precedence over ImagePrefix
+			imagePrefix = imagePrefixAnnotation
+			imagePrefixAnnotationFound = true
+		}
+		log.G(h.Ctx).Info("imagePrefix from annotation? ", imagePrefixAnnotationFound, " value: ", imagePrefix)
+
+		// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
+		// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
+		if strings.HasPrefix(image, "/") {
+			log.G(h.Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
+		} else if !strings.HasPrefix(image, imagePrefix) {
+			image = imagePrefix + container.Image
 		} else {
-			log.G(h.Ctx).Info("- image-uri annotation not specified for path in remote filesystem")
+			log.G(h.Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
 		}
 
 		log.G(h.Ctx).Debug("-- Appending all commands together...")

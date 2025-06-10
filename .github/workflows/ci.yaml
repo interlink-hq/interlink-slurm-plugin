@@ -20,7 +20,7 @@ jobs:
         with:
           workdir: ci
           verb: call
-          args: -s test --interlink-version 0.3.1 --src ../ --plugin-config ../examples/config/SlurmConfig.yaml --manifests ./manifests
+          args: -s test --interlink-version 0.3.8-pre1 --src ../ --plugin-config ../examples/config/SlurmConfig.yaml --manifests ./manifests
           cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           version: "0.13.3"
 

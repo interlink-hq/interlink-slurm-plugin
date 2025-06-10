@@ -98,7 +98,7 @@ SbatchPath: "/usr/bin/sbatch"
 ScancelPath: "/usr/bin/scancel"
 SqueuePath: "/usr/bin/squeue"
 CommandPrefix: ""
-SingularityPrefix: ""
+ImagePrefix: ""
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"
@@ -133,6 +133,7 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | SbatchPath | path to your Slurm's sbatch binary |
 | ScancelPath | path to your Slurm's scancel binary |
 | CommandPrefix | here you can specify a prefix for the programmatically generated script (for the slurm plugin). Basically, if you want to run anything before the script itself, put it here. |
+| ImagePrefix | here you can specify a prefix if you want to prefix the container image name. For example: "docker://". This will do something only if the prefix is not added yet, and if there is no "/" as the first letter of the image name (e.g.: "/root/image.tgz"), which would be an absolute path. Warning: using this field will not allow relative path anymore (e.g.: ./image.tgz and ImagePrefix set to "docker://" will generate "docker://./image.tgz instead of relative path. Use absolute path instead of relative path). Warning2: the the container annotation "slurm-job.vk.io/image-root" is set, this take precedence over ImagePrefix.|
 | ExportPodData | Set it to true if you want to export Pod's ConfigMaps and Secrets as mountpoints in your Singularity Container |
 | DataRootFolder | Specify where to store the exported ConfigMaps/Secrets locally |
 | Namespace | Namespace where Pods in your K8S will be registered |
@@ -158,3 +159,54 @@ within the SLURM config file.
 | CUSTOMKUBECONF | path to a service account kubeconfig |
 | TSOCKS | true or false, to use tsocks library allowing proxy networking. Working on Slurm sidecar at the moment. Overwrites Tsocks. |
 | TSOCKSPATH | path to your tsocks library. Overwrites TsocksPath. |
+
+
+### :storage: HostPath Volume Support
+
+The SLURM sidecar plugin has been updated to support Pods that require a HostPath volume. This allows you to run Pods that need access to specific directories on the host machine, which is useful for scenarios where data needs to be shared between the host and the Pod.
+It is also possible to specify if the volume is read-only or not, by setting the `readOnly` field in the `volumeMounts` section of the Pod spec.
+The following is an example of a Pod that uses a HostPath volume:
+
+```yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostpath-pod
+  namespace: interlink
+  annotations: {"slurm-job.knoc.io/flags": "--job-name=test-pod"}
+
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: vk-slurm-node # specify the virtual node name where the pod should run
+
+  containers:
+  - name: hello-world
+    image: docker://ghcr.io/grycap/cowsay
+    volumeMounts:
+    - mountPath: /foo
+      name: hostpath-volume
+      readOnly: true
+    command: ["/bin/cat"]
+    args: ["/foo/test"]
+    imagePullPolicy: Always
+    resources:
+      limits:
+        memory: "8G"
+        cpu: "2"
+  
+  volumes:
+  - name: hostpath-volume
+    hostPath:
+      path: /data/foo # directory location on host
+      type: DirectoryOrCreate # this field is optional
+
+  dnsPolicy: ClusterFirst
+
+  tolerations:
+    - key: virtual-node.interlink/no-schedule
+      operator: Exists
+      effect: NoSchedule
+      
+```
