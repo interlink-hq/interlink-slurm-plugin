@@ -58,6 +58,26 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If request is empty (no pods requested), return system info with sinfo -s output
+	if len(req) == 0 {
+		log.G(h.Ctx).Info("Empty GetStatus request detected, returning system info")
+		
+		sinfoOutput, err := h.getSinfoSummary()
+		if err != nil {
+			log.G(h.Ctx).Warning("Failed to execute sinfo command: ", err)
+			statusCode = http.StatusInternalServerError
+			h.handleError(spanCtx, w, statusCode, err)
+			return
+		}
+
+		// Return sinfo output as response
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(sinfoOutput))
+		log.G(h.Ctx).Info("System info (sinfo -s) returned for empty status request")
+		return
+	}
+
 	if timeNow.Sub(timer) >= time.Second*10 {
 		cmd := []string{"--me"}
 		shell := exec.ExecTask{
@@ -340,4 +360,21 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Write(bodyBytes)
 	}
+}
+
+// getSinfoSummary executes 'sinfo -s' command and returns the output
+func (h *SidecarHandler) getSinfoSummary() (string, error) {
+	cmd := []string{"-s"}
+	shell := exec.ExecTask{
+		Command: h.Config.Sinfopath,
+		Args:    cmd,
+		Shell:   true,
+	}
+
+	execReturn, err := shell.Execute()
+	if err != nil {
+		return "", err
+	}
+
+	return execReturn.Stdout, nil
 }

@@ -6,6 +6,7 @@ type SlurmConfig struct {
 	Sbatchpath        string `yaml:"SbatchPath"`
 	Scancelpath       string `yaml:"ScancelPath"`
 	Squeuepath        string `yaml:"SqueuePath"`
+	Sinfopath         string `yaml:"SinfoPath"`
 	Sidecarport       string `yaml:"SidecarPort"`
 	Socket            string `yaml:"Socket"`
 	ExportPodData     bool   `yaml:"ExportPodData"`
@@ -19,6 +20,8 @@ type SlurmConfig struct {
 	BashPath          string `yaml:"BashPath"`
 	VerboseLogging    bool   `yaml:"VerboseLogging"`
 	ErrorsOnlyLogging bool   `yaml:"ErrorsOnlyLogging"`
+	SingularityPrefix string `yaml:"SingularityPrefix"`
+	SingularityPath   string `yaml:"SingularityPath"`
 	set               bool
 }
 
