@@ -6,6 +6,7 @@ SqueuePath: "/usr/bin/squeue"
 SinfoPath: "/usr/bin/sinfo"
 CommandPrefix: ""
 SingularityPrefix: ""
+SingularityPath: "singularity"
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"

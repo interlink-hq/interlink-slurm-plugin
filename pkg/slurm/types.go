@@ -20,6 +20,8 @@ type SlurmConfig struct {
 	BashPath          string `yaml:"BashPath"`
 	VerboseLogging    bool   `yaml:"VerboseLogging"`
 	ErrorsOnlyLogging bool   `yaml:"ErrorsOnlyLogging"`
+	SingularityPrefix string `yaml:"SingularityPrefix"`
+	SingularityPath   string `yaml:"SingularityPath"`
 	set               bool
 }
 
