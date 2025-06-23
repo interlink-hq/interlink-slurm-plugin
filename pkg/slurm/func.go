@@ -69,6 +69,14 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			SlurmConfigInst.Scancelpath = os.Getenv("SCANCELPATH")
 		}
 
+		if os.Getenv("SINFOPATH") != "" {
+			SlurmConfigInst.Sinfopath = os.Getenv("SINFOPATH")
+		}
+
+		if os.Getenv("SINGULARITYPATH") != "" {
+			SlurmConfigInst.SingularityPath = os.Getenv("SINGULARITYPATH")
+		}
+
 		if os.Getenv("TSOCKS") != "" {
 			if os.Getenv("TSOCKS") != "true" && os.Getenv("TSOCKS") != "false" {
 				fmt.Println("export TSOCKS as true or false")
@@ -89,6 +97,16 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			}
 
 			SlurmConfigInst.Tsockspath = path
+		}
+
+		// Set default SingularityPath if not configured
+		if SlurmConfigInst.SingularityPath == "" {
+			SlurmConfigInst.SingularityPath = "singularity"
+		}
+
+		// Set default SinfoPath if not configured
+		if SlurmConfigInst.Sinfopath == "" {
+			SlurmConfigInst.Sinfopath = "/usr/bin/sinfo"
 		}
 
 		SlurmConfigInst.set = true
