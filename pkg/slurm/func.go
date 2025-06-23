@@ -69,6 +69,10 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			SlurmConfigInst.Scancelpath = os.Getenv("SCANCELPATH")
 		}
 
+		if os.Getenv("SINGULARITYPATH") != "" {
+			SlurmConfigInst.SingularityPath = os.Getenv("SINGULARITYPATH")
+		}
+
 		if os.Getenv("TSOCKS") != "" {
 			if os.Getenv("TSOCKS") != "true" && os.Getenv("TSOCKS") != "false" {
 				fmt.Println("export TSOCKS as true or false")
@@ -89,6 +93,11 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			}
 
 			SlurmConfigInst.Tsockspath = path
+		}
+
+		// Set default SingularityPath if not configured
+		if SlurmConfigInst.SingularityPath == "" {
+			SlurmConfigInst.SingularityPath = "singularity"
 		}
 
 		SlurmConfigInst.set = true
