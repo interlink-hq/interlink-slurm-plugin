@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	exec "github.com/alexellis/go-execute/pkg/v1"
 	"github.com/containerd/containerd/log"
 
 	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
