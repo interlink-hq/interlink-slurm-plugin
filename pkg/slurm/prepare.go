@@ -529,6 +529,8 @@ func produceSLURMScript(
 	metadata metav1.ObjectMeta,
 	commands []SingularityCommand,
 	resourceLimits ResourceLimits,
+	isDefaultCPU bool,
+	isDefaultRam bool,
 ) (string, error) {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
@@ -576,8 +578,13 @@ func produceSLURMScript(
 		}
 	}
 
-	sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
-	sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+	if !isDefaultCPU {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+	}
+
+	if !isDefaultRam {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
+	}
 
 	for _, slurmFlag := range sbatchFlagsFromArgo {
 		sbatchFlagsAsString += "\n#SBATCH " + slurmFlag

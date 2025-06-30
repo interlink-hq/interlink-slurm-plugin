@@ -59,6 +59,9 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	var singularity_command_pod []SingularityCommand
 	var resourceLimits ResourceLimits
 
+	isDefaultCPU := false
+	isDefaultRam := false
+
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
 
@@ -89,17 +92,33 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		CPULimit, _ := container.Resources.Limits.Cpu().AsInt64()
 		MemoryLimit, _ := container.Resources.Limits.Memory().AsInt64()
+
 		if CPULimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
 			resourceLimits.CPU += 1
+			isDefaultCPU = true
 		} else {
-			resourceLimits.CPU += CPULimit
+			if CPULimit > resourceLimits.CPU {
+				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(CPULimit, 10))
+				resourceLimits.CPU = CPULimit
+			} else {
+				log.G(h.Ctx).Info("Keeping CPU limit to " + strconv.FormatInt(resourceLimits.CPU, 10))
+			}
+			isDefaultCPU = false
 		}
 		if MemoryLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory += 1024 * 1024
+			isDefaultRam = true
 		} else {
 			resourceLimits.Memory += MemoryLimit
+			if MemoryLimit > resourceLimits.Memory {
+				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(MemoryLimit, 10))
+				resourceLimits.Memory = MemoryLimit
+			} else {
+				log.G(h.Ctx).Info("Keeping Memory limit to " + strconv.FormatInt(resourceLimits.Memory, 10))
+			}
+			isDefaultRam = false
 		}
 
 		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
@@ -163,7 +182,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits)
+	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
 	if err != nil {
 		log.G(h.Ctx).Error(err)
 		os.RemoveAll(filesPath)
