@@ -604,6 +604,10 @@ func produceSLURMScript(
 		prefix += "\nexport TSOCKS_CONF_FILE=.tmp/" + podUID + "_tsocks.conf && export LD_PRELOAD=" + config.Tsockspath
 	}
 
+	if podIP, ok := metadata.Annotations["interlink.eu/pod-ip"]; ok {
+		prefix += "\n" + "export POD_IP=" + podIP + "\n"
+	}
+	
 	if config.Commandprefix != "" {
 		prefix += "\n" + config.Commandprefix
 	}
