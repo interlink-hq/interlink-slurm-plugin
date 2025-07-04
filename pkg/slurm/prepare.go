@@ -34,9 +34,11 @@ type SidecarHandler struct {
 	Ctx    context.Context
 }
 
-var prefix string
-var timer time.Time
-var cachedStatus []commonIL.PodStatus
+var (
+	prefix       string
+	timer        time.Time
+	cachedStatus []commonIL.PodStatus
+)
 
 type JidStruct struct {
 	PodUID       string    `json:"PodUID"`
@@ -545,6 +547,23 @@ func produceSLURMScript(
 	}
 	postfix := ""
 
+	fJob, err := os.Create(path + "/job.slurm")
+	if err != nil {
+		log.G(Ctx).Error("Unable to create file ", path, "/job.slurm")
+		log.G(Ctx).Error(err)
+		return "", err
+	}
+	defer fJob.Close()
+
+	err = os.Chmod(path+"/job.slurm", 0774)
+	if err != nil {
+		log.G(Ctx).Error("Unable to chmod file ", path, "/job.slurm")
+		log.G(Ctx).Error(err)
+		return "", err
+	} else {
+		log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.slurm")
+	}
+
 	f, err := os.Create(path + "/job.sh")
 	if err != nil {
 		log.G(Ctx).Error("Unable to create file ", path, "/job.sh")
@@ -563,7 +582,7 @@ func produceSLURMScript(
 	}
 
 	var sbatchFlagsFromArgo []string
-	var sbatchFlagsAsString = ""
+	sbatchFlagsAsString := ""
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
 		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
 	}
@@ -607,7 +626,7 @@ func produceSLURMScript(
 	if podIP, ok := metadata.Annotations["interlink.eu/pod-ip"]; ok {
 		prefix += "\n" + "export POD_IP=" + podIP + "\n"
 	}
-	
+
 	if config.Commandprefix != "" {
 		prefix += "\n" + config.Commandprefix
 	}
@@ -621,14 +640,22 @@ func produceSLURMScript(
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		prefix +
+		prefix + " " + f.Name() +
 		"\n"
 
-	log.G(Ctx).Debug("--- Writing file")
+	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
 
+	var jobStringToBeWritten strings.Builder
 	var stringToBeWritten strings.Builder
 
-	stringToBeWritten.WriteString(sbatch_macros)
+	jobStringToBeWritten.WriteString(sbatch_macros)
+	_, err = fJob.WriteString(jobStringToBeWritten.String())
+	if err != nil {
+		log.G(Ctx).Error(err)
+		return "", err
+	} else {
+		log.G(Ctx).Debug("---- Written job.slurm file")
+	}
 
 	sbatch_common_funcs_macros := `
 
@@ -763,7 +790,7 @@ highestExitCode=0
 		log.G(Ctx).Error(err)
 		return "", err
 	} else {
-		log.G(Ctx).Debug("---- Written file")
+		log.G(Ctx).Debug("---- Written job.sh file")
 	}
 
 	duration := time.Now().UnixMicro() - start
@@ -920,7 +947,6 @@ func mountDataSimpleVolume(
 	volumeType string,
 	fileMode os.FileMode,
 ) ([]string, []string, error) {
-
 	span.AddEvent("Preparing " + volumeType + " mount")
 
 	// Slice of elements of "[host path]:[container volume mount path]"
@@ -928,7 +954,6 @@ func mountDataSimpleVolume(
 	var envVarNames []string
 
 	err := os.RemoveAll(path + "/" + volumeType + "/" + volumeMount.Name)
-
 	if err != nil {
 		log.G(Ctx).Error("Unable to delete root folder")
 		return []string{}, nil, err
@@ -946,8 +971,8 @@ func mountDataSimpleVolume(
 		} else {
 			mode = ":rw"
 		}
-		//fullPath += (":" + volumeMount.MountPath + "/" + key + mode + " ")
-		//volumesHostToContainerPaths = append(volumesHostToContainerPaths, fullPath)
+		// fullPath += (":" + volumeMount.MountPath + "/" + key + mode + " ")
+		// volumesHostToContainerPaths = append(volumesHostToContainerPaths, fullPath)
 
 		var containerPath string
 		if volumeMount.SubPath != "" {
@@ -1050,7 +1075,7 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 	span := trace.SpanFromContext(Ctx)
 	start := time.Now().UnixMicro()
 	if config.ExportPodData {
-		//for _, mountSpec := range container.VolumeMounts {
+		// for _, mountSpec := range container.VolumeMounts {
 		switch retrievedDataObjectCasted := retrievedDataObject.(type) {
 		case v1.ConfigMap:
 			var volumeType string
