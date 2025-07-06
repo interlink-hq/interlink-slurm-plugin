@@ -795,11 +795,11 @@ highestExitCode=0
 
 	duration := time.Now().UnixMicro() - start
 	span.AddEvent("Produced SLURM script", trace.WithAttributes(
-		attribute.String("produceslurmscript.path", f.Name()),
+		attribute.String("produceslurmscript.path", fJob.Name()),
 		attribute.Int64("preparemounts.duration", duration),
 	))
 
-	return f.Name(), nil
+	return fJob.Name(), nil
 }
 
 // SLURMBatchSubmit submits the job provided in the path argument to the SLURM queue.
