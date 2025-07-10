@@ -683,11 +683,11 @@ waitFileExist() {
 runInitCtn() {
   ctn="$1"
   shift
-  printf "%s\n" "$(date -Is --utc) Running ${ctn}..."
-  time ( "$@" ) &> ${workingPath}/${ctn}.out
+  printf "%s\n" "$(date -Is --utc) Running init container ${ctn}..."
+  time ( "$@" ) &> ${workingPath}/init-${ctn}.out
   exitCode="$?"
-  printf "%s\n" "${exitCode}" > ${workingPath}/${ctn}.status
-  waitFileExist "${workingPath}/${ctn}.status"
+  printf "%s\n" "${exitCode}" > ${workingPath}/init-${ctn}.status
+  waitFileExist "${workingPath}/init-${ctn}.status"
   if test "${exitCode}" != 0 ; then
     printf "%s\n" "$(date -Is --utc) InitContainer ${ctn} failed with status ${exitCode}" >&2
     # InitContainers are fail-fast.
@@ -699,7 +699,7 @@ runCtn() {
   ctn="$1"
   shift
   # This subshell below is NOT POSIX shell compatible, it needs for example bash.
-  time ( "$@" ) &> ${workingPath}/${ctn}.out &
+  time ( "$@" ) &> ${workingPath}/run-${ctn}.out &
   pid="$!"
   printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
   pidCtns="${pidCtns} ${pid}:${ctn}"
@@ -716,11 +716,15 @@ waitCtns() {
     printf "%s\n" "$(date -Is --utc) Waiting for container ${ctn} pid ${pid}..."
     wait "${pid}"
     exitCode="$?"
-    printf "%s\n" "${exitCode}" > "${workingPath}/${ctn}.status"
+    printf "%s\n" "${exitCode}" > "${workingPath}/run-${ctn}.status"
     printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} ended with status ${exitCode}."
 	waitFileExist "${workingPath}/${ctn}.status"
-    test "${highestExitCode}" -lt "${exitCode}" && highestExitCode="${exitCode}"
   done
+-  # Compatibility with jobScript, read the result of conainer .status files
+-  for filestatus in $(ls *.status) ; do
+-		exitCode=$(cat "$filestatus")
+    test "${highestExitCode}" -lt "${exitCode}" && highestExitCode="${exitCode}"
+	done
 }
 
 endScript() {
@@ -743,7 +747,10 @@ highestExitCode=0
 	stringToBeWritten.WriteString(sbatch_common_funcs_macros)
 
 	// Adding the workingPath as variable.
-	stringToBeWritten.WriteString("\nworkingPath=")
+	stringToBeWritten.WriteString("\nexport workingPath=")
+	stringToBeWritten.WriteString(path)
+	stringToBeWritten.WriteString("\n")
+	stringToBeWritten.WriteString("\nexport SANDBOX=")
 	stringToBeWritten.WriteString(path)
 	stringToBeWritten.WriteString("\n")
 
@@ -799,7 +806,7 @@ highestExitCode=0
 		attribute.Int64("preparemounts.duration", duration),
 	))
 
-	return f.Name(), nil
+	return fJob.Name(), nil
 }
 
 // SLURMBatchSubmit submits the job provided in the path argument to the SLURM queue.
@@ -1174,32 +1181,33 @@ func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid stri
 
 // getExitCode returns the exit code read from the .status file of a specific container and returns it as an int32 number
 func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, sessionContextMessage string) (int32, error) {
-	statusFilePath := path + "/" + ctName + ".status"
+	statusFilePath := path + "/run-" + ctName + ".status"
 	exitCode, err := os.ReadFile(statusFilePath)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			// Case job terminated before the container script has the time to write status file (eg: canceled jobs).
-			log.G(ctx).Warning(sessionContextMessage, "file ", statusFilePath, " not found despite the job being in terminal state. Workaround: using Slurm job exit code:", exitCodeMatch)
+		statusFilePath = path + "/init-" + ctName + ".status"
+		exitCode, err = os.ReadFile(statusFilePath)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// Case job terminated before the container script has the time to write status file (eg: canceled jobs).
+				log.G(ctx).Warning(sessionContextMessage, "file ", statusFilePath, " not found despite the job being in terminal state. Workaround: using Slurm job exit code:", exitCodeMatch)
 
-			exitCodeInt, errAtoi := strconv.Atoi(exitCodeMatch)
-			if errAtoi != nil {
-				errWithContext := fmt.Errorf(sessionContextMessage+"error during Atoi() of getExitCode() of file %s exitCodeMatch: %s error: %s %w", statusFilePath, exitCodeMatch, fmt.Sprintf("%#v", errAtoi), errAtoi)
-				log.G(ctx).Error(errWithContext)
-				return 11, errWithContext
+				exitCodeInt, errAtoi := strconv.Atoi(exitCodeMatch)
+				if errAtoi != nil {
+					errWithContext := fmt.Errorf(sessionContextMessage+"error during Atoi() of getExitCode() of file %s exitCodeMatch: %s error: %s %w", statusFilePath, exitCodeMatch, fmt.Sprintf("%#v", errAtoi), errAtoi)
+					log.G(ctx).Error(errWithContext)
+					return 11, errWithContext
+				}
+				errWriteFile := os.WriteFile(statusFilePath, []byte(exitCodeMatch), 0644)
+				if errWriteFile != nil {
+					errWithContext := fmt.Errorf(sessionContextMessage+"error during WriteFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", errWriteFile), errWriteFile)
+					log.G(ctx).Error(errWithContext)
+					return 12, errWithContext
+				}
+				return int32(exitCodeInt), nil
+			} else {
+				errWithContext := fmt.Errorf(sessionContextMessage+"error during ReadFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", err), err)
+				return 21, errWithContext
 			}
-
-			errWriteFile := os.WriteFile(statusFilePath, []byte(exitCodeMatch), 0644)
-			if errWriteFile != nil {
-				errWithContext := fmt.Errorf(sessionContextMessage+"error during WriteFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", errWriteFile), errWriteFile)
-				log.G(ctx).Error(errWithContext)
-				return 12, errWithContext
-			}
-
-			return int32(exitCodeInt), nil
-		} else {
-			errWithContext := fmt.Errorf(sessionContextMessage+"error during ReadFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", err), err)
-			log.G(ctx).Error(errWithContext)
-			return 21, errWithContext
 		}
 	}
 	exitCodeInt, err := strconv.Atoi(strings.Replace(string(exitCode), "\n", "", -1))
