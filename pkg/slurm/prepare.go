@@ -631,6 +631,10 @@ func produceSLURMScript(
 		prefix += "\n" + config.Commandprefix
 	}
 
+	if wstunnelClientCommands, ok := metadata.Annotations["interlink.eu/wstunnel-client-commands"]; ok {
+		prefix += "\n" + wstunnelClientCommands + " > wstunnel_client.log 2>&1 &"
+	}
+
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
 		prefix += "\n" + preExecAnnotations
 	}
