@@ -724,11 +724,11 @@ waitCtns() {
     printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} ended with status ${exitCode}."
 	waitFileExist "${workingPath}/${ctn}.status"
   done
--  # Compatibility with jobScript, read the result of conainer .status files
--  for filestatus in $(ls *.status) ; do
--		exitCode=$(cat "$filestatus")
+  # Compatibility with jobScript, read the result of conainer .status files
+  for filestatus in $(ls *.status) ; do
+    exitCode=$(cat "$filestatus")
     test "${highestExitCode}" -lt "${exitCode}" && highestExitCode="${exitCode}"
-	done
+  done
 }
 
 endScript() {
