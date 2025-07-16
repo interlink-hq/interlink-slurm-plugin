@@ -111,14 +111,14 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 				execReturn, _ := shell.Execute()
 				timeNow = time.Now()
 
-				//log.G(h.Ctx).Info("Pod: " + jid.PodUID + " | JID: " + jid.JID)
+				// log.G(h.Ctx).Info("Pod: " + jid.PodUID + " | JID: " + jid.JID)
 
 				if execReturn.Stderr != "" {
 					span.AddEvent("squeue returned error " + execReturn.Stderr + " for Job " + (*h.JIDs)[uid].JID + ".\nGetting status from files")
 					log.G(h.Ctx).Error(sessionContextMessage, "ERR: ", execReturn.Stderr)
 					for _, ct := range pod.Spec.Containers {
-						log.G(h.Ctx).Info(sessionContextMessage, "getting exit status from  "+path+"/"+ct.Name+".status")
-						file, err := os.Open(path + "/" + ct.Name + ".status")
+						log.G(h.Ctx).Info(sessionContextMessage, "getting exit status from  "+path+"/run-"+ct.Name+".status")
+						file, err := os.Open(path + "/run-" + ct.Name + ".status")
 						if err != nil {
 							statusCode = http.StatusInternalServerError
 							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to retrieve container status: %s", err))
@@ -174,7 +174,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					// Only keep the number part. Eg: exitCodeMatch = "123"
 					exitCodeMatch := exitCodeMatchSlice[1]
 
-					//log.G(h.Ctx).Info("JID: " + (*h.JIDs)[uid].JID + " | Status: " + stateMatch + " | Pod: " + pod.Name + " | UID: " + string(pod.UID))
+					// log.G(h.Ctx).Info("JID: " + (*h.JIDs)[uid].JID + " | Status: " + stateMatch + " | Pod: " + pod.Name + " | UID: " + string(pod.UID))
 					log.G(h.Ctx).Infof("%sJID: %s | Status: %s | Job exit code (if applicable): %s | Pod: %s | UID: %s", sessionContextMessage, (*h.JIDs)[uid].JID, stateMatch, exitCodeMatch, pod.Name, string(pod.UID))
 
 					switch stateMatch {
@@ -216,7 +216,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 					case "F":
-						if (*h.JIDs)[uid].EndTime.IsZero() {
+						// patch to fix Leonardo temporary F status after submit
+						_, err := os.Stat(path + "/FinishedAt.time")
+						if (*h.JIDs)[uid].EndTime.IsZero() && errors.Is(err, os.ErrNotExist) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
