@@ -599,10 +599,16 @@ func produceSLURMScript(
 
 	if !isDefaultCPU {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+	} else {
+		log.G(Ctx).Info("Using default CPU limit of 1")
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
 	}
 
 	if !isDefaultRam {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
+	} else {
+		log.G(Ctx).Info("Using default Memory limit of 1MB")
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
 	}
 
 	for _, slurmFlag := range sbatchFlagsFromArgo {
