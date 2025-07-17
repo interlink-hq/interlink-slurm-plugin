@@ -65,6 +65,40 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	maxCPULimit := 0
 	maxMemoryLimit := 0
 
+	cpuLimit := int64(0)
+	memoryLimit := int64(0)
+
+	// check if in the annotions slurm-job.knoc.io/flags there is --cpus-per-task= or --mem=, if so, use those values
+	if flags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
+		log.G(h.Ctx).Info("Found slurm-job.vk.io/flags annotation: ", flags)
+		for _, flag := range strings.Split(flags, " ") {
+			if strings.HasPrefix(flag, "--cpus-per-task=") {
+				cpuValue := strings.TrimPrefix(flag, "--cpus-per-task=")
+				cpuLimitFromFlag, err := strconv.Atoi(cpuValue)
+				if err != nil {
+					log.G(h.Ctx).Error("Invalid CPU limit in annotation: ", cpuValue)
+					continue
+				}
+				if cpuLimit > 0 {
+					cpuLimit = int64(cpuLimitFromFlag)
+					log.G(h.Ctx).Info("Using CPU limit from annotation: ", cpuLimit)
+				}
+			}
+			if strings.HasPrefix(flag, "--mem=") {
+				memValue := strings.TrimPrefix(flag, "--mem=")
+				memLimitFromFlag, err := strconv.Atoi(memValue)
+				if err != nil {
+					log.G(h.Ctx).Error("Invalid Memory limit in annotation: ", memValue)
+					continue
+				}
+				if memLimitFromFlag > 0 {
+					memoryLimit = int64(memLimitFromFlag)
+					log.G(h.Ctx).Info("Using Memory limit from annotation: ", memoryLimit)
+				}
+			}
+		}
+	}
+
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
 
@@ -95,34 +129,34 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		image := ""
 
-		CPULimit, _ := container.Resources.Limits.Cpu().AsInt64()
-		MemoryLimit, _ := container.Resources.Limits.Memory().AsInt64()
+		cpuLimit, _ = container.Resources.Limits.Cpu().AsInt64()
+		memoryLimit, _ = container.Resources.Limits.Memory().AsInt64()
 
-		if CPULimit == 0 {
+		if cpuLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
 			resourceLimits.CPU += 1
 			isDefaultCPU = true
 		} else {
-			if CPULimit > resourceLimits.CPU && maxCPULimit < int(CPULimit) {
-				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(CPULimit, 10))
-				resourceLimits.CPU = CPULimit
-				maxCPULimit = int(CPULimit)
+			if cpuLimit > resourceLimits.CPU && maxCPULimit < int(cpuLimit) {
+				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimit, 10))
+				resourceLimits.CPU = cpuLimit
+				maxCPULimit = int(cpuLimit)
 			} else {
 				log.G(h.Ctx).Info("Keeping CPU limit to " + strconv.FormatInt(resourceLimits.CPU, 10))
 			}
 			isDefaultCPU = false
 		}
 
-		if MemoryLimit == 0 {
+		if memoryLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory += 1024 * 1024
 			isDefaultRam = true
 		} else {
 			//resourceLimits.Memory += MemoryLimit
-			if MemoryLimit > resourceLimits.Memory && maxMemoryLimit < int(MemoryLimit) {
-				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(MemoryLimit, 10))
-				resourceLimits.Memory = MemoryLimit
-				maxMemoryLimit = int(MemoryLimit)
+			if memoryLimit > resourceLimits.Memory && maxMemoryLimit < int(memoryLimit) {
+				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimit, 10))
+				resourceLimits.Memory = memoryLimit
+				maxMemoryLimit = int(memoryLimit)
 			} else {
 				log.G(h.Ctx).Info("Keeping Memory limit to " + strconv.FormatInt(resourceLimits.Memory, 10))
 			}
