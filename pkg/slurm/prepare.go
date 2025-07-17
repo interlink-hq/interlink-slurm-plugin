@@ -610,6 +610,7 @@ func produceSLURMScript(
 
 	if !isDefaultCPU {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
 	} else {
 		log.G(Ctx).Info("Using default CPU limit of 1")
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")

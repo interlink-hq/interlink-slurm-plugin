@@ -176,8 +176,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 				resourceLimits.CPU = cpuLimit
 				maxCPULimit = int(cpuLimit)
 				isDefaultCPU = false
-			} else {
-				log.G(h.Ctx).Info("Keeping CPU limit to " + strconv.FormatInt(resourceLimits.CPU, 10))
 			}
 		}
 
@@ -191,8 +189,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 				resourceLimits.Memory = memoryLimit
 				maxMemoryLimit = int(memoryLimit)
 				isDefaultRam = false
-			} else {
-				log.G(h.Ctx).Info("Keeping Memory limit to " + strconv.FormatInt(resourceLimits.Memory, 10))
 			}
 		}
 
