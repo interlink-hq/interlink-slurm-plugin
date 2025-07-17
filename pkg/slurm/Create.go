@@ -59,8 +59,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	var singularity_command_pod []SingularityCommand
 	var resourceLimits ResourceLimits
 
-	isDefaultCPU := false
-	isDefaultRam := false
+	isDefaultCPU := true
+	isDefaultRam := true
 
 	maxCPULimit := 0
 	maxMemoryLimit := 0
@@ -80,6 +80,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if cpuLimit > 0 {
+					isDefaultCPU = false
 					cpuLimit = int64(cpuLimitFromFlag)
 					log.G(h.Ctx).Info("Using CPU limit from annotation: ", cpuLimit)
 				}
@@ -92,6 +93,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				if memLimitFromFlag > 0 {
+					isDefaultRam = false
 					memoryLimit = int64(memLimitFromFlag)
 					log.G(h.Ctx).Info("Using Memory limit from annotation: ", memoryLimit)
 				}
@@ -135,32 +137,30 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		if cpuLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
 			resourceLimits.CPU += 1
-			isDefaultCPU = true
 		} else {
 			if cpuLimit > resourceLimits.CPU && maxCPULimit < int(cpuLimit) {
 				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimit, 10))
 				resourceLimits.CPU = cpuLimit
 				maxCPULimit = int(cpuLimit)
+				isDefaultCPU = false
 			} else {
 				log.G(h.Ctx).Info("Keeping CPU limit to " + strconv.FormatInt(resourceLimits.CPU, 10))
 			}
-			isDefaultCPU = false
 		}
 
 		if memoryLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory += 1024 * 1024
-			isDefaultRam = true
 		} else {
 			//resourceLimits.Memory += MemoryLimit
 			if memoryLimit > resourceLimits.Memory && maxMemoryLimit < int(memoryLimit) {
 				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimit, 10))
 				resourceLimits.Memory = memoryLimit
 				maxMemoryLimit = int(memoryLimit)
+				isDefaultRam = false
 			} else {
 				log.G(h.Ctx).Info("Keeping Memory limit to " + strconv.FormatInt(resourceLimits.Memory, 10))
 			}
-			isDefaultRam = false
 		}
 
 		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
