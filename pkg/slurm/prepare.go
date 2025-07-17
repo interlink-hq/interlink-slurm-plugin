@@ -585,19 +585,19 @@ func produceSLURMScript(
 
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
-	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-		// ignore the --cpus-per-task and --mem flags, since they have been set already
-		if strings.Contains(slurmFlags, "--cpus-per-task") || strings.Contains(slurmFlags, "--mem") {
+	if raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
+		slurmFlags := raw
+
+		re := regexp.MustCompile(`--(?:cpus-per-task|mem)(?:[ =]\S+)?`)
+		if re.MatchString(slurmFlags) {
 			log.G(Ctx).Info("Ignoring --cpus-per-task and --mem flags from annotations, since they are set already")
-			re := regexp.MustCompile(`--cpus-per-task\s+\d+`)
-			slurmFlags = re.ReplaceAllString(slurmFlags, "")
-			re = regexp.MustCompile(`--mem\s+\d+`)
 			slurmFlags = re.ReplaceAllString(slurmFlags, "")
 		}
-		// log the flags
-		log.G(Ctx).Info("Using SLURM flags from annotations: ", slurmFlags)
-		// split the flags by space and remove empty strings
-		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
+
+		slurmFlags = strings.TrimSpace(slurmFlags)
+		sbatchFlagsFromArgo = strings.Fields(slurmFlags)
+
+		log.G(Ctx).Info("Using SLURM flags from annotations:", sbatchFlagsFromArgo)
 	}
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
