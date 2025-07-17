@@ -22,25 +22,25 @@ import (
 )
 
 func parseMem(val string) (int64, error) {
-    re := regexp.MustCompile(`^(\d+)([KMG]?)$`)
-    m := re.FindStringSubmatch(val)
-    if len(m) != 3 {
-        return 0, errors.New("invalid memory format: " + val)
-    }
-    n, err := strconv.ParseInt(m[1], 10, 64)
-    if err != nil {
-        return 0, err
-    }
-    switch m[2] {
-    case "G":
-        return n * 1024 * 1024 * 1024, nil
-    case "M":
-        return n * 1024 * 1024, nil
-    case "K":
-        return n * 1024, nil
-    default:
-        return n, nil
-    }
+	re := regexp.MustCompile(`^(\d+)([KMG]?)$`)
+	m := re.FindStringSubmatch(val)
+	if len(m) != 3 {
+		return 0, errors.New("invalid memory format: " + val)
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	switch m[2] {
+	case "G":
+		return n * 1024 * 1024 * 1024, nil
+	case "M":
+		return n * 1024 * 1024, nil
+	case "K":
+		return n * 1024, nil
+	default:
+		return n, nil
+	}
 }
 
 // SubmitHandler generates and submits a SLURM batch script according to provided data.
@@ -94,45 +94,45 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	// check if in the annotions slurm-job.knoc.io/flags there is --cpus-per-task= or --mem=, if so, use those values
 	raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]
-    if !ok {
-        return
-    }
-    log.G(h.Ctx).Infof("Found slurm-job.vk.io/flags annotation: %q", raw)
+	if !ok {
+		return
+	}
+	log.G(h.Ctx).Infof("Found slurm-job.vk.io/flags annotation: %q", raw)
 
-    tokens := strings.Fields(raw)
-    for _, tok := range tokens {
-        // CPU
-        if strings.HasPrefix(tok, "--cpus-per-task=") {
-            val := strings.TrimPrefix(tok, "--cpus-per-task=")
-            cpu, err := strconv.ParseInt(val, 10, 64)
-            if err != nil {
-                log.G(h.Ctx).Errorf("Invalid --cpus-per-task value %q: %v", val, err)
-                continue
-            }
-            if cpu > 0 {
-                isDefaultCPU = false
-                cpuLimit = cpu
-                log.G(h.Ctx).Infof("Using CPU limit from annotation: %d", cpuLimit)
-            }
-            continue
-        }
+	tokens := strings.Fields(raw)
+	for _, tok := range tokens {
+		// CPU
+		if strings.HasPrefix(tok, "--cpus-per-task=") {
+			val := strings.TrimPrefix(tok, "--cpus-per-task=")
+			cpu, err := strconv.ParseInt(val, 10, 64)
+			if err != nil {
+				log.G(h.Ctx).Errorf("Invalid --cpus-per-task value %q: %v", val, err)
+				continue
+			}
+			if cpu > 0 {
+				isDefaultCPU = false
+				cpuLimit = cpu
+				log.G(h.Ctx).Infof("Using CPU limit from annotation: %d", cpuLimit)
+			}
+			continue
+		}
 
-        // Memory
-        if strings.HasPrefix(tok, "--mem=") {
-            val := strings.TrimPrefix(tok, "--mem=")
-            memBytes, err := parseMem(val)
-            if err != nil {
-                log.G(h.Ctx).Errorf("Invalid --mem value %q: %v", val, err)
-                continue
-            }
-            if memBytes > 0 {
-                isDefaultRam = false
-                memoryLimit = memBytes
-                log.G(h.Ctx).Infof("Using memory limit from annotation: %d bytes", memoryLimit)
-            }
-            continue
-        }
-    }
+		// Memory
+		if strings.HasPrefix(tok, "--mem=") {
+			val := strings.TrimPrefix(tok, "--mem=")
+			memBytes, err := parseMem(val)
+			if err != nil {
+				log.G(h.Ctx).Errorf("Invalid --mem value %q: %v", val, err)
+				continue
+			}
+			if memBytes > 0 {
+				isDefaultRam = false
+				memoryLimit = memBytes
+				log.G(h.Ctx).Infof("Using memory limit from annotation: %d bytes", memoryLimit)
+			}
+			continue
+		}
+	}
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
@@ -164,30 +164,30 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		image := ""
 
-		cpuLimit, _ = container.Resources.Limits.Cpu().AsInt64()
-		memoryLimit, _ = container.Resources.Limits.Memory().AsInt64()
+		cpuLimitFromContainer, _ := container.Resources.Limits.Cpu().AsInt64()
+		memoryLimitFromContainer, _ := container.Resources.Limits.Memory().AsInt64()
 
-		if cpuLimit == 0 && isDefaultCPU {
+		if cpuLimitFromContainer == 0 && isDefaultCPU {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
-			resourceLimits.CPU += 1
+			resourceLimits.CPU = 1
 		} else {
-			if cpuLimit > resourceLimits.CPU && maxCPULimit < int(cpuLimit) {
-				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimit, 10))
-				resourceLimits.CPU = cpuLimit
-				maxCPULimit = int(cpuLimit)
+			if cpuLimitFromContainer > resourceLimits.CPU && maxCPULimit < int(cpuLimitFromContainer) {
+				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimitFromContainer, 10))
+				resourceLimits.CPU = cpuLimitFromContainer
+				maxCPULimit = int(cpuLimitFromContainer)
 				isDefaultCPU = false
 			}
 		}
 
-		if memoryLimit == 0 && isDefaultRam {
+		if memoryLimitFromContainer == 0 && isDefaultRam {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
-			resourceLimits.Memory += 1024 * 1024
+			resourceLimits.Memory = 1024 * 1024
 		} else {
 			//resourceLimits.Memory += MemoryLimit
-			if memoryLimit > resourceLimits.Memory && maxMemoryLimit < int(memoryLimit) {
-				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimit, 10))
-				resourceLimits.Memory = memoryLimit
-				maxMemoryLimit = int(memoryLimit)
+			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
+				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
+				resourceLimits.Memory = memoryLimitFromContainer
+				maxMemoryLimit = int(memoryLimitFromContainer)
 				isDefaultRam = false
 			}
 		}
