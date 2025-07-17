@@ -173,7 +173,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if cpuLimitFromContainer > resourceLimits.CPU && maxCPULimit < int(cpuLimitFromContainer) {
 				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimitFromContainer, 10))
-				resourceLimits.CPU = cpuLimitFromContainer
+				cpuLimit = cpuLimitFromContainer
 				maxCPULimit = int(cpuLimitFromContainer)
 				isDefaultCPU = false
 			}
@@ -186,11 +186,14 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			//resourceLimits.Memory += MemoryLimit
 			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
 				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
-				resourceLimits.Memory = memoryLimitFromContainer
+				memoryLimit = memoryLimitFromContainer
 				maxMemoryLimit = int(memoryLimitFromContainer)
 				isDefaultRam = false
 			}
 		}
+
+		resourceLimits.CPU = cpuLimit
+		resourceLimits.Memory = memoryLimit
 
 		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
 		log.G(h.Ctx).Debug(mounts)
