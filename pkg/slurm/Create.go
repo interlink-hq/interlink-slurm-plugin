@@ -134,7 +134,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		cpuLimit, _ = container.Resources.Limits.Cpu().AsInt64()
 		memoryLimit, _ = container.Resources.Limits.Memory().AsInt64()
 
-		if cpuLimit == 0 {
+		if cpuLimit == 0 && isDefaultCPU {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
 			resourceLimits.CPU += 1
 		} else {
@@ -148,7 +148,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if memoryLimit == 0 {
+		if memoryLimit == 0 && isDefaultRam {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory += 1024 * 1024
 		} else {
