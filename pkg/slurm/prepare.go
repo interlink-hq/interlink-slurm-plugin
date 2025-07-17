@@ -594,6 +594,9 @@ func produceSLURMScript(
 			re = regexp.MustCompile(`--mem\s+\d+`)
 			slurmFlags = re.ReplaceAllString(slurmFlags, "")
 		}
+		// log the flags
+		log.G(Ctx).Info("Using SLURM flags from annotations: ", slurmFlags)
+		// split the flags by space and remove empty strings
 		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
 	}
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
