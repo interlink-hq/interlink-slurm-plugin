@@ -62,6 +62,9 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	isDefaultCPU := false
 	isDefaultRam := false
 
+	maxCPULimit := 0
+	maxMemoryLimit := 0
+
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
 
@@ -100,23 +103,26 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			resourceLimits.CPU += 1
 			isDefaultCPU = true
 		} else {
-			if CPULimit > resourceLimits.CPU {
+			if CPULimit > resourceLimits.CPU && maxCPULimit < int(CPULimit) {
 				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(CPULimit, 10))
 				resourceLimits.CPU = CPULimit
+				maxCPULimit = int(CPULimit)
 			} else {
 				log.G(h.Ctx).Info("Keeping CPU limit to " + strconv.FormatInt(resourceLimits.CPU, 10))
 			}
 			isDefaultCPU = false
 		}
+
 		if MemoryLimit == 0 {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory += 1024 * 1024
 			isDefaultRam = true
 		} else {
-			resourceLimits.Memory += MemoryLimit
-			if MemoryLimit > resourceLimits.Memory {
+			//resourceLimits.Memory += MemoryLimit
+			if MemoryLimit > resourceLimits.Memory && maxMemoryLimit < int(MemoryLimit) {
 				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(MemoryLimit, 10))
 				resourceLimits.Memory = MemoryLimit
+				maxMemoryLimit = int(MemoryLimit)
 			} else {
 				log.G(h.Ctx).Info("Keeping Memory limit to " + strconv.FormatInt(resourceLimits.Memory, 10))
 			}
