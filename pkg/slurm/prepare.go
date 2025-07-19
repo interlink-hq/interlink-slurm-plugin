@@ -605,6 +605,14 @@ func produceSLURMScript(
 		}
 
 		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
+
+		// Remove empty strings from the slice
+		for i := 0; i < len(sbatchFlagsFromArgo); i++ {
+			if sbatchFlagsFromArgo[i] == "" {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo[:i], sbatchFlagsFromArgo[i+1:]...)
+				i-- // Adjust index after removal
+			}
+		}
 	}
 
 	// if raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
