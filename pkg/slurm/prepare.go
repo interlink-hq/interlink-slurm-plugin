@@ -583,24 +583,36 @@ func produceSLURMScript(
 		log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
 	}
 
+	cpuLimitSetFromFlags := false
+	memoryLimitSetFromFlags := false
+
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
 
+		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
+
 		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
 		if !isDefaultCPU {
-			re := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
-			if re.MatchString(slurmFlags) {
+			if reCpu.MatchString(slurmFlags) {
 				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
-				slurmFlags = re.ReplaceAllString(slurmFlags, "")
+				slurmFlags = reCpu.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reCpu.MatchString(slurmFlags) {
+				cpuLimitSetFromFlags = true
 			}
 		}
 
+		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
 		if !isDefaultRam {
-			re := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
-			if re.MatchString(slurmFlags) {
+			if reRam.MatchString(slurmFlags) {
 				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
-				slurmFlags = re.ReplaceAllString(slurmFlags, "")
+				slurmFlags = reRam.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reRam.MatchString(slurmFlags) {
+				memoryLimitSetFromFlags = true
 			}
 		}
 
@@ -643,14 +655,18 @@ func produceSLURMScript(
 		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
 	} else {
 		log.G(Ctx).Info("Using default CPU limit of 1")
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
+		if !cpuLimitSetFromFlags {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
+		}
 	}
 
 	if !isDefaultRam {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
 	} else {
 		log.G(Ctx).Info("Using default Memory limit of 1MB")
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
+		if !memoryLimitSetFromFlags {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
+		}
 	}
 
 	for _, slurmFlag := range sbatchFlagsFromArgo {
