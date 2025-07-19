@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -164,8 +165,10 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		image := ""
 
-		cpuLimitFromContainer, _ := container.Resources.Limits.Cpu().AsInt64()
+		cpuLimitFloat := container.Resources.Limits.Cpu().AsApproximateFloat64()
 		memoryLimitFromContainer, _ := container.Resources.Limits.Memory().AsInt64()
+
+		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
 
 		if cpuLimitFromContainer == 0 && isDefaultCPU {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
@@ -183,7 +186,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
 			resourceLimits.Memory = 1024 * 1024
 		} else {
-			//resourceLimits.Memory += MemoryLimit
 			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
 				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
 				memoryLimit = memoryLimitFromContainer
