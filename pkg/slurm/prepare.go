@@ -585,20 +585,42 @@ func produceSLURMScript(
 
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
-	if raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-		slurmFlags := raw
+	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
 
-		re := regexp.MustCompile(`--(?:cpus-per-task|mem)(?:[ =]\S+)?`)
-		if re.MatchString(slurmFlags) {
-			log.G(Ctx).Info("Ignoring --cpus-per-task and --mem flags from annotations, since they are set already")
-			slurmFlags = re.ReplaceAllString(slurmFlags, "")
+		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
+		if !isDefaultCPU {
+			re := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
+			if re.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+				slurmFlags = re.ReplaceAllString(slurmFlags, "")
+			}
 		}
 
-		slurmFlags = strings.TrimSpace(slurmFlags)
-		sbatchFlagsFromArgo = strings.Fields(slurmFlags)
+		if !isDefaultRam {
+			re := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
+			if re.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+				slurmFlags = re.ReplaceAllString(slurmFlags, "")
+			}
+		}
 
-		log.G(Ctx).Info("Using SLURM flags from annotations:", sbatchFlagsFromArgo)
+		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
 	}
+
+	// if raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
+	// 	slurmFlags := raw
+
+	// 	re := regexp.MustCompile(`--(?:cpus-per-task|mem)(?:[ =]\S+)?`)
+	// 	if re.MatchString(slurmFlags) {
+	// 		log.G(Ctx).Info("Ignoring --cpus-per-task and --mem flags from annotations, since they are set already")
+	// 		slurmFlags = re.ReplaceAllString(slurmFlags, "")
+	// 	}
+
+	// 	slurmFlags = strings.TrimSpace(slurmFlags)
+	// 	sbatchFlagsFromArgo = strings.Fields(slurmFlags)
+
+	// 	log.G(Ctx).Info("Using SLURM flags from annotations:", sbatchFlagsFromArgo)
+	// }
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
 			mpi := append([]string{"mpiexec", "-np", "$SLURM_NTASKS"}, strings.Split(mpiFlags, " ")...)
