@@ -591,6 +591,7 @@ func produceSLURMScript(
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
 
 		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
+		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
 
 		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
 		if !isDefaultCPU {
@@ -604,7 +605,6 @@ func produceSLURMScript(
 			}
 		}
 
-		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
 		if !isDefaultRam {
 			if reRam.MatchString(slurmFlags) {
 				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
@@ -618,29 +618,14 @@ func produceSLURMScript(
 
 		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
 
-		// Remove empty strings from the slice
 		for i := 0; i < len(sbatchFlagsFromArgo); i++ {
 			if sbatchFlagsFromArgo[i] == "" {
 				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo[:i], sbatchFlagsFromArgo[i+1:]...)
-				i-- // Adjust index after removal
+				i--
 			}
 		}
 	}
 
-	// if raw, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-	// 	slurmFlags := raw
-
-	// 	re := regexp.MustCompile(`--(?:cpus-per-task|mem)(?:[ =]\S+)?`)
-	// 	if re.MatchString(slurmFlags) {
-	// 		log.G(Ctx).Info("Ignoring --cpus-per-task and --mem flags from annotations, since they are set already")
-	// 		slurmFlags = re.ReplaceAllString(slurmFlags, "")
-	// 	}
-
-	// 	slurmFlags = strings.TrimSpace(slurmFlags)
-	// 	sbatchFlagsFromArgo = strings.Fields(slurmFlags)
-
-	// 	log.G(Ctx).Info("Using SLURM flags from annotations:", sbatchFlagsFromArgo)
-	// }
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
 			mpi := append([]string{"mpiexec", "-np", "$SLURM_NTASKS"}, strings.Split(mpiFlags, " ")...)
