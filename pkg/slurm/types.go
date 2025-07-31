@@ -20,7 +20,7 @@ type SlurmConfig struct {
 	BashPath                  string   `yaml:"BashPath"`
 	VerboseLogging            bool     `yaml:"VerboseLogging"`
 	ErrorsOnlyLogging         bool     `yaml:"ErrorsOnlyLogging"`
-	SingularityDefaultOptions []string `yaml:"SingularityDefaultOptions" default:"[\"--nv\", \"--no-eval\", \"--containall\"]"`
+	SingularityDefaultOptions []string `yaml:"SingularityDefaultOptions"`
 	SingularityPrefix         string   `yaml:"SingularityPrefix"`
 	SingularityPath           string   `yaml:"SingularityPath"`
 	set                       bool

@@ -722,7 +722,7 @@ waitCtns() {
     exitCode="$?"
     printf "%s\n" "${exitCode}" > "${workingPath}/run-${ctn}.status"
     printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} ended with status ${exitCode}."
-	waitFileExist "${workingPath}/${ctn}.status"
+	waitFileExist "${workingPath}/run-${ctn}.status"
   done
   # Compatibility with jobScript, read the result of conainer .status files
   for filestatus in $(ls *.status) ; do

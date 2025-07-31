@@ -111,6 +111,10 @@ func NewSlurmConfig() (SlurmConfig, error) {
 		}
 
 		SlurmConfigInst.set = true
+
+		if len(SlurmConfigInst.SingularityDefaultOptions) == 0 {
+			SlurmConfigInst.SingularityDefaultOptions = []string{"--nv", "--no-eval", "--containall"}
+		}
 	}
 	return SlurmConfigInst, nil
 }
