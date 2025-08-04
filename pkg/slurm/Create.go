@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -17,7 +18,31 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
+
+	"regexp"
 )
+
+func parseMem(val string) (int64, error) {
+	re := regexp.MustCompile(`^(\d+)([KMG]?)$`)
+	m := re.FindStringSubmatch(val)
+	if len(m) != 3 {
+		return 0, errors.New("invalid memory format: " + val)
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	switch m[2] {
+	case "G":
+		return n * 1024 * 1024 * 1024, nil
+	case "M":
+		return n * 1024 * 1024, nil
+	case "K":
+		return n * 1024, nil
+	default:
+		return n, nil
+	}
+}
 
 // SubmitHandler generates and submits a SLURM batch script according to provided data.
 // 1 Pod = 1 Job. If a Pod has multiple containers, every container is a line with it's parameters in the SLURM script.
@@ -59,6 +84,15 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	var singularity_command_pod []SingularityCommand
 	var resourceLimits ResourceLimits
 
+	isDefaultCPU := true
+	isDefaultRam := true
+
+	maxCPULimit := 0
+	maxMemoryLimit := 0
+
+	cpuLimit := int64(0)
+	memoryLimit := int64(0)
+
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
 
@@ -89,20 +123,37 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		image := ""
 
-		CPULimit, _ := container.Resources.Limits.Cpu().AsInt64()
-		MemoryLimit, _ := container.Resources.Limits.Memory().AsInt64()
-		if CPULimit == 0 {
+		cpuLimitFloat := container.Resources.Limits.Cpu().AsApproximateFloat64()
+		memoryLimitFromContainer, _ := container.Resources.Limits.Memory().AsInt64()
+
+		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
+
+		if cpuLimitFromContainer == 0 && isDefaultCPU {
 			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
-			resourceLimits.CPU += 1
+			resourceLimits.CPU = 1
 		} else {
-			resourceLimits.CPU += CPULimit
+			if cpuLimitFromContainer > resourceLimits.CPU && maxCPULimit < int(cpuLimitFromContainer) {
+				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimitFromContainer, 10))
+				cpuLimit = cpuLimitFromContainer
+				maxCPULimit = int(cpuLimitFromContainer)
+				isDefaultCPU = false
+			}
 		}
-		if MemoryLimit == 0 {
+
+		if memoryLimitFromContainer == 0 && isDefaultRam {
 			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
-			resourceLimits.Memory += 1024 * 1024
+			resourceLimits.Memory = 1024 * 1024
 		} else {
-			resourceLimits.Memory += MemoryLimit
+			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
+				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
+				memoryLimit = memoryLimitFromContainer
+				maxMemoryLimit = int(memoryLimitFromContainer)
+				isDefaultRam = false
+			}
 		}
+
+		resourceLimits.CPU = cpuLimit
+		resourceLimits.Memory = memoryLimit
 
 		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
 		log.G(h.Ctx).Debug(mounts)
@@ -165,7 +216,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits)
+	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
 	if err != nil {
 		log.G(h.Ctx).Error(err)
 		os.RemoveAll(filesPath)

@@ -531,6 +531,8 @@ func produceSLURMScript(
 	metadata metav1.ObjectMeta,
 	commands []SingularityCommand,
 	resourceLimits ResourceLimits,
+	isDefaultCPU bool,
+	isDefaultRam bool,
 ) (string, error) {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
@@ -581,11 +583,49 @@ func produceSLURMScript(
 		log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
 	}
 
+	cpuLimitSetFromFlags := false
+	memoryLimitSetFromFlags := false
+
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
+
+		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
+		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
+
+		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
+		if !isDefaultCPU {
+			if reCpu.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+				slurmFlags = reCpu.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reCpu.MatchString(slurmFlags) {
+				cpuLimitSetFromFlags = true
+			}
+		}
+
+		if !isDefaultRam {
+			if reRam.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+				slurmFlags = reRam.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reRam.MatchString(slurmFlags) {
+				memoryLimitSetFromFlags = true
+			}
+		}
+
 		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
+
+		for i := 0; i < len(sbatchFlagsFromArgo); i++ {
+			if sbatchFlagsFromArgo[i] == "" {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo[:i], sbatchFlagsFromArgo[i+1:]...)
+				i--
+			}
+		}
 	}
+
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
 			mpi := append([]string{"mpiexec", "-np", "$SLURM_NTASKS"}, strings.Split(mpiFlags, " ")...)
@@ -595,8 +635,24 @@ func produceSLURMScript(
 		}
 	}
 
-	sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
-	sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+	if !isDefaultCPU {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
+	} else {
+		log.G(Ctx).Info("Using default CPU limit of 1")
+		if !cpuLimitSetFromFlags {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
+		}
+	}
+
+	if !isDefaultRam {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
+	} else {
+		log.G(Ctx).Info("Using default Memory limit of 1MB")
+		if !memoryLimitSetFromFlags {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
+		}
+	}
 
 	for _, slurmFlag := range sbatchFlagsFromArgo {
 		sbatchFlagsAsString += "\n#SBATCH " + slurmFlag
