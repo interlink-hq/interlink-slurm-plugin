@@ -24,9 +24,22 @@ type SlurmConfig struct {
 	SingularityPrefix         string   `yaml:"SingularityPrefix"`
 	SingularityPath           string   `yaml:"SingularityPath"`
 	set                       bool
+	EnrootDefaultOptions      []string `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
+	EnrootPrefix              string   `yaml:"EnrootPrefix"`
+	EnrootPath                string   `yaml:"EnrootPath"`
+	ContainerRuntime          string   `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 }
 
 type CreateStruct struct {
 	PodUID string `json:"PodUID"`
 	PodJID string `json:"PodJID"`
+}
+
+type ContainerCommand struct {
+	containerName    string
+	isInitContainer  bool
+	runtimeCommand   []string
+	containerCommand []string
+	containerArgs    []string
+	containerImage   string
 }

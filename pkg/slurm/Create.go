@@ -81,7 +81,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	metadata := data.Pod.ObjectMeta
 	filesPath := h.Config.DataRootFolder + data.Pod.Namespace + "-" + string(data.Pod.UID)
 
-	var singularity_command_pod []SingularityCommand
+	var runtime_command_pod []ContainerCommand
 	var resourceLimits ResourceLimits
 
 	isDefaultCPU := true
@@ -95,31 +95,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
-
-		singularityMounts := ""
-		if singMounts, ok := metadata.Annotations["slurm-job.vk.io/singularity-mounts"]; ok {
-			singularityMounts = singMounts
-		}
-
-		singularityOptions := ""
-		if singOpts, ok := metadata.Annotations["slurm-job.vk.io/singularity-options"]; ok {
-			singularityOptions = singOpts
-		}
-
-		// See https://github.com/interTwin-eu/interlink-slurm-plugin/issues/32#issuecomment-2416031030
-		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
-		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
-		singularityCommand := ""
-		if len(container.Command) != 0 {
-			singularityCommand = "exec"
-		} else {
-			singularityCommand = "run"
-		}
-
-		// no-eval is important so that singularity does not evaluate env var, because the shellquote has already done the safety check.
-		commstr1 := []string{h.Config.SingularityPath, singularityCommand}
-		commstr1 = append(commstr1, h.Config.SingularityDefaultOptions...)
-		commstr1 = append(commstr1, singularityMounts, singularityOptions)
 
 		image := ""
 
@@ -166,32 +141,21 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		// prepareEnvs creates a file in the working directory, that must exist. This is created at prepareMounts.
 		envs := prepareEnvs(spanCtx, h.Config, data, container)
-
-		image = container.Image
-		imagePrefix := h.Config.ImagePrefix
-
-		imagePrefixAnnotationFound := false
-		if imagePrefixAnnotation, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
-			// This takes precedence over ImagePrefix
-			imagePrefix = imagePrefixAnnotation
-			imagePrefixAnnotationFound = true
-		}
-		log.G(h.Ctx).Info("imagePrefix from annotation? ", imagePrefixAnnotationFound, " value: ", imagePrefix)
-
-		// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
-		// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
-		if strings.HasPrefix(image, "/") {
-			log.G(h.Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
-		} else if !strings.HasPrefix(image, imagePrefix) {
-			image = imagePrefix + container.Image
-		} else {
-			log.G(h.Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
-		}
-
+		image = prepareImage(spanCtx, h.Config, metadata, container.Image)
+		commstr1 := prepareRuntimeCommand(h.Config, container, metadata)
 		log.G(h.Ctx).Debug("-- Appending all commands together...")
-		singularity_command := append(commstr1, envs...)
-		singularity_command = append(singularity_command, mounts)
-		singularity_command = append(singularity_command, image)
+		runtime_command := append(commstr1, envs...)
+		switch h.Config.ContainerRuntime {
+		case "singularity":
+			runtime_command = append(runtime_command, mounts)
+			runtime_command = append(runtime_command, image)
+		case "enroot":
+			containerName := container.Name + string(data.Pod.UID)
+			mounts = strings.ReplaceAll(mounts, ":ro", "")
+			runtime_command = append(runtime_command, mounts)
+			runtime_command = append(runtime_command, containerName)
+
+		}
 
 		isInit := false
 
@@ -208,7 +172,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			attribute.StringSlice("job.container"+strconv.Itoa(i)+".args", container.Args),
 		)
 
-		singularity_command_pod = append(singularity_command_pod, SingularityCommand{singularityCommand: singularity_command, containerName: container.Name, containerArgs: container.Args, containerCommand: container.Command, isInitContainer: isInit})
+		runtime_command_pod = append(runtime_command_pod, ContainerCommand{runtimeCommand: runtime_command, containerName: container.Name, containerArgs: container.Args, containerCommand: container.Command, isInitContainer: isInit, containerImage: image})
 	}
 
 	span.SetAttributes(
@@ -216,7 +180,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
 	if err != nil {
 		log.G(h.Ctx).Error(err)
 		os.RemoveAll(filesPath)
