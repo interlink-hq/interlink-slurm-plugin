@@ -59,6 +59,8 @@ type SingularityCommand struct {
 	singularityCommand []string
 	containerCommand   []string
 	containerArgs      []string
+	readinessProbes    []ProbeCommand
+	livenessProbes     []ProbeCommand
 }
 
 // stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
@@ -814,6 +816,24 @@ highestExitCode=0
 	stringToBeWritten.WriteString(path)
 	stringToBeWritten.WriteString("\n")
 
+	// Generate probe cleanup script first if any probes exist
+	var hasProbes bool
+	for _, singularityCommand := range commands {
+		if len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0 {
+			hasProbes = true
+			break
+		}
+	}
+	if hasProbes && config.EnableProbes {
+		for _, singularityCommand := range commands {
+			if len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0 {
+				cleanupScript := generateProbeCleanupScript(singularityCommand.readinessProbes, singularityCommand.livenessProbes)
+				stringToBeWritten.WriteString(cleanupScript)
+				break // Only need one cleanup script
+			}
+		}
+	}
+
 	for _, singularityCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
@@ -841,6 +861,42 @@ highestExitCode=0
 				stringToBeWritten.WriteString(" ")
 				// We convert from GO array to shell command, so escaping is important to avoid space, quote issues and injection vulnerabilities.
 				stringToBeWritten.WriteString(shellescape.Quote(argsEntry))
+			}
+		}
+
+		// Generate probe scripts if enabled and not an init container
+		if config.EnableProbes && !singularityCommand.isInitContainer && (len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0) {
+			// Extract the image name from the singularity command
+			var imageName string
+			for i, arg := range singularityCommand.singularityCommand {
+				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
+					imageName = arg
+					break
+				}
+				// Look for image after singularity run/exec command
+				if (arg == "run" || arg == "exec") && i+1 < len(singularityCommand.singularityCommand) {
+					// Skip any options and find the image
+					for j := i + 1; j < len(singularityCommand.singularityCommand); j++ {
+						nextArg := singularityCommand.singularityCommand[j]
+						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
+							imageName = nextArg
+							break
+						}
+					}
+					break
+				}
+			}
+
+			if imageName != "" {
+				// Store probe metadata for status checking
+				err := storeProbeMetadata(path, singularityCommand.containerName, len(singularityCommand.readinessProbes), len(singularityCommand.livenessProbes))
+				if err != nil {
+					log.G(Ctx).Error("Failed to store probe metadata: ", err)
+				}
+
+				probeScript := generateProbeScript(Ctx, config, singularityCommand.containerName, imageName, singularityCommand.readinessProbes, singularityCommand.livenessProbes)
+				stringToBeWritten.WriteString("\n")
+				stringToBeWritten.WriteString(probeScript)
 			}
 		}
 	}

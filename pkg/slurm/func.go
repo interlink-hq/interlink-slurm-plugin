@@ -104,7 +104,6 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			SlurmConfigInst.SingularityPath = "singularity"
 		}
 
-
 		// Set default SinfoPath if not configured
 		if SlurmConfigInst.Sinfopath == "" {
 			SlurmConfigInst.Sinfopath = "/usr/bin/sinfo"
