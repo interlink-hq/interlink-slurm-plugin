@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe-test-pod
+  namespace: vk
+spec:
+  containers:
+  - name: web-server
+    image: nginx:alpine
+    ports:
+    - containerPort: 80
+    readinessProbe:
+      httpGet:
+        path: /
+        port: 80
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+        scheme: HTTP
+      initialDelaySeconds: 15
+      periodSeconds: 20
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+  - name: app-container
+    image: busybox:latest
+    command: ["/bin/sh"]
+    args: ["-c", "while true; do echo 'App running'; sleep 30; done"]
+    readinessProbe:
+      exec:
+        command:
+        - /bin/sh
+        - -c
+        - "echo 'Ready'"
+      initialDelaySeconds: 2
+      periodSeconds: 5
+      timeoutSeconds: 1
+      successThreshold: 1
+      failureThreshold: 2
+    livenessProbe:
+      exec:
+        command:
+        - /bin/sh
+        - -c
+        - "ps | grep -v grep | grep -q sh"
+      initialDelaySeconds: 10
+      periodSeconds: 15
+      timeoutSeconds: 3
+      successThreshold: 1
+      failureThreshold: 3
+  restartPolicy: Always

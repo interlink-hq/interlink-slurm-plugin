@@ -211,7 +211,16 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: true}
+							// Check probe status for container readiness
+							readinessCount, _, err := loadProbeMetadata(path, ct.Name)
+							isReady := true
+							if err != nil {
+								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
+							} else {
+								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+							}
+
+							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
@@ -277,7 +286,16 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: true}
+							// Check probe status for container readiness
+							readinessCount, _, err := loadProbeMetadata(path, ct.Name)
+							isReady := true
+							if err != nil {
+								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
+							} else {
+								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+							}
+
+							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
