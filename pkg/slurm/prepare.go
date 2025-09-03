@@ -809,12 +809,12 @@ highestExitCode=0
 	stringToBeWritten.WriteString(sbatch_common_funcs_macros)
 
 	// Adding tracability between pod and job ID.
-	stringToBeWritten.WriteString("\necho \"This pod ")
+	stringToBeWritten.WriteString("\nprintf '%s\n' \"This pod ")
 	stringToBeWritten.WriteString(pod.Name)
 	stringToBeWritten.WriteString("/")
 	stringToBeWritten.WriteString(podUID)
 	stringToBeWritten.WriteString(" has been submitted to SLURM node ${SLURMD_NODENAME}.\"")
-	stringToBeWritten.WriteString("\necho \"To get more info, please run: scontrol show job ${SLURM_JOBID}.\"")
+	stringToBeWritten.WriteString("\nprintf '%s\n' \"To get more info, please run: scontrol show job ${SLURM_JOBID}.\"")
 
 	// Adding the workingPath as variable.
 	stringToBeWritten.WriteString("\nexport workingPath=")
