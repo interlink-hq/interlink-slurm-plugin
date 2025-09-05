@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -80,7 +79,7 @@ func initProvider(ctx context.Context) (func(context.Context) error, error) {
 
 		log.G(ctx).Info("CA certificate provided, setting up mutual TLS")
 
-		caCert, err := ioutil.ReadFile(caCrtFilePath)
+		caCert, err := os.ReadFile(caCrtFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load CA certificate: %w", err)
 		}
@@ -106,13 +105,18 @@ func initProvider(ctx context.Context) (func(context.Context) error, error) {
 		}
 
 		tlsConfig := &tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			RootCAs:            certPool,
-			MinVersion:         tls.VersionTLS12,
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      certPool,
+			MinVersion:   tls.VersionTLS12,
+			//nolint:gosec // G402: InsecureSkipVerify is intentional for development/testing
 			InsecureSkipVerify: true,
 		}
 		creds := credentials.NewTLS(tlsConfig)
+		//nolint:staticcheck // SA1019: WithBlock is deprecated but still needed for compatibility
 		conn, err = grpc.NewClient(otlpEndpoint, grpc.WithTransportCredentials(creds), grpc.WithBlock())
+		if err != nil {
+			log.G(ctx).Fatal(err)
+		}
 
 	} else {
 		conn, err = grpc.NewClient(otlpEndpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -148,16 +152,17 @@ func initProvider(ctx context.Context) (func(context.Context) error, error) {
 func main() {
 	logger := logrus.StandardLogger()
 
-	slurmConfig, err := slurm.NewSlurmConfig()
+	slurmConfig, err := slurm.NewConfig()
 	if err != nil {
 		panic(err)
 	}
 
-	if slurmConfig.VerboseLogging {
+	switch {
+	case slurmConfig.VerboseLogging:
 		logger.SetLevel(logrus.DebugLevel)
-	} else if slurmConfig.ErrorsOnlyLogging {
+	case slurmConfig.ErrorsOnlyLogging:
 		logger.SetLevel(logrus.ErrorLevel)
-	} else {
+	default:
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
@@ -199,8 +204,12 @@ func main() {
 	mutex.HandleFunc("/getLogs", SidecarAPIs.GetLogsHandler)
 	mutex.HandleFunc("/system-info", SidecarAPIs.SystemInfoHandler)
 
-	SidecarAPIs.CreateDirectories()
-	SidecarAPIs.LoadJIDs()
+	if err := SidecarAPIs.CreateDirectories(); err != nil {
+		log.G(ctx).Fatal("Failed to create directories: ", err)
+	}
+	if err := SidecarAPIs.LoadJIDs(); err != nil {
+		log.G(ctx).Fatal("Failed to load JIDs: ", err)
+	}
 
 	if strings.HasPrefix(slurmConfig.Socket, "unix://") {
 		// Create a Unix domain socket and listen for incoming connections.
@@ -227,7 +236,13 @@ func main() {
 			log.G(ctx).Fatal(err)
 		}
 	} else {
-		err = http.ListenAndServe(":"+slurmConfig.Sidecarport, mutex)
+		server := &http.Server{
+			Addr:         ":" + slurmConfig.Sidecarport,
+			Handler:      mutex,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		err = server.ListenAndServe()
 		if err != nil {
 			log.G(ctx).Fatal(err)
 		}

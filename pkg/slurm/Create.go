@@ -2,13 +2,9 @@ package slurm
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
-	"math"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containerd/containerd/log"
@@ -47,7 +43,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	var returnedJIDBytes []byte
 	err = json.Unmarshal(bodyBytes, &data)
 	if err != nil {
-		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		return
 	}
@@ -57,11 +52,11 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	metadata := data.Pod.ObjectMeta
 	filesPath := h.Config.DataRootFolder + data.Pod.Namespace + "-" + string(data.Pod.UID)
 
-	var singularity_command_pod []SingularityCommand
+	var singularityCommandPod []SingularityCommand
 	var resourceLimits ResourceLimits
 
 	isDefaultCPU := true
-	isDefaultRam := true
+	isDefaultRAM := true
 
 	maxCPULimit := 0
 	maxMemoryLimit := 0
@@ -70,142 +65,17 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	memoryLimit := int64(0)
 
 	for i, container := range containers {
-		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
-
-		singularityMounts := ""
-		if singMounts, ok := metadata.Annotations["slurm-job.vk.io/singularity-mounts"]; ok {
-			singularityMounts = singMounts
-		}
-
-		singularityOptions := ""
-		if singOpts, ok := metadata.Annotations["slurm-job.vk.io/singularity-options"]; ok {
-			singularityOptions = singOpts
-		}
-
-		// See https://github.com/interTwin-eu/interlink-slurm-plugin/issues/32#issuecomment-2416031030
-		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
-		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
-		singularityCommand := ""
-		if len(container.Command) != 0 {
-			singularityCommand = "exec"
-		} else {
-			singularityCommand = "run"
-		}
-
-		// no-eval is important so that singularity does not evaluate env var, because the shellquote has already done the safety check.
-		commstr1 := []string{h.Config.SingularityPath, singularityCommand}
-		commstr1 = append(commstr1, h.Config.SingularityDefaultOptions...)
-		commstr1 = append(commstr1, singularityMounts, singularityOptions)
-
-		image := ""
-
-		cpuLimitFloat := container.Resources.Limits.Cpu().AsApproximateFloat64()
-		memoryLimitFromContainer, _ := container.Resources.Limits.Memory().AsInt64()
-
-		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
-
-		if cpuLimitFromContainer == 0 && isDefaultCPU {
-			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
-			resourceLimits.CPU = 1
-		} else {
-			if cpuLimitFromContainer > resourceLimits.CPU && maxCPULimit < int(cpuLimitFromContainer) {
-				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimitFromContainer, 10))
-				cpuLimit = cpuLimitFromContainer
-				maxCPULimit = int(cpuLimitFromContainer)
-				isDefaultCPU = false
-			}
-		}
-
-		if memoryLimitFromContainer == 0 && isDefaultRam {
-			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
-			resourceLimits.Memory = 1024 * 1024
-		} else {
-			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
-				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
-				memoryLimit = memoryLimitFromContainer
-				maxMemoryLimit = int(memoryLimitFromContainer)
-				isDefaultRam = false
-			}
-		}
-
-		resourceLimits.CPU = cpuLimit
-		resourceLimits.Memory = memoryLimit
-
-		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
-		log.G(h.Ctx).Debug(mounts)
+		singularityCommand, err := h.processSingleContainer(
+			spanCtx, span, container, i, metadata, data, filesPath,
+			&resourceLimits, &maxCPULimit, &maxMemoryLimit,
+			&cpuLimit, &memoryLimit, &isDefaultCPU, &isDefaultRAM,
+		)
 		if err != nil {
-			statusCode = http.StatusInternalServerError
 			h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
-			os.RemoveAll(filesPath)
 			return
 		}
 
-		// prepareEnvs creates a file in the working directory, that must exist. This is created at prepareMounts.
-		envs := prepareEnvs(spanCtx, h.Config, data, container)
-
-		image = container.Image
-		imagePrefix := h.Config.ImagePrefix
-
-		imagePrefixAnnotationFound := false
-		if imagePrefixAnnotation, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
-			// This takes precedence over ImagePrefix
-			imagePrefix = imagePrefixAnnotation
-			imagePrefixAnnotationFound = true
-		}
-		log.G(h.Ctx).Info("imagePrefix from annotation? ", imagePrefixAnnotationFound, " value: ", imagePrefix)
-
-		// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
-		// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
-		if strings.HasPrefix(image, "/") {
-			log.G(h.Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
-		} else if !strings.HasPrefix(image, imagePrefix) {
-			image = imagePrefix + container.Image
-		} else {
-			log.G(h.Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
-		}
-
-		log.G(h.Ctx).Debug("-- Appending all commands together...")
-		singularity_command := append(commstr1, envs...)
-		singularity_command = append(singularity_command, mounts)
-		singularity_command = append(singularity_command, image)
-
-		isInit := false
-
-		if i < len(data.Pod.Spec.InitContainers) {
-			isInit = true
-		}
-
-		span.SetAttributes(
-			attribute.String("job.container"+strconv.Itoa(i)+".name", container.Name),
-			attribute.Bool("job.container"+strconv.Itoa(i)+".isinit", isInit),
-			attribute.StringSlice("job.container"+strconv.Itoa(i)+".envs", envs),
-			attribute.String("job.container"+strconv.Itoa(i)+".image", image),
-			attribute.StringSlice("job.container"+strconv.Itoa(i)+".command", container.Command),
-			attribute.StringSlice("job.container"+strconv.Itoa(i)+".args", container.Args),
-		)
-
-		// Process probes if enabled
-		var readinessProbes, livenessProbes []ProbeCommand
-		if h.Config.EnableProbes && !isInit {
-			readinessProbes, livenessProbes = translateKubernetesProbes(spanCtx, container)
-			if len(readinessProbes) > 0 || len(livenessProbes) > 0 {
-				log.G(h.Ctx).Info("-- Container " + container.Name + " has probes configured")
-				span.SetAttributes(
-					attribute.Int("job.container"+strconv.Itoa(i)+".readiness_probes", len(readinessProbes)),
-					attribute.Int("job.container"+strconv.Itoa(i)+".liveness_probes", len(livenessProbes)),
-				)
-			}
-		}
-
-		singularity_command_pod = append(singularity_command_pod, SingularityCommand{
-			singularityCommand: singularity_command,
-			containerName:      container.Name,
-			containerArgs:      container.Args,
-			containerCommand:   container.Command,
-			isInitContainer:    isInit,
-			readinessProbes:    readinessProbes,
-			livenessProbes:     livenessProbes,
-		})
+		singularityCommandPod = append(singularityCommandPod, *singularityCommand)
 	}
 
 	span.SetAttributes(
@@ -213,24 +83,22 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularityCommandPod, resourceLimits, isDefaultCPU, isDefaultRAM)
 	if err != nil {
 		log.G(h.Ctx).Error(err)
 		os.RemoveAll(filesPath)
 		return
 	}
-	out, err := SLURMBatchSubmit(h.Ctx, h.Config, path)
+	out, err := BatchSubmit(h.Ctx, h.Config, path)
 	if err != nil {
 		span.AddEvent("Failed to submit the SLURM Job")
-		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		os.RemoveAll(filesPath)
 		return
 	}
 	log.G(h.Ctx).Info(out)
-	jid, err := handleJidAndPodUid(h.Ctx, data.Pod, h.JIDs, out, filesPath)
+	jid, err := handleJidAndPodUID(h.Ctx, data.Pod, h.JIDs, out, filesPath)
 	if err != nil {
-		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		os.RemoveAll(filesPath)
 		err = deleteContainer(spanCtx, h.Config, string(data.Pod.UID), h.JIDs, filesPath)
@@ -255,8 +123,12 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	commonIL.SetDurationSpan(start, span, commonIL.WithHTTPReturnCode(statusCode))
 
 	if statusCode != http.StatusOK {
-		w.Write([]byte("Some errors occurred while creating containers. Check Slurm Sidecar's logs"))
+		if _, err := w.Write([]byte("Some errors occurred while creating containers. Check Slurm Sidecar's logs")); err != nil {
+			log.G(h.Ctx).Error("Failed to write error response: ", err)
+		}
 	} else {
-		w.Write(returnedJIDBytes)
+		if _, err := w.Write(returnedJIDBytes); err != nil {
+			log.G(h.Ctx).Error("Failed to write response: ", err)
+		}
 	}
 }

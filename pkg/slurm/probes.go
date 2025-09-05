@@ -103,7 +103,7 @@ func translateSingleProbe(ctx context.Context, k8sProbe *v1.Probe) *ProbeCommand
 }
 
 // generateProbeScript generates the shell script commands for executing probes
-func generateProbeScript(ctx context.Context, config SlurmConfig, containerName string, imageName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
+func generateProbeScript(ctx context.Context, config Config, containerName string, imageName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("Generating probe script for container " + containerName)
 
@@ -375,7 +375,7 @@ func getProbeStatus(ctx context.Context, workingPath, probeType, containerName s
 }
 
 // checkContainerReadiness evaluates if a container is ready based on its readiness probes
-func checkContainerReadiness(ctx context.Context, config SlurmConfig, workingPath, containerName string, readinessProbeCount int) bool {
+func checkContainerReadiness(ctx context.Context, config Config, workingPath, containerName string, readinessProbeCount int) bool {
 	if !config.EnableProbes || readinessProbeCount == 0 {
 		// No readiness probes configured, container is ready if running
 		return true
@@ -405,7 +405,8 @@ func checkContainerReadiness(ctx context.Context, config SlurmConfig, workingPat
 }
 
 // checkContainerLiveness evaluates if a container is alive based on its liveness probes
-func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath, containerName string, livenessProbeCount int) bool {
+// Currently unused but kept for potential future liveness monitoring features
+func checkContainerLiveness(ctx context.Context, config Config, workingPath, containerName string, livenessProbeCount int) bool { //nolint:unused
 	if !config.EnableProbes || livenessProbeCount == 0 {
 		// No liveness probes configured, container is alive if running
 		return true
@@ -439,7 +440,7 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 func storeProbeMetadata(workingPath, containerName string, readinessProbeCount, livenessProbeCount int) error {
 	metadataFile := fmt.Sprintf("%s/probe-metadata-%s.txt", workingPath, containerName)
 	content := fmt.Sprintf("readiness:%d\nliveness:%d", readinessProbeCount, livenessProbeCount)
-	return os.WriteFile(metadataFile, []byte(content), 0644)
+	return os.WriteFile(metadataFile, []byte(content), 0600)
 }
 
 // loadProbeMetadata loads probe count information for status checking

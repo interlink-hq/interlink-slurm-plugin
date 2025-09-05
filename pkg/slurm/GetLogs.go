@@ -26,9 +26,9 @@ import (
 // Logs in follow mode (get logs until the death of the container) with "kubectl -f".
 func (h *SidecarHandler) GetLogsFollowMode(
 	spanCtx context.Context,
-	podUid string,
+	podUID string,
 	w http.ResponseWriter,
-	r *http.Request,
+	_ *http.Request,
 	path string,
 	req commonIL.LogStruct,
 	containerOutputPath string,
@@ -52,7 +52,9 @@ func (h *SidecarHandler) GetLogsFollowMode(
 				notFoundMsg := sessionContextMessage + "Cannot open in follow mode the container logs " + containerOutputPath + " because it does not exist yet, sleeping before retrying..."
 				log.G(h.Ctx).Debug(notFoundMsg)
 				// Warning: if we don't write anything to body before 30s, there will be a timeout in VK to API DoReq(), thus we send an informational message that the log is not ready.
-				w.Write([]byte(notFoundMsg))
+				if _, err := w.Write([]byte(notFoundMsg)); err != nil {
+					log.G(h.Ctx).Error("Failed to write not found message: ", err)
+				}
 				// Flush otherwise it will be as if nothing was written.
 				if f, ok := w.(http.Flusher); ok {
 					log.G(h.Ctx).Debug(sessionContextMessage, "wrote file not found yet, now flushing this message...")
@@ -62,13 +64,14 @@ func (h *SidecarHandler) GetLogsFollowMode(
 				}
 				time.Sleep(4 * time.Second)
 				continue
-			} else {
-				// Case unknown error.
-				errWithContext := fmt.Errorf(sessionContextMessage+"could not open file to follow logs at %s error type: %s error: %w", containerOutputPath, fmt.Sprintf("%#v", err), err)
-				log.G(h.Ctx).Error(errWithContext)
-				w.Write([]byte(errWithContext.Error()))
-				return err
 			}
+			// Case unknown error.
+			errWithContext := fmt.Errorf(sessionContextMessage+"could not open file to follow logs at %s error type: %s error: %w", containerOutputPath, fmt.Sprintf("%#v", err), err)
+			log.G(h.Ctx).Error(errWithContext)
+			if _, err := w.Write([]byte(errWithContext.Error())); err != nil {
+				log.G(h.Ctx).Error("Failed to write error message: ", err)
+			}
+			return err
 		}
 		// File exist.
 		log.G(h.Ctx).Debug(sessionContextMessage, "opened for follow mode the container logs ", containerOutputPath)
@@ -80,7 +83,9 @@ func (h *SidecarHandler) GetLogsFollowMode(
 	_, err = containerOutputFd.Seek(int64(containerOutputLastOffset), 0)
 	if err != nil {
 		errWithContext := fmt.Errorf(sessionContextMessage+"error during Seek() of GetLogsFollowMode() in GetLogsHandler of file %s offset %d type: %s %w", containerOutputPath, containerOutputLastOffset, fmt.Sprintf("%#v", err), err)
-		w.Write([]byte(errWithContext.Error()))
+		if _, err := w.Write([]byte(errWithContext.Error())); err != nil {
+			log.G(h.Ctx).Error("Failed to write seek error message: ", err)
+		}
 		return errWithContext
 	}
 
@@ -90,18 +95,18 @@ func (h *SidecarHandler) GetLogsFollowMode(
 
 	// Looping until we get end of job.
 	// TODO: handle the Ctrl+C of kubectl logs.
-	var isContainerDead bool = false
+	var isContainerDead = false
 	for {
 		n, errRead := containerOutputReader.Read(bufferBytes)
 		if errRead != nil && errRead != io.EOF {
 			// Error during read.
-			h.logErrorVerbose(sessionContextMessage+"error doing Read() of GetLogsFollowMode", h.Ctx, w, errRead)
+			h.logErrorVerbose(h.Ctx, sessionContextMessage+"error doing Read() of GetLogsFollowMode", w, errRead)
 			return errRead
 		}
 		// Write ASAP what we could read of it.
 		_, err = w.Write(bufferBytes[:n])
 		if err != nil {
-			h.logErrorVerbose(sessionContextMessage+"error doing Write() of GetLogsFollowMode", h.Ctx, w, err)
+			h.logErrorVerbose(h.Ctx, sessionContextMessage+"error doing Write() of GetLogsFollowMode", w, err)
 			return err
 		}
 
@@ -122,7 +127,7 @@ func (h *SidecarHandler) GetLogsFollowMode(
 					break
 				}
 				// Checking if container is dead (meaning the job ID is not in context anymore, OR if the status file exist).
-				if !checkIfJidExists(spanCtx, (h.JIDs), podUid) {
+				if !checkIfJidExists(spanCtx, (h.JIDs), podUID) {
 					// The JID disappeared, so the container is dead, probably from a POD delete request. Trying to get the latest log one last time.
 					// Because the moment we found this, there might be some more logs to read.
 					isContainerDead = true
@@ -139,8 +144,6 @@ func (h *SidecarHandler) GetLogsFollowMode(
 					log.G(h.Ctx).Info(sessionContextMessage, "Container is found dead thanks to status file, reading last logs...")
 				}
 				continue
-			} else {
-				// Unreachable code.
 			}
 		}
 	}
@@ -169,13 +172,13 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		h.logErrorVerbose(sessionContextMessage+"error during ReadAll() in GetLogsHandler request body", spanCtx, w, err)
+		h.logErrorVerbose(spanCtx, sessionContextMessage+"error during ReadAll() in GetLogsHandler request body", w, err)
 		return
 	}
 
 	err = json.Unmarshal(bodyBytes, &req)
 	if err != nil {
-		h.logErrorVerbose(sessionContextMessage+"error during Unmarshal() in GetLogsHandler request body", spanCtx, w, err)
+		h.logErrorVerbose(spanCtx, sessionContextMessage+"error during Unmarshal() in GetLogsHandler request body", w, err)
 		return
 	}
 
@@ -200,18 +203,18 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 		log.G(h.Ctx).Warning(sessionContextMessage, "unsupported option req.Opts.Timestamps, ignoring it")
 		// return
 	}
-	containerOutput, err := h.ReadLogs(containerOutputPath, span, spanCtx, w, sessionContextMessage)
+	containerOutput, err := h.ReadLogs(spanCtx, containerOutputPath, span, w, sessionContextMessage)
 	if err != nil {
 		log.G(h.Ctx).Warning(sessionContextMessage, "cannot find any container with this name, falling back to init containers")
 		containerOutputPath := path + "/init-" + req.ContainerName + ".out"
-		containerOutput, err = h.ReadLogs(containerOutputPath, span, spanCtx, w, sessionContextMessage)
+		containerOutput, err = h.ReadLogs(spanCtx, containerOutputPath, span, w, sessionContextMessage)
 		if err != nil {
 			// Error already handled in waitAndReadLogs
 			log.G(h.Ctx).Warning(sessionContextMessage, "cannot find any log for this container")
 			return
 		}
 	}
-	jobOutput, err := h.ReadLogs(path+"/"+"job.out", span, spanCtx, w, sessionContextMessage)
+	jobOutput, err := h.ReadLogs(spanCtx, path+"/"+"job.out", span, w, sessionContextMessage)
 	if err != nil {
 		// Error already handled in waitAndReadLogs
 		return
@@ -222,7 +225,8 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 
 	var returnedLogs string
 
-	if req.Opts.Tail != 0 {
+	switch {
+	case req.Opts.Tail != 0:
 		var lastLines []string
 
 		splittedLines := strings.Split(string(output), "\n")
@@ -236,7 +240,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 		for _, line := range lastLines {
 			returnedLogs += line + "\n"
 		}
-	} else if req.Opts.LimitBytes != 0 {
+	case req.Opts.LimitBytes != 0:
 		var lastBytes []byte
 		if req.Opts.LimitBytes > len(output) {
 			lastBytes = output
@@ -245,7 +249,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 		}
 
 		returnedLogs = string(lastBytes)
-	} else {
+	default:
 		returnedLogs = string(output)
 	}
 
@@ -286,7 +290,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	n, err := w.Write([]byte(returnedLogs))
 	log.G(h.Ctx).Info(sessionContextMessage, "written response body len: ", n)
 	if err != nil {
-		h.logErrorVerbose(sessionContextMessage+"error during Write() in GetLogsHandler, could write bytes: "+strconv.Itoa(n), spanCtx, w, err)
+		h.logErrorVerbose(spanCtx, sessionContextMessage+"error during Write() in GetLogsHandler, could write bytes: "+strconv.Itoa(n), w, err)
 		return
 	}
 
@@ -302,7 +306,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	if req.Opts.Follow {
 		err := h.GetLogsFollowMode(spanCtx, req.PodUID, w, r, path, req, containerOutputPath, containerOutput, sessionContext)
 		if err != nil {
-			h.logErrorVerbose(sessionContextMessage+"follow mode error", spanCtx, w, err)
+			h.logErrorVerbose(spanCtx, sessionContextMessage+"follow mode error", w, err)
 		}
 	}
 }
@@ -311,7 +315,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 // Important to wait because if we don't wait and return empty array, it will generates a JSON unmarshall error in InterLink VK.
 // Fail for any error not related to file not existing (eg: permission error will raise an error).
 // Already handle error.
-func (h *SidecarHandler) ReadLogs(logsPath string, span trace.Span, ctx context.Context, w http.ResponseWriter, sessionContextMessage string) ([]byte, error) {
+func (h *SidecarHandler) ReadLogs(ctx context.Context, logsPath string, span trace.Span, w http.ResponseWriter, sessionContextMessage string) ([]byte, error) {
 	var output []byte
 	var err error
 	log.G(h.Ctx).Info(sessionContextMessage, "reading file ", logsPath)
@@ -322,7 +326,7 @@ func (h *SidecarHandler) ReadLogs(logsPath string, span trace.Span, ctx context.
 			output = make([]byte, 0)
 		} else {
 			span.AddEvent("Error retrieving logs")
-			h.logErrorVerbose(sessionContextMessage+"error during ReadFile() of readLogs() in GetLogsHandler of file "+logsPath, ctx, w, err)
+			h.logErrorVerbose(ctx, sessionContextMessage+"error during ReadFile() of readLogs() in GetLogsHandler of file "+logsPath, w, err)
 			return nil, err
 		}
 	}

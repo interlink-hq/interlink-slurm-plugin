@@ -57,7 +57,7 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		h.handleError(spanCtx, w, statusCode, err)
 		return
 	}
-	if os.Getenv("SHARED_FS") != "true" {
+	if os.Getenv("SHARED_FS") != sharedFSTrue {
 		err = os.RemoveAll(filesPath)
 		if err != nil {
 			statusCode = http.StatusInternalServerError
@@ -70,8 +70,12 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(statusCode)
 	if statusCode != http.StatusOK {
-		w.Write([]byte("Some errors occurred deleting containers. Check Slurm Sidecar's logs"))
+		if _, err := w.Write([]byte("Some errors occurred deleting containers. Check Slurm Sidecar's logs")); err != nil {
+			log.G(h.Ctx).Error("Failed to write error response: ", err)
+		}
 	} else {
-		w.Write([]byte("All containers for submitted Pods have been deleted"))
+		if _, err := w.Write([]byte("All containers for submitted Pods have been deleted")); err != nil {
+			log.G(h.Ctx).Error("Failed to write response: ", err)
+		}
 	}
 }

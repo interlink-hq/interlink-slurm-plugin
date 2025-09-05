@@ -25,7 +25,7 @@ type SystemInfoResponse struct {
 
 // SystemInfoHandler provides a health check endpoint that includes sinfo -s output
 // This allows monitoring the SLURM cluster status and node availability
-func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Request) {
+func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, _ *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
 	_, span := tracer.Start(h.Ctx, "SystemInfo", trace.WithAttributes(
@@ -61,10 +61,14 @@ func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		log.G(h.Ctx).Error("Failed to marshal system info response: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"status":"error","error":"failed to marshal response"}`))
+		if _, err := w.Write([]byte(`{"status":"error","error":"failed to marshal response"}`)); err != nil {
+			log.G(h.Ctx).Error("Failed to write error response: ", err)
+		}
 		return
 	}
 
-	w.Write(responseBytes)
+	if _, err := w.Write(responseBytes); err != nil {
+		log.G(h.Ctx).Error("Failed to write response bytes: ", err)
+	}
 	log.G(h.Ctx).Info("SystemInfo response sent successfully")
 }

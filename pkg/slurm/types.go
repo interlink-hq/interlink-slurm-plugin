@@ -1,7 +1,13 @@
 package slurm
 
+const (
+	sharedFSTrue = "true"
+	tsocksTrue   = "true"
+	tsocksFalse  = "false"
+)
+
 // InterLinkConfig holds the whole configuration
-type SlurmConfig struct {
+type Config struct {
 	VKConfigPath              string   `yaml:"VKConfigPath"`
 	Sbatchpath                string   `yaml:"SbatchPath"`
 	Scancelpath               string   `yaml:"ScancelPath"`
