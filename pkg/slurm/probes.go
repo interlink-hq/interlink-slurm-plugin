@@ -132,11 +132,11 @@ executeHTTPProbe() {
     
     # Use singularity exec to run curl inside the container
     `)
-	scriptBuilder.WriteString(fmt.Sprintf(`%s exec`, config.SingularityPath))
+	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
 	for _, opt := range config.SingularityDefaultOptions {
-		scriptBuilder.WriteString(fmt.Sprintf(" %s", opt))
+		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
 	}
-	scriptBuilder.WriteString(fmt.Sprintf(` %s timeout ${timeout} curl -f -s "$url" > /dev/null 2>&1
+	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" curl -f -s "$url" > /dev/null 2>&1
     return $?
 }
 
@@ -148,11 +148,11 @@ executeExecProbe() {
     
     # Use singularity exec to run the command inside the container
     `, imageName))
-	scriptBuilder.WriteString(fmt.Sprintf(`%s exec`, config.SingularityPath))
+	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
 	for _, opt := range config.SingularityDefaultOptions {
-		scriptBuilder.WriteString(fmt.Sprintf(" %s", opt))
+		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
 	}
-	scriptBuilder.WriteString(fmt.Sprintf(` %s timeout ${timeout} "${command[@]}"
+	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" "${command[@]}"
     return $?
 }
 
@@ -240,23 +240,25 @@ runProbe() {
 	// Generate readiness probe calls
 	for i, probe := range readinessProbes {
 		probeArgs := buildProbeArgs(probe)
+		containerVarName := strings.ReplaceAll(containerName, "-", "_")
 		scriptBuilder.WriteString(fmt.Sprintf(`
 # Readiness probe %d for %s
 runProbe "%s" "%s" %d %d %d %d %d "readiness" %d %s &
-READINESS_PROBE_%d_PID=$!
+READINESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
-			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, i))
+			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
 	}
 
 	// Generate liveness probe calls
 	for i, probe := range livenessProbes {
 		probeArgs := buildProbeArgs(probe)
+		containerVarName := strings.ReplaceAll(containerName, "-", "_")
 		scriptBuilder.WriteString(fmt.Sprintf(`
 # Liveness probe %d for %s
 runProbe "%s" "%s" %d %d %d %d %d "liveness" %d %s &
-LIVENESS_PROBE_%d_PID=$!
+LIVENESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
-			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, i))
+			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
 	}
 
 	span.SetAttributes(
@@ -289,7 +291,7 @@ func buildProbeArgs(probe ProbeCommand) string {
 }
 
 // generateProbeCleanupScript generates cleanup commands for probe processes
-func generateProbeCleanupScript(readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
+func generateProbeCleanupScript(containerName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
 	if len(readinessProbes) == 0 && len(livenessProbes) == 0 {
 		return ""
 	}
@@ -301,20 +303,22 @@ cleanup_probes() {
     printf "%s\n" "$(date -Is --utc) Cleaning up probe processes..."
 `)
 
+	containerVarName := strings.ReplaceAll(containerName, "-", "_")
+	
 	// Kill readiness probes
 	for i := range readinessProbes {
-		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$READINESS_PROBE_%d_PID" ]; then
-        kill $READINESS_PROBE_%d_PID 2>/dev/null || true
+		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$READINESS_PROBE_%s_%d_PID" ]; then
+        kill $READINESS_PROBE_%s_%d_PID 2>/dev/null || true
     fi
-`, i, i))
+`, containerVarName, i, containerVarName, i))
 	}
 
 	// Kill liveness probes
 	for i := range livenessProbes {
-		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$LIVENESS_PROBE_%d_PID" ]; then
-        kill $LIVENESS_PROBE_%d_PID 2>/dev/null || true
+		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$LIVENESS_PROBE_%s_%d_PID" ]; then
+        kill $LIVENESS_PROBE_%s_%d_PID 2>/dev/null || true
     fi
-`, i, i))
+`, containerVarName, i, containerVarName, i))
 	}
 
 	scriptBuilder.WriteString(`}
@@ -396,7 +400,7 @@ func checkContainerReadiness(ctx context.Context, config SlurmConfig, workingPat
 
 		if probeStatus.Status != "SUCCESS" {
 			allProbesSuccessful = false
-			log.G(ctx).Debug(fmt.Sprintf("Readiness probe %d for container %s is not successful: %s", i, containerName, probeStatus.Status))
+			log.G(ctx).Debugf("Readiness probe %d for container %s is not successful: %s", i, containerName, probeStatus.Status)
 		}
 	}
 
@@ -427,7 +431,7 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 		// For liveness probes, FAILED_THRESHOLD means the container should be considered dead
 		if probeStatus.Status == "FAILED_THRESHOLD" {
 			allProbesSuccessful = false
-			log.G(ctx).Warning(fmt.Sprintf("Liveness probe %d for container %s has failed threshold: %s", i, containerName, probeStatus.Status))
+			log.G(ctx).Warningf("Liveness probe %d for container %s has failed threshold: %s", i, containerName, probeStatus.Status)
 		}
 	}
 

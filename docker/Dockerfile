@@ -16,7 +16,8 @@ ENV TIMEZONE=America/New_York
 # Install system packages
 RUN DEBIAN_FRONTEND=noninteractive \
   dnf install -y epel-release \
-  && dnf install -y slurm-slurmd rpm-build slurm-slurmctld apptainer
+  && dnf install -y slurm-slurmd rpm-build slurm-slurmctld apptainer sshpass \
+  && dnf clean all
 
 RUN slurm-setuser -y
 
@@ -31,7 +32,8 @@ COPY docker/startup.sh /etc/startup.sh
 RUN chmod 555 /etc/startup.sh
 
 # Install MUNGE from source (to get the latest version)
-RUN dnf install -y wget tar make gcc openssl-devel libtool autoconf automake
+RUN dnf install -y wget tar make gcc openssl-devel libtool autoconf automake \
+  && dnf clean all
 
 RUN wget https://github.com/dun/munge/releases/download/munge-0.5.16/munge-0.5.16.tar.xz \
   && tar -xf munge-0.5.16.tar.xz \
@@ -41,8 +43,6 @@ RUN wget https://github.com/dun/munge/releases/download/munge-0.5.16/munge-0.5.1
   && make install
 RUN ln -s /usr/local/munge/bin/* /usr/local/bin/ && ln -s /usr/local/munge/sbin/* /usr/local/sbin/
 
-# Clean up
-RUN dnf clean all
 
 WORKDIR /root
 
@@ -52,4 +52,4 @@ ENV SLURMCONFIGPATH=/root/SlurmConfig.yaml
 
 RUN mkdir -p /cvmfs/grid.cern.ch/etc/grid-security
 
-CMD ["/bin/sh", "-c", "/etc/startup.sh && SHARED_FS=true /sidecar/slurm-sidecar "]
+ENTRYPOINT ["/bin/sh", "-c", "/etc/startup.sh && SHARED_FS=true /sidecar/slurm-sidecar "]

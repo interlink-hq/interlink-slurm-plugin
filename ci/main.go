@@ -59,10 +59,9 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 			WithFile("/etc/interlink/InterLinkConfig.yaml", pluginConfig).
 			WithEnvVariable("SLURMCONFIGPATH", "/etc/interlink/InterLinkConfig.yaml").
 			WithEnvVariable("SHARED_FS", "true").
-			WithExposedPort(4000).
-			WithExec([]string{}, dagger.ContainerWithExecOpts{UseEntrypoint: true, InsecureRootCapabilities: true})
+			WithExposedPort(4000)
 
-		pluginEndpoint, err := plugin.AsService().Start(ctx)
+		pluginEndpoint, err := plugin.AsService(dagger.ContainerAsServiceOpts{Args: []string{}, UseEntrypoint: true, InsecureRootCapabilities: true}).Start(ctx)
 		if err != nil {
 			return "", err
 		}
