@@ -16,14 +16,12 @@ package main
 
 import (
 	"context"
-
 	"dagger/interlink-slurm/internal/dagger"
 )
 
 type InterlinkSlurm struct{}
 
 func (m *InterlinkSlurm) RunTest(interlinkVersion string, pluginService *dagger.Service, manifests *dagger.Directory, interlinkConfig *dagger.File, pluginConfig *dagger.File, src *dagger.Directory,
-
 ) *dagger.Container {
 	registry := dag.Container().From("registry").
 		WithExposedPort(5000).AsService()
@@ -48,10 +46,9 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 	// +optional
 	pluginEndpoint *dagger.Service,
 	// +optional
-	// +defaultPath="./manifests/interlink-config.yaml"
+	// +defaultPath="./manifests/plugin-config.yaml"
 	interlinkConfig *dagger.File,
 ) (string, error) {
-
 	if pluginEndpoint == nil {
 
 		// build using Dockerfile and publish to registry
@@ -62,10 +59,9 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 			WithFile("/etc/interlink/InterLinkConfig.yaml", pluginConfig).
 			WithEnvVariable("SLURMCONFIGPATH", "/etc/interlink/InterLinkConfig.yaml").
 			WithEnvVariable("SHARED_FS", "true").
-			WithExposedPort(4000).
-			WithExec([]string{}, dagger.ContainerWithExecOpts{UseEntrypoint: true, InsecureRootCapabilities: true})
+			WithExposedPort(4000)
 
-		pluginEndpoint, err := plugin.AsService().Start(ctx)
+		pluginEndpoint, err := plugin.AsService(dagger.ContainerAsServiceOpts{Args: []string{}, UseEntrypoint: true, InsecureRootCapabilities: true}).Start(ctx)
 		if err != nil {
 			return "", err
 		}

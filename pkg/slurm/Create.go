@@ -18,31 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
-
-	"regexp"
 )
-
-func parseMem(val string) (int64, error) {
-	re := regexp.MustCompile(`^(\d+)([KMG]?)$`)
-	m := re.FindStringSubmatch(val)
-	if len(m) != 3 {
-		return 0, errors.New("invalid memory format: " + val)
-	}
-	n, err := strconv.ParseInt(m[1], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	switch m[2] {
-	case "G":
-		return n * 1024 * 1024 * 1024, nil
-	case "M":
-		return n * 1024 * 1024, nil
-	case "K":
-		return n * 1024, nil
-	default:
-		return n, nil
-	}
-}
 
 // SubmitHandler generates and submits a SLURM batch script according to provided data.
 // 1 Pod = 1 Job. If a Pod has multiple containers, every container is a line with it's parameters in the SLURM script.
@@ -208,7 +184,28 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			attribute.StringSlice("job.container"+strconv.Itoa(i)+".args", container.Args),
 		)
 
-		singularity_command_pod = append(singularity_command_pod, SingularityCommand{singularityCommand: singularity_command, containerName: container.Name, containerArgs: container.Args, containerCommand: container.Command, isInitContainer: isInit})
+		// Process probes if enabled
+		var readinessProbes, livenessProbes []ProbeCommand
+		if h.Config.EnableProbes && !isInit {
+			readinessProbes, livenessProbes = translateKubernetesProbes(spanCtx, container)
+			if len(readinessProbes) > 0 || len(livenessProbes) > 0 {
+				log.G(h.Ctx).Info("-- Container " + container.Name + " has probes configured")
+				span.SetAttributes(
+					attribute.Int("job.container"+strconv.Itoa(i)+".readiness_probes", len(readinessProbes)),
+					attribute.Int("job.container"+strconv.Itoa(i)+".liveness_probes", len(livenessProbes)),
+				)
+			}
+		}
+
+		singularity_command_pod = append(singularity_command_pod, SingularityCommand{
+			singularityCommand: singularity_command,
+			containerName:      container.Name,
+			containerArgs:      container.Args,
+			containerCommand:   container.Command,
+			isInitContainer:    isInit,
+			readinessProbes:    readinessProbes,
+			livenessProbes:     livenessProbes,
+		})
 	}
 
 	span.SetAttributes(
