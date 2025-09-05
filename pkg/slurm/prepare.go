@@ -827,7 +827,7 @@ highestExitCode=0
 	if hasProbes && config.EnableProbes {
 		for _, singularityCommand := range commands {
 			if len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0 {
-				cleanupScript := generateProbeCleanupScript(singularityCommand.readinessProbes, singularityCommand.livenessProbes)
+				cleanupScript := generateProbeCleanupScript(singularityCommand.containerName, singularityCommand.readinessProbes, singularityCommand.livenessProbes)
 				stringToBeWritten.WriteString(cleanupScript)
 				break // Only need one cleanup script
 			}
