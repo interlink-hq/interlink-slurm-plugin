@@ -130,13 +130,8 @@ executeHTTPProbe() {
     
     url="${scheme,,}://${host}:${port}${path}"
     
-    # Use singularity exec to run curl inside the container
-    `)
-	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
-	for _, opt := range config.SingularityDefaultOptions {
-		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
-	}
-	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" curl -f -s "$url" > /dev/null 2>&1
+    # Use curl from host system to avoid container dependency
+    timeout "${timeout}" curl -f -s "$url" > /dev/null 2>&1
     return $?
 }
 
@@ -147,7 +142,7 @@ executeExecProbe() {
     local command=("$@")
     
     # Use singularity exec to run the command inside the container
-    `, imageName))
+    `)
 	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
 	for _, opt := range config.SingularityDefaultOptions {
 		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
@@ -156,7 +151,8 @@ executeExecProbe() {
     return $?
 }
 
-runProbe() {
+runProbe() {`, imageName))
+	scriptBuilder.WriteString(`
     local probe_type="$1"
     local container_name="$2"
     local initial_delay="$3"
@@ -225,7 +221,7 @@ runProbe() {
             if [ $consecutive_failures -ge $failure_threshold ]; then
                 printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts" >&2
                 echo "FAILED_THRESHOLD" > "$probe_status_file"
-                return 1
+                # Continue probing even after failure threshold for monitoring
             fi
         fi
         
@@ -235,7 +231,7 @@ runProbe() {
     return 0
 }
 
-`, imageName))
+`)
 
 	// Generate readiness probe calls
 	for i, probe := range readinessProbes {
@@ -304,7 +300,7 @@ cleanup_probes() {
 `)
 
 	containerVarName := strings.ReplaceAll(containerName, "-", "_")
-	
+
 	// Kill readiness probes
 	for i := range readinessProbes {
 		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$READINESS_PROBE_%s_%d_PID" ]; then
