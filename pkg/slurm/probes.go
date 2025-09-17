@@ -131,8 +131,7 @@ executeHTTPProbe() {
     url="${scheme,,}://${host}:${port}${path}"
     
     # Use curl outside the container
-    `)
-	scriptBuilder.WriteString(fmt.Sprintf(` timeout "${timeout}" curl -f -s "$url" &> /dev/null
+    timeout "${timeout}" curl -f -s "$url" &> /dev/null
     return $?
 }
 
