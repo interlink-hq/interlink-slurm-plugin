@@ -213,7 +213,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, string(data.Pod.UID), filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+	path, err := produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, singularity_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
 	if err != nil {
 		log.G(h.Ctx).Error(err)
 		os.RemoveAll(filesPath)

@@ -528,7 +528,7 @@ func prepareMounts(
 func produceSLURMScript(
 	Ctx context.Context,
 	config SlurmConfig,
-	podUID string,
+	pod v1.Pod,
 	path string,
 	metadata metav1.ObjectMeta,
 	commands []SingularityCommand,
@@ -539,6 +539,8 @@ func produceSLURMScript(
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
 	span.AddEvent("Producing SLURM script")
+
+	podUID := string(pod.UID)
 
 	log.G(Ctx).Info("-- Creating file for the Slurm script")
 	prefix = ""
@@ -807,6 +809,14 @@ highestExitCode=0
 
 	`
 	stringToBeWritten.WriteString(sbatch_common_funcs_macros)
+
+	// Adding tracability between pod and job ID.
+	stringToBeWritten.WriteString("\nprintf '%s\n' \"This pod ")
+	stringToBeWritten.WriteString(pod.Name)
+	stringToBeWritten.WriteString("/")
+	stringToBeWritten.WriteString(podUID)
+	stringToBeWritten.WriteString(" has been submitted to SLURM node ${SLURMD_NODENAME}.\"")
+	stringToBeWritten.WriteString("\nprintf '%s\n' \"To get more info, please run: scontrol show job ${SLURM_JOBID}.\"")
 
 	// Adding the workingPath as variable.
 	stringToBeWritten.WriteString("\nexport workingPath=")
