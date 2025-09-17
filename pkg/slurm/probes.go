@@ -130,13 +130,9 @@ executeHTTPProbe() {
     
     url="${scheme,,}://${host}:${port}${path}"
     
-    # Use singularity exec to run curl inside the container
+    # Use curl outside the container
     `)
-	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
-	for _, opt := range config.SingularityDefaultOptions {
-		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
-	}
-	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" curl -f -s "$url" > /dev/null 2>&1
+	scriptBuilder.WriteString(fmt.Sprintf(` timeout "${timeout}" curl -f -s "$url" &> /dev/null
     return $?
 }
 
