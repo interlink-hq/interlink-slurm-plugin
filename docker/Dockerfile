@@ -8,37 +8,41 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o bin/slurm-sidecar cmd/main.go
 
 # Deploy the application binary into a lean image
 #FROM ubuntu:latest AS build-release-stage
-FROM ubuntu:22.04 
+FROM almalinux:9
 
 # Settings for all images
 ENV TIMEZONE=America/New_York
 
-# Run system updates
-RUN apt-get update && apt-get -y upgrade
-
-# Set time zone
-RUN ln -sn /usr/share/zoneinfo/${TIMEZONE} /etc/localtime \
-    && echo ${TIMEZONE} > /etc/timezone \
-    && apt-get -y install tzdata
-
-# Set locale
-RUN apt-get -y install locales \
-    && locale-gen en_US.UTF-8 \
-    && update-locale LANG=en_US.UTF-8 LC_MESSAGES=POSIX
-
 # Install system packages
 RUN DEBIAN_FRONTEND=noninteractive \
-    apt-get -y install munge \
-                   slurm-wlm
+  dnf install -y epel-release \
+  && dnf install -y slurm-slurmd rpm-build slurm-slurmctld apptainer sshpass \
+  && dnf clean all
+
+RUN slurm-setuser -y
 
 # Slurm configuration
 COPY docker/slurm.conf /etc/slurm/slurm.conf
-RUN mkdir -p /var/spool/slurmctld \
-    && chown slurm:slurm /var/spool/slurmctld
+COPY docker/cgroup.conf /etc/slurm/cgroup.conf
+RUN mkdir -p /var/spool/slurmctld
+RUN mkdir -p /var/spool/slurmd /var/log/slurm /etc/slurm
 
 # Startup configuration
 COPY docker/startup.sh /etc/startup.sh
 RUN chmod 555 /etc/startup.sh
+
+# Install MUNGE from source (to get the latest version)
+RUN dnf install -y wget tar make gcc openssl-devel libtool autoconf automake \
+  && dnf clean all
+
+RUN wget https://github.com/dun/munge/releases/download/munge-0.5.16/munge-0.5.16.tar.xz \
+  && tar -xf munge-0.5.16.tar.xz \
+  && cd munge-0.5.16 \
+  && ./configure --prefix=/ --sysconfdir=/etc/munge --with-munge-user=root --with-munge-group=root \
+  && make \
+  && make install
+RUN ln -s /usr/local/munge/bin/* /usr/local/bin/ && ln -s /usr/local/munge/sbin/* /usr/local/sbin/
+
 
 WORKDIR /root
 
@@ -46,10 +50,6 @@ COPY --from=build-stage /app/bin/slurm-sidecar /sidecar/slurm-sidecar
 
 ENV SLURMCONFIGPATH=/root/SlurmConfig.yaml
 
-RUN apt-get update && apt-get install -y software-properties-common \
- && add-apt-repository -y ppa:apptainer/ppa \
- && apt-get install -y apptainer
-
 RUN mkdir -p /cvmfs/grid.cern.ch/etc/grid-security
 
-CMD ["/bin/sh", "-c", "/etc/startup.sh && SHARED_FS=true /sidecar/slurm-sidecar"]
+ENTRYPOINT ["/bin/sh", "-c", "/etc/startup.sh && SHARED_FS=true /sidecar/slurm-sidecar "]

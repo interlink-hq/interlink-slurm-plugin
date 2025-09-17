@@ -23,10 +23,40 @@ type SlurmConfig struct {
 	SingularityDefaultOptions []string `yaml:"SingularityDefaultOptions"`
 	SingularityPrefix         string   `yaml:"SingularityPrefix"`
 	SingularityPath           string   `yaml:"SingularityPath"`
+	EnableProbes              bool     `yaml:"EnableProbes"`
 	set                       bool
 }
 
 type CreateStruct struct {
 	PodUID string `json:"PodUID"`
 	PodJID string `json:"PodJID"`
+}
+
+type ProbeType string
+
+const (
+	ProbeTypeHTTP ProbeType = "http"
+	ProbeTypeExec ProbeType = "exec"
+)
+
+type ProbeCommand struct {
+	Type                ProbeType
+	HTTPGetAction       *HTTPGetAction
+	ExecAction          *ExecAction
+	InitialDelaySeconds int32
+	PeriodSeconds       int32
+	TimeoutSeconds      int32
+	SuccessThreshold    int32
+	FailureThreshold    int32
+}
+
+type HTTPGetAction struct {
+	Path   string
+	Port   int32
+	Host   string
+	Scheme string
+}
+
+type ExecAction struct {
+	Command []string
 }

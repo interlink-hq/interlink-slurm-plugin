@@ -1,12 +1,13 @@
 {
   "name": "interlink-slurm",
-  "sdk": "go",
+  "engineVersion": "v0.18.9",
+  "sdk": {
+    "source": "go"
+  },
   "dependencies": [
     {
       "name": "interlink",
-      "source": "github.com/interTwin-eu/interLink/ci@dc9f75bd3562db597c2ae3030a3520179b2d5ecc"
+      "source": "/Users/dciangot/git/interLink/ci"
     }
-  ],
-  "source": ".",
-  "engineVersion": "v0.13.3"
+  ]
 }
