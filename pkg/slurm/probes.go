@@ -140,17 +140,18 @@ executeExecProbe() {
     local container_name="$2"
     shift 2
     local command=("$@")
-    
+
     # Use singularity exec to run the command inside the container
-    `, imageName))
+    `)
 	scriptBuilder.WriteString(fmt.Sprintf(`"%s" exec`, config.SingularityPath))
 	for _, opt := range config.SingularityDefaultOptions {
 		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
 	}
 	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" "${command[@]}"
     return $?
-}
+}`, imageName))
 
+	scriptBuilder.WriteString(`
 runProbe() {
     local probe_type="$1"
     local container_name="$2"
@@ -230,7 +231,7 @@ runProbe() {
     return 0
 }
 
-`, imageName))
+`)
 
 	// Generate readiness probe calls
 	for i, probe := range readinessProbes {
