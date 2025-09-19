@@ -94,11 +94,16 @@ Do not forget to set the SLURMCONFIGPATH environment variable to point to your c
 
 ```yaml
 SidecarPort: "4000"
+Socket: ""
 SbatchPath: "/usr/bin/sbatch"
 ScancelPath: "/usr/bin/scancel"
 SqueuePath: "/usr/bin/squeue"
+SinfoPath: "/usr/bin/sinfo"
 CommandPrefix: ""
-ImagePrefix: ""
+ImagePrefix: "docker://"
+SingularityPath: "singularity"
+SingularityPrefix: ""
+SingularityDefaultOptions: []
 ExportPodData: true
 DataRootFolder: ".local/interlink/jobs/"
 Namespace: "vk"
@@ -108,6 +113,7 @@ TsocksLoginNode: "login01"
 BashPath: /bin/bash
 VerboseLogging: true
 ErrorsOnlyLogging: false
+EnableProbes: true
 ```
 
 ### :pencil2: Annotations
@@ -130,10 +136,16 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | Key         | Value     |
 |--------------|-----------|
 | SidecarPort | the sidecar listening port. Sidecar and Interlink will communicate on this port. Set $SIDECARPORT environment variable to specify a custom one |
+| Socket | Unix socket path for communication (optional) |
 | SbatchPath | path to your Slurm's sbatch binary |
 | ScancelPath | path to your Slurm's scancel binary |
+| SqueuePath | path to your Slurm's squeue binary |
+| SinfoPath | path to your Slurm's sinfo binary |
 | CommandPrefix | here you can specify a prefix for the programmatically generated script (for the slurm plugin). Basically, if you want to run anything before the script itself, put it here. |
 | ImagePrefix | here you can specify a prefix if you want to prefix the container image name. For example: "docker://". This will do something only if the prefix is not added yet, and if there is no "/" as the first letter of the image name (e.g.: "/root/image.tgz"), which would be an absolute path. Warning: using this field will not allow relative path anymore (e.g.: ./image.tgz and ImagePrefix set to "docker://" will generate "docker://./image.tgz instead of relative path. Use absolute path instead of relative path). Warning2: the the container annotation "slurm-job.vk.io/image-root" is set, this take precedence over ImagePrefix.|
+| SingularityPath | path to your Singularity binary |
+| SingularityPrefix | prefix to add to Singularity image names |
+| SingularityDefaultOptions | array of default options to pass to Singularity commands |
 | ExportPodData | Set it to true if you want to export Pod's ConfigMaps and Secrets as mountpoints in your Singularity Container |
 | DataRootFolder | Specify where to store the exported ConfigMaps/Secrets locally |
 | Namespace | Namespace where Pods in your K8S will be registered |
@@ -143,6 +155,7 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | BashPath | Path to your Bash shell |
 | VerboseLogging | Enable or disable Debug messages on logs. True or False values only |
 | ErrorsOnlyLogging | Specify if you want to get errors only on logs. True or false values only |
+| EnableProbes | Enable or disable health and readiness probes. True or False values only |
 
 ### :wrench: Environment Variables list
 
