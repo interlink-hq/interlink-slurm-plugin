@@ -25,6 +25,10 @@ type SlurmConfig struct {
 	SingularityPath           string   `yaml:"SingularityPath"`
 	EnableProbes              bool     `yaml:"EnableProbes"`
 	set                       bool
+	EnrootDefaultOptions      []string `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
+	EnrootPrefix              string   `yaml:"EnrootPrefix"`
+	EnrootPath                string   `yaml:"EnrootPath"`
+	ContainerRuntime          string   `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 }
 
 type CreateStruct struct {
@@ -59,4 +63,15 @@ type HTTPGetAction struct {
 
 type ExecAction struct {
 	Command []string
+}
+
+type ContainerCommand struct {
+	containerName    string
+	isInitContainer  bool
+	runtimeCommand   []string
+	containerCommand []string
+	containerArgs    []string
+	containerImage   string
+	readinessProbes  []ProbeCommand
+	livenessProbes   []ProbeCommand
 }
