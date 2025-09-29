@@ -53,16 +53,6 @@ type ResourceLimits struct {
 	Memory int64
 }
 
-type SingularityCommand struct {
-	containerName      string
-	isInitContainer    bool
-	singularityCommand []string
-	containerCommand   []string
-	containerArgs      []string
-	readinessProbes    []ProbeCommand
-	livenessProbes     []ProbeCommand
-}
-
 // stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
 func stringToHex(str string) string {
 	var buffer bytes.Buffer
@@ -196,8 +186,15 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 
 	envfilePath := (config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + container.Name + "_envfile.properties")
 	log.G(Ctx).Info("-- Appending envs using envfile " + envfilePath)
-	envs = append(envs, "--env-file")
-	envs = append(envs, envfilePath)
+
+	switch config.ContainerRuntime {
+	case "singularity":
+		envs = append(envs, "--env-file")
+		envs = append(envs, envfilePath)
+	case "enroot":
+		mountEnvs := envfilePath + ":" + "/etc/environment"
+		envs = append(envs, "--mount", mountEnvs)
+	}
 
 	envfile, err := os.Create(envfilePath)
 	if err != nil {
@@ -345,7 +342,12 @@ func prepareMountsSimpleVolume(
 			log.G(Ctx).Info(splittedEnvName[len(splittedEnvName)-1])
 			prefix += "\necho \"${" + envVarName + "}\" > \"" + hostFilePath + "\""
 		}
-		mountedDataSB.WriteString(" --bind ")
+		switch config.ContainerRuntime {
+		case "singularity":
+			mountedDataSB.WriteString(" --bind ")
+		case "enroot":
+			mountedDataSB.WriteString(" --mount ")
+		}
 		mountedDataSB.WriteString(volumesHostToContainerPath)
 	}
 	return nil
@@ -489,7 +491,12 @@ func prepareMounts(
 				return "", err
 			}
 
-			mountedDataSB.WriteString(" --bind ")
+			switch config.ContainerRuntime {
+			case "singularity":
+				mountedDataSB.WriteString(" --bind ")
+			case "enroot":
+				mountedDataSB.WriteString(" --mount ")
+			}
 			mountedDataSB.WriteString(hostPath + ":" + containerPath)
 
 			// if the read-only flag is set, we add it to the mountedDataSB
@@ -531,7 +538,7 @@ func produceSLURMScript(
 	pod v1.Pod,
 	path string,
 	metadata metav1.ObjectMeta,
-	commands []SingularityCommand,
+	commands []ContainerCommand,
 	resourceLimits ResourceLimits,
 	isDefaultCPU bool,
 	isDefaultRam bool,
@@ -633,8 +640,8 @@ func produceSLURMScript(
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
 			mpi := append([]string{"mpiexec", "-np", "$SLURM_NTASKS"}, strings.Split(mpiFlags, " ")...)
-			for _, singularityCommand := range commands {
-				singularityCommand.singularityCommand = append(mpi, singularityCommand.singularityCommand...)
+			for _, containerCommand := range commands {
+				containerCommand.runtimeCommand = append(mpi, containerCommand.runtimeCommand...)
 			}
 		}
 	}
@@ -828,46 +835,62 @@ highestExitCode=0
 
 	// Generate probe cleanup script first if any probes exist
 	var hasProbes bool
-	for _, singularityCommand := range commands {
-		if len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0 {
+	for _, containerCommand := range commands {
+		if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 {
 			hasProbes = true
 			break
 		}
 	}
 	if hasProbes && config.EnableProbes {
-		for _, singularityCommand := range commands {
-			if len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0 {
-				cleanupScript := generateProbeCleanupScript(singularityCommand.containerName, singularityCommand.readinessProbes, singularityCommand.livenessProbes)
+		for _, containerCommand := range commands {
+			if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 {
+				cleanupScript := generateProbeCleanupScript(containerCommand.containerName, containerCommand.readinessProbes, containerCommand.livenessProbes)
 				stringToBeWritten.WriteString(cleanupScript)
 				break // Only need one cleanup script
 			}
 		}
 	}
 
-	for _, singularityCommand := range commands {
+	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
 
-		if singularityCommand.isInitContainer {
+		if config.ContainerRuntime == "enroot" {
+			// Import and convert (if necessary) a container image from a specific location to an Enroot image.
+			// The resulting image can be unpacked using the create command.
+			// Add a custom name of the output image file (defaults to "URI.sqsh")
+			// to avoid conflict with other containers in the same pod or with different pod in the same node using the same image.
+			// TO DO: make a function to check if image is already present in the node.
+			imageOutputName := containerCommand.containerName + podUID + ".sqsh"
+			stringToBeWritten.WriteString(config.EnrootPath + " ")
+			stringToBeWritten.WriteString("import " + "--output " + imageOutputName + " " + prepareImage(Ctx, config, metadata, containerCommand.containerImage))
+			stringToBeWritten.WriteString("\n")
+			// Create container unpacking previously created image
+			stringToBeWritten.WriteString(config.EnrootPath + " ")
+			stringToBeWritten.WriteString("create " + "--name " + containerCommand.containerName + podUID + " " + imageOutputName)
+			stringToBeWritten.WriteString("\n")
+		}
+
+		if containerCommand.isInitContainer {
 			stringToBeWritten.WriteString("runInitCtn ")
 		} else {
 			stringToBeWritten.WriteString("runCtn ")
 		}
-		stringToBeWritten.WriteString(singularityCommand.containerName)
+		stringToBeWritten.WriteString(containerCommand.containerName)
 		stringToBeWritten.WriteString(" ")
-		stringToBeWritten.WriteString(strings.Join(singularityCommand.singularityCommand[:], " "))
+		stringToBeWritten.WriteString(strings.Join(containerCommand.runtimeCommand[:], " "))
 
-		if singularityCommand.containerCommand != nil {
+		if containerCommand.containerCommand != nil {
 			// Case the pod specified a container entrypoint array to override.
-			for _, commandEntry := range singularityCommand.containerCommand {
+			for _, commandEntry := range containerCommand.containerCommand {
 				stringToBeWritten.WriteString(" ")
 				// We convert from GO array to shell command, so escaping is important to avoid space, quote issues and injection vulnerabilities.
 				stringToBeWritten.WriteString(shellescape.Quote(commandEntry))
 			}
 		}
-		if singularityCommand.containerArgs != nil {
+		if containerCommand.containerArgs != nil {
 			// Case the pod specified a container command array to override.
-			for _, argsEntry := range singularityCommand.containerArgs {
+			for _, argsEntry := range containerCommand.containerArgs {
 				stringToBeWritten.WriteString(" ")
 				// We convert from GO array to shell command, so escaping is important to avoid space, quote issues and injection vulnerabilities.
 				stringToBeWritten.WriteString(shellescape.Quote(argsEntry))
@@ -875,19 +898,19 @@ highestExitCode=0
 		}
 
 		// Generate probe scripts if enabled and not an init container
-		if config.EnableProbes && !singularityCommand.isInitContainer && (len(singularityCommand.readinessProbes) > 0 || len(singularityCommand.livenessProbes) > 0) {
+		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0) {
 			// Extract the image name from the singularity command
 			var imageName string
-			for i, arg := range singularityCommand.singularityCommand {
+			for i, arg := range containerCommand.runtimeCommand {
 				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
 					imageName = arg
 					break
 				}
 				// Look for image after singularity run/exec command
-				if (arg == "run" || arg == "exec") && i+1 < len(singularityCommand.singularityCommand) {
+				if (arg == "run" || arg == "exec") && i+1 < len(containerCommand.runtimeCommand) {
 					// Skip any options and find the image
-					for j := i + 1; j < len(singularityCommand.singularityCommand); j++ {
-						nextArg := singularityCommand.singularityCommand[j]
+					for j := i + 1; j < len(containerCommand.runtimeCommand); j++ {
+						nextArg := containerCommand.runtimeCommand[j]
 						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
 							imageName = nextArg
 							break
@@ -899,12 +922,12 @@ highestExitCode=0
 
 			if imageName != "" {
 				// Store probe metadata for status checking
-				err := storeProbeMetadata(path, singularityCommand.containerName, len(singularityCommand.readinessProbes), len(singularityCommand.livenessProbes))
+				err := storeProbeMetadata(path, containerCommand.containerName, len(containerCommand.readinessProbes), len(containerCommand.livenessProbes))
 				if err != nil {
 					log.G(Ctx).Error("Failed to store probe metadata: ", err)
 				}
 
-				probeScript := generateProbeScript(Ctx, config, singularityCommand.containerName, imageName, singularityCommand.readinessProbes, singularityCommand.livenessProbes)
+				probeScript := generateProbeScript(Ctx, config, containerCommand.containerName, imageName, containerCommand.readinessProbes, containerCommand.livenessProbes)
 				stringToBeWritten.WriteString("\n")
 				stringToBeWritten.WriteString(probeScript)
 			}
@@ -1342,4 +1365,77 @@ func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch 
 		return 0, err
 	}
 	return int32(exitCodeInt), nil
+}
+
+func prepareRuntimeCommand(config SlurmConfig, container v1.Container, metadata metav1.ObjectMeta) []string {
+	runtimeCommand := make([]string, 0, 1)
+	switch config.ContainerRuntime {
+	case "singularity":
+		singularityMounts := ""
+		if singMounts, ok := metadata.Annotations["slurm-job.vk.io/singularity-mounts"]; ok {
+			singularityMounts = singMounts
+		}
+
+		singularityOptions := ""
+		if singOpts, ok := metadata.Annotations["slurm-job.vk.io/singularity-options"]; ok {
+			singularityOptions = singOpts
+		}
+
+		// See https://github.com/interTwin-eu/interlink-slurm-plugin/issues/32#issuecomment-2416031030
+		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
+		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
+		singularityCommand := ""
+		if len(container.Command) != 0 {
+			singularityCommand = "exec"
+		} else {
+			singularityCommand = "run"
+		}
+
+		// no-eval is important so that singularity does not evaluate env var, because the shellquote has already done the safety check.
+		commstr1 := []string{config.SingularityPath, singularityCommand}
+		commstr1 = append(commstr1, config.SingularityDefaultOptions...)
+		commstr1 = append(commstr1, singularityMounts, singularityOptions)
+		runtimeCommand = commstr1
+	case "enroot":
+		enrootMounts := ""
+		if enMounts, ok := metadata.Annotations["slurm-job.vk.io/enroot-mounts"]; ok {
+			enrootMounts = enMounts
+		}
+
+		enrootOptions := ""
+		if enOpts, ok := metadata.Annotations["slurm-job.vk.io/enroot-options"]; ok {
+			enrootOptions = enOpts
+		}
+
+		enrootCommand := "start"
+		commstr1 := []string{config.EnrootPath, enrootCommand}
+		commstr1 = append(commstr1, config.EnrootDefaultOptions...)
+		commstr1 = append(commstr1, enrootMounts, enrootOptions)
+		runtimeCommand = commstr1
+	}
+	return runtimeCommand
+}
+
+func prepareImage(Ctx context.Context, config SlurmConfig, metadata metav1.ObjectMeta, containerImage string) string {
+	image := containerImage
+	imagePrefix := config.ImagePrefix
+
+	imagePrefixAnnotationFound := false
+	if imagePrefixAnnotation, ok := metadata.Annotations["slurm-job.vk.io/image-root"]; ok {
+		// This takes precedence over ImagePrefix
+		imagePrefix = imagePrefixAnnotation
+		imagePrefixAnnotationFound = true
+	}
+	log.G(Ctx).Info("imagePrefix from annotation? ", imagePrefixAnnotationFound, " value: ", imagePrefix)
+
+	// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
+	// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
+	if strings.HasPrefix(image, "/") {
+		log.G(Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
+	} else if !strings.HasPrefix(image, imagePrefix) {
+		image = imagePrefix + containerImage
+	} else {
+		log.G(Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
+	}
+	return image
 }
