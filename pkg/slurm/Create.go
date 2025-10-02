@@ -148,14 +148,15 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		)
 
 		// Process probes if enabled
-		var readinessProbes, livenessProbes []ProbeCommand
+		var readinessProbes, livenessProbes, startupProbes []ProbeCommand
 		if h.Config.EnableProbes && !isInit {
-			readinessProbes, livenessProbes = translateKubernetesProbes(spanCtx, container)
-			if len(readinessProbes) > 0 || len(livenessProbes) > 0 {
+			readinessProbes, livenessProbes, startupProbes = translateKubernetesProbes(spanCtx, container)
+			if len(readinessProbes) > 0 || len(livenessProbes) > 0 || len(startupProbes) > 0 {
 				log.G(h.Ctx).Info("-- Container " + container.Name + " has probes configured")
 				span.SetAttributes(
 					attribute.Int("job.container"+strconv.Itoa(i)+".readiness_probes", len(readinessProbes)),
 					attribute.Int("job.container"+strconv.Itoa(i)+".liveness_probes", len(livenessProbes)),
+					attribute.Int("job.container"+strconv.Itoa(i)+".startup_probes", len(startupProbes)),
 				)
 			}
 		}
@@ -168,6 +169,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			isInitContainer:  isInit,
 			readinessProbes:  readinessProbes,
 			livenessProbes:   livenessProbes,
+			startupProbes:    startupProbes,
 			containerImage:   image,
 		})
 	}

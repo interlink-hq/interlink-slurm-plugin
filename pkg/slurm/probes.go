@@ -15,9 +15,18 @@ import (
 )
 
 // translateKubernetesProbes converts Kubernetes probe specifications to internal ProbeCommand format
-func translateKubernetesProbes(ctx context.Context, container v1.Container) ([]ProbeCommand, []ProbeCommand) {
-	var readinessProbes, livenessProbes []ProbeCommand
+func translateKubernetesProbes(ctx context.Context, container v1.Container) ([]ProbeCommand, []ProbeCommand, []ProbeCommand) {
+	var readinessProbes, livenessProbes, startupProbes []ProbeCommand
 	span := trace.SpanFromContext(ctx)
+
+	// Handle startup probe
+	if container.StartupProbe != nil {
+		probe := translateSingleProbe(ctx, container.StartupProbe)
+		if probe != nil {
+			startupProbes = append(startupProbes, *probe)
+			span.AddEvent("Translated startup probe for container " + container.Name)
+		}
+	}
 
 	// Handle readiness probe
 	if container.ReadinessProbe != nil {
@@ -37,7 +46,7 @@ func translateKubernetesProbes(ctx context.Context, container v1.Container) ([]P
 		}
 	}
 
-	return readinessProbes, livenessProbes
+	return readinessProbes, livenessProbes, startupProbes
 }
 
 // translateSingleProbe converts a single Kubernetes probe to internal format
@@ -103,11 +112,11 @@ func translateSingleProbe(ctx context.Context, k8sProbe *v1.Probe) *ProbeCommand
 }
 
 // generateProbeScript generates the shell script commands for executing probes
-func generateProbeScript(ctx context.Context, config SlurmConfig, containerName string, imageName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
+func generateProbeScript(ctx context.Context, config SlurmConfig, containerName string, imageName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand, startupProbes []ProbeCommand) string {
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("Generating probe script for container " + containerName)
 
-	if len(readinessProbes) == 0 && len(livenessProbes) == 0 {
+	if len(readinessProbes) == 0 && len(livenessProbes) == 0 && len(startupProbes) == 0 {
 		return ""
 	}
 
@@ -231,7 +240,133 @@ runProbe() {
     return 0
 }
 
+runStartupProbe() {
+    local probe_type="$1"
+    local container_name="$2"
+    local initial_delay="$3"
+    local period="$4"
+    local timeout="$5"
+    local success_threshold="$6"
+    local failure_threshold="$7"
+    local probe_name="$8"
+    local probe_index="$9"
+    shift 9
+    local probe_args=("$@")
+
+    local probe_status_file="${workingPath}/${probe_name}-probe-${container_name}-${probe_index}.status"
+
+    printf "%%s\n" "$(date -Is --utc) Starting ${probe_name} probe for container ${container_name}..."
+
+    # Initialize probe status as running
+    echo "RUNNING" > "$probe_status_file"
+
+    # Initial delay - startup probe waits before starting
+    if [ "$initial_delay" -gt 0 ]; then
+        printf "%%s\n" "$(date -Is --utc) Waiting ${initial_delay}s before starting ${probe_name} probe..."
+        sleep "$initial_delay"
+    fi
+
+    local consecutive_successes=0
+    local consecutive_failures=0
+
+    while true; do
+        if [ "$probe_type" = "http" ]; then
+            executeHTTPProbe "${probe_args[@]}" "$container_name"
+        elif [ "$probe_type" = "exec" ]; then
+            executeExecProbe "$timeout" "$container_name" "${probe_args[@]}"
+        fi
+
+        local exit_code=$?
+
+        if [ $exit_code -eq 0 ]; then
+            consecutive_successes=$((consecutive_successes + 1))
+            consecutive_failures=0
+            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} (${consecutive_successes}/${success_threshold})"
+
+            if [ $consecutive_successes -ge $success_threshold ]; then
+                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe successful for ${container_name} - other probes can now start"
+                echo "SUCCESS" > "$probe_status_file"
+                return 0
+            fi
+        else
+            consecutive_failures=$((consecutive_failures + 1))
+            consecutive_successes=0
+            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
+
+            if [ $consecutive_failures -ge $failure_threshold ]; then
+                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts - container should be restarted" >&2
+                echo "FAILED_THRESHOLD" > "$probe_status_file"
+                return 1
+            fi
+        fi
+
+        sleep "$period"
+    done
+}
+
+waitForStartupProbes() {
+    local container_name="$1"
+    local startup_probe_count="$2"
+
+    if [ "$startup_probe_count" -eq 0 ]; then
+        return 0
+    fi
+
+    printf "%%s\n" "$(date -Is --utc) Waiting for startup probes to succeed before starting other probes for ${container_name}..."
+
+    while true; do
+        local all_startup_probes_successful=true
+
+        for i in $(seq 0 $((startup_probe_count - 1))); do
+            local probe_status_file="${workingPath}/startup-probe-${container_name}-${i}.status"
+            if [ ! -f "$probe_status_file" ]; then
+                all_startup_probes_successful=false
+                break
+            fi
+
+            local status=$(cat "$probe_status_file")
+            if [ "$status" != "SUCCESS" ]; then
+                if [ "$status" = "FAILED_THRESHOLD" ]; then
+                    printf "%%s\n" "$(date -Is --utc) Startup probe failed for ${container_name} - other probes will not start" >&2
+                    return 1
+                fi
+                all_startup_probes_successful=false
+                break
+            fi
+        done
+
+        if [ "$all_startup_probes_successful" = true ]; then
+            printf "%%s\n" "$(date -Is --utc) All startup probes successful for ${container_name} - other probes can now start"
+            return 0
+        fi
+
+        sleep 1
+    done
+}
+
 `)
+
+	// Generate startup probe calls - these run in background but block other probes
+	for i, probe := range startupProbes {
+		probeArgs := buildProbeArgs(probe)
+		containerVarName := strings.ReplaceAll(containerName, "-", "_")
+		scriptBuilder.WriteString(fmt.Sprintf(`
+# Startup probe %d for %s
+runStartupProbe "%s" "%s" %d %d %d %d %d "startup" %d %s &
+STARTUP_PROBE_%s_%d_PID=$!
+`, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
+			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
+	}
+
+	// Wait for startup probes before starting other probes
+	if len(startupProbes) > 0 {
+		scriptBuilder.WriteString(fmt.Sprintf(`
+# Wait for startup probes to complete before starting readiness/liveness probes
+(
+    waitForStartupProbes "%s" %d
+    if [ $? -eq 0 ]; then
+`, containerName, len(startupProbes)))
+	}
 
 	// Generate readiness probe calls
 	for i, probe := range readinessProbes {
@@ -257,10 +392,19 @@ LIVENESS_PROBE_%s_%d_PID=$!
 			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
 	}
 
+	// Close the startup probe conditional block
+	if len(startupProbes) > 0 {
+		scriptBuilder.WriteString(`
+    fi
+) &
+`)
+	}
+
 	span.SetAttributes(
 		attribute.String("probes.container.name", containerName),
 		attribute.Int("probes.readiness.count", len(readinessProbes)),
 		attribute.Int("probes.liveness.count", len(livenessProbes)),
+		attribute.Int("probes.startup.count", len(startupProbes)),
 	)
 
 	return scriptBuilder.String()
@@ -287,8 +431,8 @@ func buildProbeArgs(probe ProbeCommand) string {
 }
 
 // generateProbeCleanupScript generates cleanup commands for probe processes
-func generateProbeCleanupScript(containerName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand) string {
-	if len(readinessProbes) == 0 && len(livenessProbes) == 0 {
+func generateProbeCleanupScript(containerName string, readinessProbes []ProbeCommand, livenessProbes []ProbeCommand, startupProbes []ProbeCommand) string {
+	if len(readinessProbes) == 0 && len(livenessProbes) == 0 && len(startupProbes) == 0 {
 		return ""
 	}
 
@@ -313,6 +457,14 @@ cleanup_probes() {
 	for i := range livenessProbes {
 		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$LIVENESS_PROBE_%s_%d_PID" ]; then
         kill $LIVENESS_PROBE_%s_%d_PID 2>/dev/null || true
+    fi
+`, containerVarName, i, containerVarName, i))
+	}
+
+	// Kill startup probes
+	for i := range startupProbes {
+		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$STARTUP_PROBE_%s_%d_PID" ]; then
+        kill $STARTUP_PROBE_%s_%d_PID 2>/dev/null || true
     fi
 `, containerVarName, i, containerVarName, i))
 	}
@@ -436,22 +588,22 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 }
 
 // storeProbeMetadata saves probe count information for later status checking
-func storeProbeMetadata(workingPath, containerName string, readinessProbeCount, livenessProbeCount int) error {
+func storeProbeMetadata(workingPath, containerName string, readinessProbeCount, livenessProbeCount, startupProbeCount int) error {
 	metadataFile := fmt.Sprintf("%s/probe-metadata-%s.txt", workingPath, containerName)
-	content := fmt.Sprintf("readiness:%d\nliveness:%d", readinessProbeCount, livenessProbeCount)
+	content := fmt.Sprintf("readiness:%d\nliveness:%d\nstartup:%d", readinessProbeCount, livenessProbeCount, startupProbeCount)
 	return os.WriteFile(metadataFile, []byte(content), 0644)
 }
 
 // loadProbeMetadata loads probe count information for status checking
-func loadProbeMetadata(workingPath, containerName string) (readinessCount, livenessCount int, err error) {
+func loadProbeMetadata(workingPath, containerName string) (readinessCount, livenessCount, startupCount int, err error) {
 	metadataFile := fmt.Sprintf("%s/probe-metadata-%s.txt", workingPath, containerName)
 	content, err := os.ReadFile(metadataFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No probe metadata file means no probes configured
-			return 0, 0, nil
+			return 0, 0, 0, nil
 		}
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	lines := strings.Split(string(content), "\n")
@@ -471,8 +623,10 @@ func loadProbeMetadata(workingPath, containerName string) (readinessCount, liven
 			readinessCount = count
 		case "liveness":
 			livenessCount = count
+		case "startup":
+			startupCount = count
 		}
 	}
 
-	return readinessCount, livenessCount, nil
+	return readinessCount, livenessCount, startupCount, nil
 }

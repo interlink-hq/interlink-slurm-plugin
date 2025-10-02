@@ -836,15 +836,15 @@ highestExitCode=0
 	// Generate probe cleanup script first if any probes exist
 	var hasProbes bool
 	for _, containerCommand := range commands {
-		if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 {
+		if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0 {
 			hasProbes = true
 			break
 		}
 	}
 	if hasProbes && config.EnableProbes {
 		for _, containerCommand := range commands {
-			if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 {
-				cleanupScript := generateProbeCleanupScript(containerCommand.containerName, containerCommand.readinessProbes, containerCommand.livenessProbes)
+			if len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0 {
+				cleanupScript := generateProbeCleanupScript(containerCommand.containerName, containerCommand.readinessProbes, containerCommand.livenessProbes, containerCommand.startupProbes)
 				stringToBeWritten.WriteString(cleanupScript)
 				break // Only need one cleanup script
 			}
@@ -898,7 +898,7 @@ highestExitCode=0
 		}
 
 		// Generate probe scripts if enabled and not an init container
-		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0) {
+		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
 			// Extract the image name from the singularity command
 			var imageName string
 			for i, arg := range containerCommand.runtimeCommand {
@@ -922,12 +922,12 @@ highestExitCode=0
 
 			if imageName != "" {
 				// Store probe metadata for status checking
-				err := storeProbeMetadata(path, containerCommand.containerName, len(containerCommand.readinessProbes), len(containerCommand.livenessProbes))
+				err := storeProbeMetadata(path, containerCommand.containerName, len(containerCommand.readinessProbes), len(containerCommand.livenessProbes), len(containerCommand.startupProbes))
 				if err != nil {
 					log.G(Ctx).Error("Failed to store probe metadata: ", err)
 				}
 
-				probeScript := generateProbeScript(Ctx, config, containerCommand.containerName, imageName, containerCommand.readinessProbes, containerCommand.livenessProbes)
+				probeScript := generateProbeScript(Ctx, config, containerCommand.containerName, imageName, containerCommand.readinessProbes, containerCommand.livenessProbes, containerCommand.startupProbes)
 				stringToBeWritten.WriteString("\n")
 				stringToBeWritten.WriteString(probeScript)
 			}

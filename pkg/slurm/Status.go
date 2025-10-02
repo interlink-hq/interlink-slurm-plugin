@@ -212,7 +212,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, err := loadProbeMetadata(path, ct.Name)
+							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
@@ -287,7 +287,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, err := loadProbeMetadata(path, ct.Name)
+							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)

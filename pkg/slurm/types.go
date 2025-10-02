@@ -74,4 +74,5 @@ type ContainerCommand struct {
 	containerImage   string
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
+	startupProbes    []ProbeCommand
 }
