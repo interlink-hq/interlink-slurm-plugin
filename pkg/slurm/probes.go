@@ -300,7 +300,7 @@ cleanup_probes() {
 `)
 
 	containerVarName := strings.ReplaceAll(containerName, "-", "_")
-	
+
 	// Kill readiness probes
 	for i := range readinessProbes {
 		scriptBuilder.WriteString(fmt.Sprintf(`    if [ ! -z "$READINESS_PROBE_%s_%d_PID" ]; then

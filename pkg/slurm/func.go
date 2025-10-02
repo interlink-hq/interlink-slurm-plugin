@@ -14,8 +14,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-var SlurmConfigInst SlurmConfig
-var Clientset *kubernetes.Clientset
+var (
+	SlurmConfigInst SlurmConfig
+	Clientset       *kubernetes.Clientset
+)
 
 // TODO: implement factory design
 

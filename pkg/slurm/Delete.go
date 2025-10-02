@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/log"
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
 
 	"go.opentelemetry.io/otel"
@@ -51,7 +51,6 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
 	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, filesPath)
-
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, statusCode, err)

@@ -22,7 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
@@ -1381,7 +1381,7 @@ func prepareRuntimeCommand(config SlurmConfig, container v1.Container, metadata 
 			singularityOptions = singOpts
 		}
 
-		// See https://github.com/interTwin-eu/interlink-slurm-plugin/issues/32#issuecomment-2416031030
+		// See https://github.com/interlink-hq/interlink-slurm-plugin/issues/32#issuecomment-2416031030
 		// singularity run will honor the entrypoint/command (if exist) in container image, while exec will override entrypoint.
 		// Thus if pod command (equivalent to container entrypoint) exist, we do exec, and other case we do run
 		singularityCommand := ""
