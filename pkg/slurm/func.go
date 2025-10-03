@@ -11,7 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/containerd/containerd/log"
-	"gopkg.in/yaml.v2"
+	"github.com/goccy/go-yaml"
 )
 
 var SlurmConfigInst SlurmConfig
