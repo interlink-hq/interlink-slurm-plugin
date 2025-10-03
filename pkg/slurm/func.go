@@ -98,6 +98,12 @@ func NewSlurmConfig() (SlurmConfig, error) {
 
 			SlurmConfigInst.Tsockspath = path
 		}
+
+		// Set default ContainerRuntime if not configured
+		if SlurmConfigInst.ContainerRuntime == "" {
+			SlurmConfigInst.ContainerRuntime = "singularity"
+		}
+
 		// Check if a supported container runtime is configured (supported: singularity, enroot)
 		if SlurmConfigInst.ContainerRuntime != "singularity" && SlurmConfigInst.ContainerRuntime != "enroot" {
 			err := fmt.Errorf("container runtime %q is not supported. Please configure a supported one (singularity, enroot)", SlurmConfigInst.ContainerRuntime)
