@@ -20,7 +20,6 @@ jobs:
         with:
           workdir: ci
           verb: call
-          args: -s test --interlink-version 0.5.2 --src ../ --plugin-config ./manifests/plugin-config.yaml --manifests ./manifests
           args: -s test   --interlink-version latest  --src ./ --plugin-config ./ci/manifests/plugin-config.yaml --manifests ./ci/manifests
           cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           version: "0.19.1"
