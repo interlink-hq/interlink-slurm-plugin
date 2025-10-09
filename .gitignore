@@ -1,5 +1,7 @@
 envs.sh
 bin
+vendor/
+
 # Eclipse IDE
 .project
 .settings
