@@ -17,24 +17,35 @@ package main
 import (
 	"context"
 	"dagger/interlink-slurm/internal/dagger"
+	"time"
 )
 
 type InterlinkSlurm struct{}
 
-func (m *InterlinkSlurm) RunTest(interlinkVersion string, pluginService *dagger.Service, manifests *dagger.Directory, interlinkConfig *dagger.File, pluginConfig *dagger.File, src *dagger.Directory,
+// UnitTest runs the unit tests using make test
+func (m *InterlinkSlurm) UnitTest(ctx context.Context, src *dagger.Directory) (string, error) {
+	return dag.Container().
+		From("golang:1.24").
+		WithDirectory("/src", src).
+		WithWorkdir("/src").
+		WithExec([]string{"make", "test"}).
+		Stdout(ctx)
+}
+
+func (m *InterlinkSlurm) RunTest(interlinkVersion string, pluginService *dagger.Service, manifests *dagger.Directory, interlinkEndpoint *dagger.Service, pluginConfig *dagger.File, src *dagger.Directory,
 ) *dagger.Container {
 	registry := dag.Container().From("registry").
 		WithExposedPort(5000).AsService()
 
 	return dag.Interlink("ci", dagger.InterlinkOpts{
-		VirtualKubeletRef: "ghcr.io/intertwin-eu/interlink/virtual-kubelet-inttw:" + interlinkVersion,
-		InterlinkRef:      "ghcr.io/intertwin-eu/interlink/interlink:" + interlinkVersion,
+		VirtualKubeletRef: "ghcr.io/interlink-hq/interlink/virtual-kubelet-inttw:" + interlinkVersion,
+		InterlinkRef:      "ghcr.io/interlink-hq/interlink/interlink:" + interlinkVersion,
 	}).NewInterlink(dagger.InterlinkNewInterlinkOpts{
-		PluginEndpoint:  pluginService,
-		Manifests:       manifests,
-		InterlinkConfig: interlinkConfig,
-		PluginConfig:    pluginConfig,
-		LocalRegistry:   registry,
+		PluginEndpoint:    pluginService,
+		Manifests:         manifests,
+		InterlinkEndpoint: interlinkEndpoint,
+		PluginConfig:      pluginConfig,
+		LocalRegistry:     registry,
 	}).Test(dagger.InterlinkTestOpts{
 		Manifests:    manifests,
 		SourceFolder: src,
@@ -46,16 +57,17 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 	// +optional
 	pluginEndpoint *dagger.Service,
 	// +optional
-	// +defaultPath="./manifests/plugin-config.yaml"
+	interlinkEndpoint *dagger.Service,
+	// +optional
+	// +defaultPath="./manifests/interlink-config.yaml"
 	interlinkConfig *dagger.File,
 ) (string, error) {
 	if pluginEndpoint == nil {
 
 		// build using Dockerfile and publish to registry
-		plugin := dag.Container().
-			Build(src, dagger.ContainerBuildOpts{
-				Dockerfile: "docker/Dockerfile",
-			}).
+		plugin := src.DockerBuild(dagger.DirectoryDockerBuildOpts{
+			Dockerfile: "docker/Dockerfile",
+		}).
 			WithFile("/etc/interlink/InterLinkConfig.yaml", pluginConfig).
 			WithEnvVariable("SLURMCONFIGPATH", "/etc/interlink/InterLinkConfig.yaml").
 			WithEnvVariable("SHARED_FS", "true").
@@ -65,8 +77,25 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 		if err != nil {
 			return "", err
 		}
-		return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkConfig, pluginConfig, src).Stdout(ctx)
+
+		interlink := dag.Container().From("ghcr.io/interlink-hq/interlink/interlink:"+interlinkVersion).
+			WithFile("/etc/interlink/InterLinkConfig.yaml", interlinkConfig).
+			WithEnvVariable("BUST", time.Now().String()).
+			WithServiceBinding("plugin", pluginEndpoint).
+			WithEnvVariable("INTERLINKCONFIGPATH", "/etc/interlink/InterLinkConfig.yaml").
+			WithExposedPort(3000)
+
+		interlinkEndpoint, err = interlink.
+			AsService(
+				dagger.ContainerAsServiceOpts{
+					UseEntrypoint:            true,
+					InsecureRootCapabilities: true,
+				}).Start(ctx)
+		if err != nil {
+			return "", err
+		}
+		return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
 	}
 
-	return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkConfig, pluginConfig, src).Stdout(ctx)
+	return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
 }
