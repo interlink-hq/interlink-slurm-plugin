@@ -32,8 +32,10 @@ func (m *InterlinkSlurm) UnitTest(ctx context.Context, src *dagger.Directory) (s
 		Stdout(ctx)
 }
 
-func (m *InterlinkSlurm) RunTest(interlinkVersion string, pluginService *dagger.Service, manifests *dagger.Directory, interlinkEndpoint *dagger.Service, pluginConfig *dagger.File, src *dagger.Directory,
+func (m *InterlinkSlurm) RunTest(ctx context.Context, interlinkVersion string, pluginService *dagger.Service, manifests *dagger.Directory, interlinkEndpoint *dagger.Service, pluginConfig *dagger.File, src *dagger.Directory,
 ) *dagger.Container {
+	m.UnitTest(ctx, src)
+
 	registry := dag.Container().From("registry").
 		WithExposedPort(5000).AsService()
 
@@ -94,8 +96,8 @@ func (m *InterlinkSlurm) Test(ctx context.Context, interlinkVersion string, src 
 		if err != nil {
 			return "", err
 		}
-		return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
+		return m.RunTest(ctx, interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
 	}
 
-	return m.RunTest(interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
+	return m.RunTest(ctx, interlinkVersion, pluginEndpoint, manifests, interlinkEndpoint, pluginConfig, src).Stdout(ctx)
 }
