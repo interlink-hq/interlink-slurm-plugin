@@ -1,58 +1,9 @@
 package slurm
 
-import (
-	"fmt"
-	"strings"
-)
-
-// FlavorConfig holds the configuration for a specific flavor
-type FlavorConfig struct {
-	Name          string   `yaml:"Name"`
-	Description   string   `yaml:"Description"`
-	CPUDefault    int64    `yaml:"CPUDefault"`
-	MemoryDefault string   `yaml:"MemoryDefault"` // e.g., "16G", "32000M", "1024"
-	UID           *int64   `yaml:"UID"`           // Optional User ID for this flavor
-	SlurmFlags    []string `yaml:"SlurmFlags"`
-}
-
-// Validate checks if the FlavorConfig is valid
-func (f *FlavorConfig) Validate() error {
-	if f.Name == "" {
-		return fmt.Errorf("flavor Name cannot be empty")
-	}
-
-	if f.CPUDefault < 0 {
-		return fmt.Errorf("flavor '%s': CPUDefault cannot be negative (got %d)", f.Name, f.CPUDefault)
-	}
-
-	if f.MemoryDefault != "" {
-		// Try to parse the memory string to ensure it's valid
-		if _, err := parseMemoryString(f.MemoryDefault); err != nil {
-			return fmt.Errorf("flavor '%s': invalid MemoryDefault format '%s': %w", f.Name, f.MemoryDefault, err)
-		}
-	}
-
-	// Validate SLURM flags format (basic check)
-	for i, flag := range f.SlurmFlags {
-		flag = strings.TrimSpace(flag)
-		if flag == "" {
-			return fmt.Errorf("flavor '%s': SLURM flag at index %d is empty", f.Name, i)
-		}
-		// Check if flag starts with -- or -
-		if !strings.HasPrefix(flag, "--") && !strings.HasPrefix(flag, "-") {
-			return fmt.Errorf("flavor '%s': SLURM flag '%s' should start with '--' or '-'", f.Name, flag)
-		}
-	}
-
-	// Validate UID if set
-	if f.UID != nil && *f.UID < 0 {
-		return fmt.Errorf("flavor '%s': UID cannot be negative (got %d)", f.Name, *f.UID)
-	}
-
-	return nil
-}
-
-// InterLinkConfig holds the whole configuration
+// SlurmConfig holds the complete configuration for the SLURM sidecar plugin.
+// It defines paths to SLURM commands, container runtime settings, networking options,
+// and various operational parameters that control how Kubernetes pods are translated
+// into SLURM batch jobs.
 type SlurmConfig struct {
 	VKConfigPath              string   `yaml:"VKConfigPath"`
 	Sbatchpath                string   `yaml:"SbatchPath"`
@@ -77,181 +28,63 @@ type SlurmConfig struct {
 	SingularityPath           string   `yaml:"SingularityPath"`
 	EnableProbes              bool     `yaml:"EnableProbes"`
 	set                       bool
-	EnrootDefaultOptions      []string                `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
-	EnrootPrefix              string                  `yaml:"EnrootPrefix"`
-	EnrootPath                string                  `yaml:"EnrootPath"`
-	ContainerRuntime          string                  `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
-	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
-	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
-	DefaultUID                *int64                  `yaml:"DefaultUID"` // Optional default User ID for all jobs (RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58)
-	// Taints is an optional list of Kubernetes taints that this plugin will advertise
-	// on the virtual node via the ping response.  The VK (interLink#516) replaces the
-	// node's non-system taints with this list on every heartbeat.
-	Taints []TaintConfig `yaml:"Taints"`
-	// ResourceScriptPath is an optional path to a script or executable that reports
-	// cluster resource availability.  When set, the script is executed instead of the
-	// built-in sinfo-based resource gathering.  The script must write a JSON object
-	// conforming to the PingResponse schema on stdout (only the "resources" field is
-	// required; "taints" and "status" are optional and, if present, are used as-is
-	// unless overridden by the static Taints list above).  A non-zero exit code or
-	// unparseable output is treated as a transient error and logged.
-	//
-	// Example script output:
-	//   {"status":"ok","resources":{"cpu":"128","memory":"512Gi","pods":"1000"}}
-	ResourceScriptPath string `yaml:"ResourceScriptPath"`
-	// SocketDirRoot is an optional absolute directory, on a filesystem the job and
-	// ssh sessions on its compute node both see, under which every job creates a
-	// private 0700 directory for the pod's unix sockets. The job exports it as
-	// INTERLINK_SOCKET_DIR and the status reports it to interLink, which forwards
-	// the shadow's tunnels there. Put it where the plugin also sees it (inside the
-	// filesystem shared for DataRootFolder) so that deleting the pod removes the
-	// directory even when the job was killed before its exit trap ran. Empty
-	// disables the feature. Not for deployments
-	// where jobs run under more than one UID (DefaultUID, flavor UID or
-	// runAsUser): a job whose account cannot write the root fails at start.
-	SocketDirRoot string `yaml:"SocketDirRoot"`
+	EnrootDefaultOptions      []string `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
+	EnrootPrefix              string   `yaml:"EnrootPrefix"`
+	EnrootPath                string   `yaml:"EnrootPath"`
+	ContainerRuntime          string   `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 }
 
+// CreateStruct represents the response returned after successfully submitting a pod to SLURM.
+// It contains the pod's unique identifier and the assigned SLURM job ID.
 type CreateStruct struct {
-	PodUID string `json:"PodUID"`
-	PodJID string `json:"PodJID"`
+	PodUID string `json:"PodUID"` // Unique identifier of the Kubernetes pod
+	PodJID string `json:"PodJID"` // SLURM job ID assigned to the pod
 }
 
+// ProbeType defines the type of health check probe to execute.
 type ProbeType string
 
 const (
-	ProbeTypeHTTP ProbeType = "http"
-	ProbeTypeExec ProbeType = "exec"
+	ProbeTypeHTTP ProbeType = "http" // HTTP GET request probe
+	ProbeTypeExec ProbeType = "exec" // Command execution probe
 )
 
+// ProbeCommand represents a container health check probe configuration,
+// translated from Kubernetes probe specifications (readiness, liveness, or startup probes).
 type ProbeCommand struct {
-	Type                ProbeType
-	HTTPGetAction       *HTTPGetAction
-	ExecAction          *ExecAction
-	InitialDelaySeconds int32
-	PeriodSeconds       int32
-	TimeoutSeconds      int32
-	SuccessThreshold    int32
-	FailureThreshold    int32
+	Type                ProbeType      // Type of probe (HTTP or Exec)
+	HTTPGetAction       *HTTPGetAction // Configuration for HTTP probes
+	ExecAction          *ExecAction    // Configuration for exec probes
+	InitialDelaySeconds int32          // Delay before first probe execution
+	PeriodSeconds       int32          // Interval between probe executions
+	TimeoutSeconds      int32          // Timeout for probe execution
+	SuccessThreshold    int32          // Consecutive successes required for success
+	FailureThreshold    int32          // Consecutive failures required for failure
 }
 
+// HTTPGetAction defines the parameters for an HTTP GET probe.
 type HTTPGetAction struct {
-	Path   string
-	Port   int32
-	Host   string
-	Scheme string
+	Path   string // HTTP path to request
+	Port   int32  // Port to connect to
+	Host   string // Host to connect to (defaults to pod IP)
+	Scheme string // HTTP or HTTPS
 }
 
+// ExecAction defines a command-based probe that executes in the container.
 type ExecAction struct {
-	Command []string
+	Command []string // Command and arguments to execute
 }
 
-// LifecycleHookType indicates whether a lifecycle hook is an exec or httpGet hook.
-type LifecycleHookType string
-
-const (
-	LifecycleHookTypeExec    LifecycleHookType = "exec"
-	LifecycleHookTypeHTTPGet LifecycleHookType = "httpGet"
-)
-
-// LifecycleHTTPGetSpec holds the parameters for an httpGet-type lifecycle hook.
-type LifecycleHTTPGetSpec struct {
-	Scheme string
-	Host   string
-	Port   int32
-	Path   string
-}
-
-// LifecycleHookSpec describes a container lifecycle hook (postStart or preStop)
-// in a runtime-agnostic form.
-type LifecycleHookSpec struct {
-	Type        LifecycleHookType
-	ExecCommand []string           // populated when Type == LifecycleHookTypeExec
-	HTTPGet     *LifecycleHTTPGetSpec // populated when Type == LifecycleHookTypeHTTPGet
-}
-
+// ContainerCommand encapsulates all information needed to execute a container
+// within a SLURM job, including runtime configuration, probes, and execution context.
 type ContainerCommand struct {
-	containerName    string
-	isInitContainer  bool
-	runtimeCommand   []string
-	containerCommand []string
-	containerArgs    []string
-	containerImage   string
-	readinessProbes  []ProbeCommand
-	livenessProbes   []ProbeCommand
-	startupProbes    []ProbeCommand
-	preStopHook      *LifecycleHookSpec // optional preStop lifecycle hook
-	postStartHook    *LifecycleHookSpec // optional postStart lifecycle hook
-}
-
-// TaintConfig holds the configuration for a Kubernetes taint to be applied to the
-// virtual node.  It is used both in SlurmConfig (loaded from YAML) and as the JSON
-// payload carried in PingResponse, so it carries both yaml and json struct tags.
-type TaintConfig struct {
-	// Key is the taint key (e.g. "vendor.io/maintenance").
-	Key string `yaml:"Key" json:"key"`
-	// Value is the optional taint value.
-	Value string `yaml:"Value,omitempty" json:"value,omitempty"`
-	// Effect is one of "NoSchedule", "PreferNoSchedule", or "NoExecute".
-	Effect string `yaml:"Effect" json:"effect"`
-}
-
-// PingResponse represents the optional structured response from the plugin ping path.
-// Aligned with interlink-hq/interLink#516: when the interlink VK parses a successful
-// ping response it tries to unmarshal the body as PingResponse; if a non-nil Resources
-// field is present it calls updateNodeResources() and if a non-nil Taints field is
-// present it calls updateNodeTaints() so that the virtual node stays in sync with the
-// SLURM cluster state.
-//
-// TODO: Replace these locally-defined types with the upstream commonIL.PingResponse,
-// commonIL.ResourcesResponse, commonIL.AcceleratorResponse, and commonIL.TaintResponse
-// once interlink-hq/interLink#516 is merged and the interlink dependency is updated.
-type PingResponse struct {
-	// Status is a short string indicating the plug-in health (e.g. "ok").
-	Status string `json:"status,omitempty"`
-	// Resources optionally contains the cluster resource availability that the VK
-	// should use to update the virtual node capacity.
-	Resources *ResourcesResponse `json:"resources,omitempty"`
-	// Taints optionally contains the list of taints the VK should apply to the virtual
-	// node.  When present (even as an empty slice), all non-system taints on the node
-	// are replaced with this list.  When absent, existing taints are left unchanged.
-	Taints *[]TaintConfig `json:"taints,omitempty"`
-}
-
-// ResourcesResponse carries Kubernetes-quantity strings for each resource dimension.
-// Omitted fields leave the current node capacity unchanged (partial updates are fine).
-type ResourcesResponse struct {
-	// CPU is the total available CPU as a Kubernetes quantity string (e.g. "128", "4000m").
-	CPU string `json:"cpu,omitempty"`
-	// Memory is the total available memory as a Kubernetes quantity string (e.g. "512Gi", "256000Mi").
-	Memory string `json:"memory,omitempty"`
-	// Pods is the maximum number of concurrent pods the cluster can accept (e.g. "1000").
-	Pods string `json:"pods,omitempty"`
-	// Accelerators lists hardware accelerators (GPUs, FPGAs, …) with their available counts.
-	Accelerators []AcceleratorResponse `json:"accelerators,omitempty"`
-}
-
-// AcceleratorResponse represents one type of hardware accelerator reported by the plugin.
-type AcceleratorResponse struct {
-	// ResourceType is the Kubernetes extended-resource name (e.g. "nvidia.com/gpu").
-	ResourceType string `json:"resourceType"`
-	// Available is the count expressed as a Kubernetes quantity string (e.g. "8").
-	Available string `json:"available"`
-}
-
-// slurmNodeList is the minimal schema needed to decode the top-level `sinfo --json`
-// response.  Only the fields used by getClusterResources are listed; the rest are
-// silently ignored via `json:"-"` / omission.
-type slurmNodeList struct {
-	Nodes []slurmJSONNode `json:"nodes"`
-}
-
-// slurmJSONNode represents one node entry from `sinfo --json`.  Field names follow
-// SLURM's own JSON keys (snake_case).
-type slurmJSONNode struct {
-	CPUs        int64 `json:"cpus"`
-	AllocCPUs   int64 `json:"alloc_cpus"`
-	RealMemory  int64 `json:"real_memory"`  // MB
-	FreeMemory  int64 `json:"free_memory"`  // MB
-	AllocMemory int64 `json:"alloc_memory"` // MB
+	containerName    string         // Name of the container
+	isInitContainer  bool           // Whether this is an init container
+	runtimeCommand   []string       // Container runtime command (singularity/enroot with flags)
+	containerCommand []string       // Override for container entrypoint
+	containerArgs    []string       // Arguments to pass to the container
+	containerImage   string         // Container image reference
+	readinessProbes  []ProbeCommand // Readiness probes to execute
+	livenessProbes   []ProbeCommand // Liveness probes to execute
+	startupProbes    []ProbeCommand // Startup probes to execute
 }

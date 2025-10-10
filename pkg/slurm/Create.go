@@ -20,8 +20,11 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
-// SubmitHandler generates and submits a SLURM batch script according to provided data.
-// 1 Pod = 1 Job. If a Pod has multiple containers, every container is a line with it's parameters in the SLURM script.
+// SubmitHandler is the HTTP handler for pod creation requests. It translates a Kubernetes pod
+// specification into a SLURM batch job, handling resource limits, environment variables, volume mounts,
+// and container probes. The handler follows a 1 Pod = 1 Job model, where all containers in a pod
+// are executed within a single SLURM job (init containers run sequentially, regular containers in parallel).
+// Returns HTTP 200 with the job ID on success, or an error status code on failure.
 func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")

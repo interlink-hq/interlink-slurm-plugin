@@ -1,9 +1,12 @@
+// Package slurm provides a sidecar plugin for interLink that enables Kubernetes pods
+// to be executed on SLURM batch systems using container runtimes like Singularity or Enroot.
+// It translates Kubernetes pod specifications into SLURM batch scripts and manages the
+// complete lifecycle of container execution on HPC clusters.
 package slurm
 
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -13,11 +16,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"al.essio.dev/pkg/shellescape"
 	exec2 "github.com/alexellis/go-execute/pkg/v1"
@@ -25,142 +26,46 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
+	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
 
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
 )
 
+// SidecarHandler manages the SLURM sidecar operations, maintaining configuration,
+// job ID mappings, and execution context for all pod-to-SLURM job translations.
 type SidecarHandler struct {
-	Config SlurmConfig
-	JIDs   *map[string]*JidStruct
-	Ctx    context.Context
+	Config SlurmConfig            // SLURM configuration settings
+	JIDs   *map[string]*JidStruct // Maps pod UIDs to SLURM job IDs
+	Ctx    context.Context        // Context for request lifecycle management
 }
 
 var (
-	prefix string
+	prefix       string
+	timer        time.Time
+	cachedStatus []commonIL.PodStatus
 )
 
+// JidStruct represents the mapping between a Kubernetes pod and its corresponding SLURM job,
+// tracking timing information for job lifecycle management.
 type JidStruct struct {
-	PodUID       string    `json:"PodUID"`
-	PodNamespace string    `json:"PodNamespace"`
-	JID          string    `json:"JID"`
-	StartTime    time.Time `json:"StartTime"`
-	EndTime      time.Time `json:"EndTime"`
-	WorkDir      string    `json:"WorkDir"`
+	PodUID       string    `json:"PodUID"`       // Unique identifier of the Kubernetes pod
+	PodNamespace string    `json:"PodNamespace"` // Namespace where the pod is running
+	JID          string    `json:"JID"`          // SLURM job ID assigned to this pod
+	StartTime    time.Time `json:"StartTime"`    // When the SLURM job started execution
+	EndTime      time.Time `json:"EndTime"`      // When the SLURM job finished execution
 }
 
-// isValidWorkDir reports whether workDir is safe to use as a filesystem path.
-// It must be absolute and must not contain any ".." path elements.
-func isValidWorkDir(workDir string) bool {
-	if !filepath.IsAbs(workDir) {
-		return false
-	}
-	for _, elem := range strings.Split(workDir, string(filepath.Separator)) {
-		if elem == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-// getJobWorkDir returns the job working directory for a pod.
-// If the annotation "slurm-job.vk.io/job-workdir" is set, it is used as the
-// base directory and the full path is "<annotation>/<namespace>-<podUID>".
-// Otherwise the default path "<DataRootFolder><namespace>-<podUID>" is returned.
-// The annotation value must be an absolute path without traversal components;
-// an invalid value is silently ignored and the default is used instead.
-func getJobWorkDir(config SlurmConfig, annotations map[string]string, namespace, podUID string) string {
-	if customBase, ok := annotations["slurm-job.vk.io/job-workdir"]; ok && customBase != "" {
-		// Reject paths that contain path traversal components before cleaning.
-		for _, elem := range strings.Split(customBase, string(filepath.Separator)) {
-			if elem == ".." {
-				return config.DataRootFolder + namespace + "-" + podUID
-			}
-		}
-		clean := filepath.Clean(customBase)
-		if filepath.IsAbs(clean) {
-			return filepath.Join(clean, namespace+"-"+podUID)
-		}
-	}
-	return config.DataRootFolder + namespace + "-" + podUID
-}
-
+// ResourceLimits defines the computational resource constraints for a SLURM job,
+// derived from Kubernetes pod resource specifications.
 type ResourceLimits struct {
-	CPU    int64
-	Memory int64
+	CPU    int64 // Number of CPU cores requested
+	Memory int64 // Memory in bytes requested
 }
 
-// FlavorResolution holds the resolved flavor information
-type FlavorResolution struct {
-	FlavorName    string
-	CPUDefault    int64
-	MemoryDefault int64  // in bytes
-	UID           *int64 // Optional User ID for this flavor
-	SlurmFlags    []string
-}
-
-func extractHeredoc(content, marker string) (string, error) {
-	// Find the start of the heredoc
-	startPattern := fmt.Sprintf("cat <<'%s'", marker)
-	startIdx := strings.Index(content, startPattern)
-	if startIdx == -1 {
-		return "", fmt.Errorf("heredoc start marker not found")
-	}
-
-	// Find the line after the cat command (start of actual content)
-	contentStart := strings.Index(content[startIdx:], "\n")
-	if contentStart == -1 {
-		return "", fmt.Errorf("invalid heredoc format")
-	}
-	contentStart += startIdx + 1
-
-	// Find the end marker
-	endMarker := "\n" + marker
-	endIdx := strings.Index(content[contentStart:], endMarker)
-	if endIdx == -1 {
-		return "", fmt.Errorf("heredoc end marker not found")
-	}
-
-	// Extract the content between start and end markers
-	return content[contentStart : contentStart+endIdx], nil
-}
-
-func removeHeredoc(content, marker string) string {
-	// Find the start of the heredoc
-	startPattern := fmt.Sprintf("cat <<'%s'", marker)
-	startIdx := strings.Index(content, startPattern)
-	if startIdx == -1 {
-		return content // No heredoc found, return as-is
-	}
-
-	// Find the line after the cat command (start of actual content)
-	contentStart := strings.Index(content[startIdx:], "\n")
-	if contentStart == -1 {
-		return content // Invalid heredoc format
-	}
-	contentStart += startIdx + 1
-
-	// Find the end marker
-	endMarker := "\n" + marker
-	endIdx := strings.Index(content[contentStart:], endMarker)
-	if endIdx == -1 {
-		return content // Heredoc end marker not found
-	}
-
-	// Calculate the actual end position (after the end marker)
-	heredocEnd := contentStart + endIdx + len(endMarker)
-
-	// Skip trailing newline if present
-	if heredocEnd < len(content) && content[heredocEnd] == '\n' {
-		heredocEnd++
-	}
-
-	// Remove the heredoc block and return
-	return content[:startIdx] + content[heredocEnd:]
-}
-
-// stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
+// stringToHex encodes the provided string into a hex string and removes all trailing redundant zeroes
+// to keep the output more compact. This is used to create unique environment variable names
+// from file paths when mounting ConfigMaps and Secrets in non-shared filesystem mode.
 func stringToHex(str string) string {
 	var buffer bytes.Buffer
 	for _, char := range str {
@@ -182,8 +87,9 @@ func stringToHex(str string) string {
 	return hexReturn
 }
 
-// parsingTimeFromString parses time from a string and returns it into a variable of type time.Time.
-// The format time can be specified in the 3rd argument.
+// parsingTimeFromString parses a time string and returns it as a time.Time value.
+// The format parameter specifies the expected time format (e.g., "2006-01-02 15:04:05.999999999 -0700 MST").
+// It validates that the string contains exactly 4 space-separated fields before parsing.
 func parsingTimeFromString(Ctx context.Context, stringTime string, timestampFormat string) (time.Time, error) {
 	parts := strings.Fields(stringTime)
 	if len(parts) != 4 {
@@ -201,405 +107,9 @@ func parsingTimeFromString(Ctx context.Context, stringTime string, timestampForm
 	return parsedTime, nil
 }
 
-// parseMemoryString converts memory string formats (e.g., "16G", "32000M", "1024") to bytes
-func parseMemoryString(memStr string) (int64, error) {
-	if memStr == "" {
-		return 0, nil
-	}
-
-	memStr = strings.TrimSpace(strings.ToUpper(memStr))
-
-	// Check for suffix
-	if strings.HasSuffix(memStr, "G") || strings.HasSuffix(memStr, "GB") {
-		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "G")
-		val, err := strconv.ParseInt(numStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
-		}
-		return val * 1024 * 1024 * 1024, nil
-	} else if strings.HasSuffix(memStr, "M") || strings.HasSuffix(memStr, "MB") {
-		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "M")
-		val, err := strconv.ParseInt(numStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
-		}
-		return val * 1024 * 1024, nil
-	} else if strings.HasSuffix(memStr, "K") || strings.HasSuffix(memStr, "KB") {
-		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "K")
-		val, err := strconv.ParseInt(numStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
-		}
-		return val * 1024, nil
-	}
-
-	// No suffix, assume bytes
-	val, err := strconv.ParseInt(memStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
-	}
-	return val, nil
-}
-
-// detectGPUResources checks if the pod requests GPU resources and returns the GPU count
-func detectGPUResources(Ctx context.Context, containers []v1.Container) int64 {
-	var totalGPUs int64 = 0
-
-	for _, container := range containers {
-		// Check for nvidia.com/gpu
-		if gpuLimit, ok := container.Resources.Limits["nvidia.com/gpu"]; ok {
-			gpuCount := gpuLimit.Value()
-			if gpuCount > 0 {
-				log.G(Ctx).Infof("Detected %d NVIDIA GPU(s) requested in container %s", gpuCount, container.Name)
-				totalGPUs += gpuCount
-			}
-		}
-
-		// Check for amd.com/gpu
-		if gpuLimit, ok := container.Resources.Limits["amd.com/gpu"]; ok {
-			gpuCount := gpuLimit.Value()
-			if gpuCount > 0 {
-				log.G(Ctx).Infof("Detected %d AMD GPU(s) requested in container %s", gpuCount, container.Name)
-				totalGPUs += gpuCount
-			}
-		}
-	}
-
-	return totalGPUs
-}
-
-// extractGPUCountFromFlags extracts GPU count from SLURM flags like --gres=gpu:2
-func extractGPUCountFromFlags(flags []string) int64 {
-	gresPattern := regexp.MustCompile(`--gres=gpu:(\d+)`)
-	for _, flag := range flags {
-		matches := gresPattern.FindStringSubmatch(flag)
-		if len(matches) > 1 {
-			if count, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
-				return count
-			}
-		}
-	}
-	return 0
-}
-
-// hasGPUInFlags checks if any SLURM flag contains GPU-related configuration
-func hasGPUInFlags(flags []string) bool {
-	for _, flag := range flags {
-		if strings.Contains(flag, "--gres=gpu") || strings.Contains(flag, "gpu") {
-			return true
-		}
-	}
-	return false
-}
-
-// gpuRequestFlagKeys are the SLURM flags that request GPUs on their own, i.e.
-// without going through --gres. Short aliases (-G) are normalised by slurmFlagKey.
-var gpuRequestFlagKeys = map[string]bool{
-	"--gpus":             true,
-	"--gpus-per-node":    true,
-	"--gpus-per-socket":  true,
-	"--gpus-per-task":    true,
-	"--ntasks-per-gpu":   true,
-	"--gpus-per-account": true,
-}
-
-// declaresGPUs reports whether a SLURM flag already asks for GPUs. A --gres flag
-// only counts when it actually mentions the gpu resource, since --gres is also
-// used for unrelated generic resources (e.g. --gres=lscratch:10).
-func declaresGPUs(flag string) bool {
-	key := slurmFlagKey(flag)
-	if gpuRequestFlagKeys[key] {
-		return true
-	}
-	if key == "--gres" {
-		return strings.Contains(strings.ToLower(slurmFlagValue(flag)), "gpu")
-	}
-	return false
-}
-
-// slurmFlagValue returns the value of a flag written either as "--flag=value" or
-// as "--flag value". It returns an empty string for flags without a value.
-func slurmFlagValue(flag string) string {
-	parts := splitShellWords(strings.TrimSpace(flag))
-	if len(parts) == 0 {
-		return ""
-	}
-
-	if _, inlineValue, found := strings.Cut(parts[0], "="); found {
-		parts[0] = inlineValue
-	} else {
-		parts = parts[1:]
-	}
-
-	return strings.TrimSpace(strings.Join(parts, " "))
-}
-
-var slurmFlagAliases = map[string]string{
-	"-A": "--account",
-	"-C": "--constraint",
-	"-D": "--chdir",
-	"-G": "--gpus",
-	"-J": "--job-name",
-	"-N": "--nodes",
-	"-c": "--cpus-per-task",
-	"-n": "--ntasks",
-	"-o": "--output",
-	"-p": "--partition",
-	"-t": "--time",
-	"-w": "--nodelist",
-}
-
-func splitShellWords(input string) []string {
-	var (
-		tokens       []string
-		currentToken strings.Builder
-		inSingle     bool
-		inDouble     bool
-		escaping     bool
-		tokenStarted bool
-	)
-
-	flushToken := func() {
-		if tokenStarted {
-			tokens = append(tokens, currentToken.String())
-			currentToken.Reset()
-			tokenStarted = false
-		}
-	}
-
-	for _, r := range input {
-		switch {
-		case escaping:
-			currentToken.WriteRune(r)
-			escaping = false
-			tokenStarted = true
-		case r == '\\' && !inSingle:
-			escaping = true
-			tokenStarted = true
-		case r == '\'' && !inDouble:
-			inSingle = !inSingle
-			tokenStarted = true
-		case r == '"' && !inSingle:
-			inDouble = !inDouble
-			tokenStarted = true
-		case unicode.IsSpace(r) && !inSingle && !inDouble:
-			flushToken()
-		default:
-			currentToken.WriteRune(r)
-			tokenStarted = true
-		}
-	}
-
-	if escaping {
-		currentToken.WriteRune('\\')
-	}
-	flushToken()
-
-	return tokens
-}
-
-func splitSlurmFlags(input string) []string {
-	tokens := splitShellWords(input)
-	flags := make([]string, 0, len(tokens))
-
-	for i := 0; i < len(tokens); i++ {
-		token := strings.TrimSpace(tokens[i])
-		if token == "" {
-			continue
-		}
-
-		if !strings.HasPrefix(token, "-") {
-			flags = append(flags, token)
-			continue
-		}
-
-		flagParts := []string{token}
-		for i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") {
-			flagParts = append(flagParts, tokens[i+1])
-			i++
-		}
-
-		flags = append(flags, strings.Join(flagParts, " "))
-	}
-
-	return flags
-}
-
-func slurmFlagKey(flag string) string {
-	parts := splitShellWords(strings.TrimSpace(flag))
-	if len(parts) == 0 {
-		return ""
-	}
-
-	key := parts[0]
-	if strings.Contains(key, "=") {
-		key = strings.SplitN(key, "=", 2)[0]
-	}
-
-	if alias, ok := slurmFlagAliases[key]; ok {
-		return alias
-	}
-
-	return key
-}
-
-// deduplicateSlurmFlags removes duplicate SLURM flags, keeping the last occurrence
-// This implements proper priority: later flags override earlier ones
-func deduplicateSlurmFlags(flags []string) []string {
-	// Map to track flag keys and their last values
-	flagMap := make(map[string]string)
-	var order []string // Track order of first appearance
-
-	for _, flag := range flags {
-		flag = strings.TrimSpace(flag)
-		if flag == "" {
-			continue
-		}
-
-		key := slurmFlagKey(flag)
-		if key == "" {
-			continue
-		}
-
-		// If we haven't seen this key before, track its order
-		if _, exists := flagMap[key]; !exists {
-			order = append(order, key)
-		}
-
-		// Update the value (later occurrences override earlier ones)
-		flagMap[key] = flag
-	}
-
-	// Rebuild the slice in original order with deduplicated values
-	result := make([]string, 0, len(order))
-	for _, key := range order {
-		result = append(result, flagMap[key])
-	}
-
-	return result
-}
-
-// resolveFlavor determines which flavor to use based on annotations, GPU detection, and default flavor
-func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.ObjectMeta, containers []v1.Container) (*FlavorResolution, error) {
-	// No flavors configured, return nil
-	if len(config.Flavors) == 0 {
-		return nil, nil
-	}
-
-	var selectedFlavor *FlavorConfig
-	var flavorName string
-
-	// Priority 1: Check for explicit flavor annotation
-	if annotationFlavor, ok := metadata.Annotations["slurm-job.vk.io/flavor"]; ok {
-		if flavor, exists := config.Flavors[annotationFlavor]; exists {
-			flavorCopy := flavor
-			selectedFlavor = &flavorCopy
-			flavorName = annotationFlavor
-			log.G(Ctx).Infof("Using flavor '%s' from annotation", flavorName)
-		} else {
-			log.G(Ctx).Warningf("Flavor '%s' specified in annotation not found, falling back to auto-detection", annotationFlavor)
-		}
-	}
-
-	// Priority 2: Auto-detect GPU and select GPU flavor
-	if selectedFlavor == nil {
-		gpuCount := detectGPUResources(Ctx, containers)
-		if gpuCount > 0 {
-			log.G(Ctx).Infof("Detected %d GPU(s) requested, searching for matching flavor", gpuCount)
-
-			// Find best matching GPU flavor
-			// Priority: exact GPU count match > any GPU flavor > name contains "gpu"
-			var exactMatchFlavor *FlavorConfig
-			var exactMatchName string
-			var anyGPUFlavor *FlavorConfig
-			var anyGPUName string
-
-			for name, flavor := range config.Flavors {
-				if !hasGPUInFlags(flavor.SlurmFlags) && !strings.Contains(strings.ToLower(name), "gpu") {
-					continue
-				}
-
-				flavorGPUCount := extractGPUCountFromFlags(flavor.SlurmFlags)
-				if flavorGPUCount == gpuCount {
-					// Exact match - prefer this
-					flavorCopy := flavor
-					exactMatchFlavor = &flavorCopy
-					exactMatchName = name
-					break
-				} else if hasGPUInFlags(flavor.SlurmFlags) && anyGPUFlavor == nil {
-					// Any GPU flavor - use as fallback
-					flavorCopy := flavor
-					anyGPUFlavor = &flavorCopy
-					anyGPUName = name
-				}
-			}
-
-			if exactMatchFlavor != nil {
-				selectedFlavor = exactMatchFlavor
-				flavorName = exactMatchName
-				log.G(Ctx).Infof("Auto-detected GPU resources, using exact match flavor '%s' with %d GPU(s)", flavorName, gpuCount)
-			} else if anyGPUFlavor != nil {
-				selectedFlavor = anyGPUFlavor
-				flavorName = anyGPUName
-				log.G(Ctx).Infof("Auto-detected GPU resources, using GPU flavor '%s' (no exact GPU count match found)", flavorName)
-			} else {
-				log.G(Ctx).Warningf("GPU resources detected but no GPU flavor found, falling back to default")
-			}
-		}
-	}
-
-	// Priority 3: Use default flavor
-	if selectedFlavor == nil && config.DefaultFlavor != "" {
-		if flavor, exists := config.Flavors[config.DefaultFlavor]; exists {
-			flavorCopy := flavor
-			selectedFlavor = &flavorCopy
-			flavorName = config.DefaultFlavor
-			log.G(Ctx).Infof("Using default flavor '%s'", flavorName)
-		}
-	}
-
-	// No flavor selected
-	if selectedFlavor == nil {
-		return nil, nil
-	}
-
-	// Parse memory default
-	memoryBytes, err := parseMemoryString(selectedFlavor.MemoryDefault)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse memory for flavor %s: %w", flavorName, err)
-	}
-
-	return &FlavorResolution{
-		FlavorName:    flavorName,
-		CPUDefault:    selectedFlavor.CPUDefault,
-		MemoryDefault: memoryBytes,
-		UID:           selectedFlavor.UID,
-		SlurmFlags:    selectedFlavor.SlurmFlags,
-	}, nil
-}
-
-
-// normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
-// literal backslash-n escape sequences (\n) to actual newline characters when the
-// string contains no real newlines. This handles a common misconfiguration where the
-// VK config has KubernetesApiCaCrt (or any PEM-like field) stored in unquoted YAML
-// without a block scalar (|), so the YAML parser never processes the \n escape.
-// The normalization is safe because:
-//   - If the string already contains real newlines, no change is made (correct YAML).
-//   - If the string contains only \n literals (no real newlines), all \n are replaced
-//     with real newlines. Legitimate content that intentionally contains \n without
-//     real newlines and should NOT be unescaped is extremely unusual in Kubernetes
-//     volume file values (all known cases are text or PEM certificates).
-func normalizeVolumeFileContent(s string) []byte {
-	// If there are already real newlines, or no literal \n sequences, return as-is.
-	if !strings.Contains(s, `\n`) || strings.ContainsRune(s, '\n') {
-		return []byte(s)
-	}
-	// The string has literal \n but no real newlines: unescape.
-	return []byte(strings.ReplaceAll(s, `\n`, "\n"))
-}
-
-// CreateDirectories is just a function to be sure directories exists at runtime
+// CreateDirectories ensures that the data root folder specified in the configuration exists.
+// It creates the directory structure with appropriate permissions if it doesn't already exist.
+// This is called during sidecar initialization to prepare the working directory for job data.
 func (h *SidecarHandler) CreateDirectories() error {
 	path := h.Config.DataRootFolder
 	if _, err := os.Stat(path); err != nil {
@@ -613,9 +123,10 @@ func (h *SidecarHandler) CreateDirectories() error {
 	return nil
 }
 
-// LoadJIDs loads Job IDs into the main JIDs struct from files in the root folder.
-// It's useful went down and needed to be restarded, but there were jobs running, for example.
-// Return only error in case of failure
+// LoadJIDs restores the job ID mappings from persistent storage in the data root folder.
+// This is essential for recovering state after a sidecar restart, allowing the sidecar to
+// continue managing jobs that were submitted before the restart. Each subdirectory in the
+// data root folder represents a pod, containing files with job metadata (JobID, PodUID, etc.).
 func (h *SidecarHandler) LoadJIDs() error {
 	path := h.Config.DataRootFolder
 
@@ -677,15 +188,6 @@ func (h *SidecarHandler) LoadJIDs() error {
 				}
 			}
 			JIDEntry := JidStruct{PodUID: string(podUID), PodNamespace: string(podNamespace), JID: string(JID), StartTime: StartedAt, EndTime: FinishedAt}
-			workDirBytes, err := os.ReadFile(path + entry.Name() + "/" + "WorkDir.path")
-			if err == nil && len(workDirBytes) > 0 {
-				workDir := strings.TrimSpace(string(workDirBytes))
-				if workDir != "" && isValidWorkDir(workDir) {
-					JIDEntry.WorkDir = workDir
-				} else if workDir != "" {
-					log.G(h.Ctx).Warn("LoadJIDs: discarding invalid WorkDir.path value: ", workDir)
-				}
-			}
 			(*h.JIDs)[string(podUID)] = &JIDEntry
 		}
 	}
@@ -693,12 +195,12 @@ func (h *SidecarHandler) LoadJIDs() error {
 	return nil
 }
 
-func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) ([]string, []string, error) {
+func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) ([]string, []string, error) {
 	envs := []string{}
 	// For debugging purpose only
 	envs_data := []string{}
 
-	envfilePath := workDir + "/" + container.Name + "_envfile.properties"
+	envfilePath := (config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + container.Name + "_envfile.properties")
 	log.G(Ctx).Info("-- Appending envs using envfile " + envfilePath)
 
 	switch config.ContainerRuntime {
@@ -734,62 +236,6 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 		}
 	}
 
-	// Handle envFrom: inject all key-value pairs from referenced Secrets and ConfigMaps.
-	retrievedContainer, err := getRetrievedContainer(&podData, container.Name)
-	if err != nil {
-		log.G(Ctx).Warning("-- Could not find retrieved container for envFrom resolution: ", err)
-	} else {
-		for _, envFrom := range container.EnvFrom {
-			prefix := envFrom.Prefix
-
-			if envFrom.SecretRef != nil {
-				secret, err := getRetrievedSecret(retrievedContainer, envFrom.SecretRef.Name, container.Name, podData.Pod.Name)
-				if err != nil {
-					if envFrom.SecretRef.Optional != nil && *envFrom.SecretRef.Optional {
-						log.G(Ctx).Warning("-- Optional secret not found for envFrom: ", envFrom.SecretRef.Name)
-						continue
-					}
-					log.G(Ctx).Error(err)
-					return nil, nil, err
-				}
-				for k, v := range secret.Data {
-					tmpValue := shellescape.Quote(string(v))
-					tmp := prefix + k + "=" + tmpValue
-					envs_data = append(envs_data, tmp)
-					_, err := envfile.WriteString(tmp + "\n")
-					if err != nil {
-						log.G(Ctx).Error(err)
-						return nil, nil, err
-					}
-					log.G(Ctx).Debug("---- Written envfile from secret " + envFrom.SecretRef.Name + " key " + k)
-				}
-			}
-
-			if envFrom.ConfigMapRef != nil {
-				configMap, err := getRetrievedConfigMap(retrievedContainer, envFrom.ConfigMapRef.Name, container.Name, podData.Pod.Name)
-				if err != nil {
-					if envFrom.ConfigMapRef.Optional != nil && *envFrom.ConfigMapRef.Optional {
-						log.G(Ctx).Warning("-- Optional configMap not found for envFrom: ", envFrom.ConfigMapRef.Name)
-						continue
-					}
-					log.G(Ctx).Error(err)
-					return nil, nil, err
-				}
-				for k, v := range configMap.Data {
-					tmpValue := shellescape.Quote(v)
-					tmp := prefix + k + "=" + tmpValue
-					envs_data = append(envs_data, tmp)
-					_, err := envfile.WriteString(tmp + "\n")
-					if err != nil {
-						log.G(Ctx).Error(err)
-						return nil, nil, err
-					}
-					log.G(Ctx).Debug("---- Written envfile from configMap " + envFrom.ConfigMapRef.Name + " key " + k)
-				}
-			}
-		}
-	}
-
 	// All env variables are written, we flush it now.
 	err = envfile.Sync()
 	if err != nil {
@@ -803,9 +249,11 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 	return envs, envs_data, nil
 }
 
-// prepareEnvs reads all Environment variables from a container and append them to a envfile.properties. The values are sh-escaped.
-// It returns the slice containing, if there are Environment variables, the arguments for envfile and its path, or else an empty array.
-func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) []string {
+// prepareEnvs processes environment variables from a container specification and writes them
+// to a properties file that will be mounted into the container. All values are shell-escaped
+// to prevent injection attacks. Returns container runtime flags to mount the env file, or an
+// empty slice if no environment variables are defined.
+func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) []string {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
 	span.AddEvent("Preparing ENVs for container " + container.Name)
@@ -814,8 +262,8 @@ func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.Retri
 	envs_data := []string{}
 	var err error
 
-	if len(container.Env) > 0 || len(container.EnvFrom) > 0 {
-		envs, envs_data, err = createEnvFile(Ctx, config, podData, container, workDir)
+	if len(container.Env) > 0 {
+		envs, envs_data, err = createEnvFile(Ctx, config, podData, container)
 		if err != nil {
 			log.G(Ctx).Error(err)
 			return nil
@@ -900,35 +348,17 @@ func prepareMountsSimpleVolume(
 		if os.Getenv("SHARED_FS") != "true" {
 			filePathSplitted := strings.Split(volumesHostToContainerPath, ":")
 			hostFilePath := filePathSplitted[0]
-			// Use filepath.Dir to obtain the correct absolute parent directory.
-			// The previous approach (splitting on "/" and re-joining) discarded the
-			// leading empty component, producing a relative path such as
-			// "tmp/.interlink/…" instead of "/tmp/.interlink/…". With a relative
-			// mkdir -p the directory was created relative to the SLURM job's CWD,
-			// not at the absolute path used by the subsequent heredoc redirect, so
-			// the base64 -d write always failed in SHARED_FS=false mode.
-			hostParentDir := filepath.Dir(hostFilePath)
+			hostFilePathSplitted := strings.Split(hostFilePath, "/")
+			hostParentDir := filepath.Join(hostFilePathSplitted[:len(hostFilePathSplitted)-1]...)
 
 			// Creates parent dir of the file, then create empty file.
-			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch \"" + hostFilePath + "\""
+			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
 
-			// Puts content of the file using a base64-encoded heredoc.
-			// Note: the envVarNames has the same number and order as volumesHostToContainerPaths.
-			// Using a heredoc with base64-encoded content preserves multiline strings (e.g. PEM
-			// certificates) because:
-			//   1. SLURM may strip newlines when exporting environment variables to compute nodes,
-			//      making echo "${VAR}" unreliable for multiline content.
-			//   2. Base64 output only uses [A-Za-z0-9+/=] characters, so the heredoc marker
-			//      (which contains an underscore) can never appear in the base64 payload,
-			//      completely eliminating the risk of premature heredoc termination.
+			// Puts content of the file thanks to env var. Note: the envVarNames has the same number and order that volumesHostToContainerPaths.
 			envVarName := envVarNames[filePathIndex]
 			splittedEnvName := strings.Split(envVarName, "_")
-			uniqueVolumeID := splittedEnvName[len(splittedEnvName)-1]
-			log.G(Ctx).Info(uniqueVolumeID)
-			content := os.Getenv(envVarName)
-			b64Content := base64.StdEncoding.EncodeToString([]byte(content))
-			heredocMarker := "VKDATA_" + uniqueVolumeID
-			prefix += "\nbase64 -d <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + b64Content + "\n" + heredocMarker
+			log.G(Ctx).Info(splittedEnvName[len(splittedEnvName)-1])
+			prefix += "\necho \"${" + envVarName + "}\" > \"" + hostFilePath + "\""
 		}
 		switch config.ContainerRuntime {
 		case "singularity":
@@ -941,12 +371,11 @@ func prepareMountsSimpleVolume(
 	return nil
 }
 
-// prepareMounts iterates along the struct provided in the data parameter and checks for ConfigMaps, Secrets and EmptyDirs to be mounted.
-// For each element found, the mountData function is called.
-// In this context, the general case is given by host and container not sharing the file system, so data are stored within ENVS with matching names.
-// The content of these ENVS will be written to a text file by the generated SLURM script later, so the container will be able to mount these files.
-// The command to write files is appended in the global "prefix" variable.
-// It returns a string composed as the singularity --bind command to bind mount directories and files and the first encountered error.
+// prepareMounts processes all volume mounts for a container, handling ConfigMaps, Secrets, EmptyDirs,
+// Projected volumes, and HostPath volumes. It generates the appropriate mount flags for the container
+// runtime (Singularity or Enroot). For non-shared filesystems, data is stored in environment variables
+// and written to files by the SLURM script. For shared filesystems, files are created directly.
+// Returns a string with runtime-specific mount flags and any error encountered.
 func prepareMounts(
 	Ctx context.Context,
 	config SlurmConfig,
@@ -1093,10 +522,8 @@ func prepareMounts(
 			}
 
 		default:
-			// A PersistentVolumeClaim, for one, has nothing to mount on the remote side.
-			// Skip only this volume: returning here dropped every other mount of the container.
-			log.G(Ctx).Warningf("Ignoring volume %s in pod %s: its type cannot be mounted remotely", volume.Name, podName)
-			continue
+			log.G(Ctx).Warningf("Silently ignoring unknown volume type of volume: %s in pod %s", volume.Name, podName)
+			return "", nil
 		}
 	}
 
@@ -1118,10 +545,12 @@ func prepareMounts(
 	return mountedData, nil
 }
 
-// produceSLURMScript generates a SLURM script according to data collected.
-// It must be called after ENVS and mounts are already set up since
-// it relies on "prefix" variable being populated with needed data and ENVS passed in the commands parameter.
-// It returns the path to the generated script and the first encountered error.
+// produceSLURMScript generates the SLURM batch script (job.slurm) and accompanying shell script (job.sh)
+// that will execute the pod's containers. The batch script contains SLURM directives (#SBATCH) for
+// resource allocation, while the shell script contains the actual container execution commands.
+// It handles init containers (executed sequentially) and regular containers (executed in parallel),
+// creates emptyDir directories, sets up probes, and manages the cleanup logic.
+// Returns the path to the generated SLURM batch script and any error encountered.
 func produceSLURMScript(
 	Ctx context.Context,
 	config SlurmConfig,
@@ -1132,7 +561,6 @@ func produceSLURMScript(
 	resourceLimits ResourceLimits,
 	isDefaultCPU bool,
 	isDefaultRam bool,
-	flavor *FlavorResolution,
 ) (string, error) {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
@@ -1149,22 +577,21 @@ func produceSLURMScript(
 	} else {
 		log.G(Ctx).Info("-- Created directory " + path)
 	}
-
-	// RFC requirement: Set directory ownership if UID is configured
-	// This will be applied after files are created to ensure proper ownership
-	var jobUID *int64
-	if config.DefaultUID != nil {
-		jobUID = config.DefaultUID
-	}
-	if flavor != nil && flavor.UID != nil {
-		jobUID = flavor.UID
-	}
-	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil && *pod.Spec.SecurityContext.RunAsUser >= 0 {
-		uid := *pod.Spec.SecurityContext.RunAsUser
-		jobUID = &uid
-	}
-
 	postfix := ""
+
+	// Create emptyDir directories in the job.sh script
+	// This ensures they exist on the compute node before containers start
+	// Note: We'll add these commands to stringToBeWritten later, after workingPath is exported
+	emptyDirPaths := make(map[string]string)
+	for _, vol := range pod.Spec.Volumes {
+		if vol.EmptyDir != nil {
+			edPath := filepath.Join(path, "emptyDirs", vol.Name)
+			if _, exists := emptyDirPaths[vol.Name]; !exists {
+				emptyDirPaths[vol.Name] = edPath
+				log.G(Ctx).Debug("-- Will create emptyDir: ", edPath)
+			}
+		}
+	}
 
 	fJob, err := os.Create(path + "/job.slurm")
 	if err != nil {
@@ -1205,33 +632,41 @@ func produceSLURMScript(
 
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
-
-	// Add flavor SLURM flags first (lowest priority)
-	if flavor != nil && len(flavor.SlurmFlags) > 0 {
-		log.G(Ctx).Infof("Applying %d SLURM flag(s) from flavor '%s'", len(flavor.SlurmFlags), flavor.FlavorName)
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, flavor.SlurmFlags...)
-	}
-
-	// Then process annotation flags (higher priority)
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-		annotationFlags := splitSlurmFlags(slurmFlags)
-		for _, annotationFlag := range annotationFlags {
-			switch slurmFlagKey(annotationFlag) {
-			case "--cpus-per-task":
-				if !isDefaultCPU {
-					log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
-					continue
-				}
+
+		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
+		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
+
+		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
+		if !isDefaultCPU {
+			if reCpu.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+				slurmFlags = reCpu.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reCpu.MatchString(slurmFlags) {
 				cpuLimitSetFromFlags = true
-			case "--mem":
-				if !isDefaultRam {
-					log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
-					continue
-				}
+			}
+		}
+
+		if !isDefaultRam {
+			if reRam.MatchString(slurmFlags) {
+				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+				slurmFlags = reRam.ReplaceAllString(slurmFlags, "")
+			}
+		} else {
+			if reRam.MatchString(slurmFlags) {
 				memoryLimitSetFromFlags = true
 			}
+		}
 
-			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlag)
+		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
+
+		for i := 0; i < len(sbatchFlagsFromArgo); i++ {
+			if sbatchFlagsFromArgo[i] == "" {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo[:i], sbatchFlagsFromArgo[i+1:]...)
+				i--
+			}
 		}
 	}
 
@@ -1244,40 +679,6 @@ func produceSLURMScript(
 		}
 	}
 
-	// Process UID configuration with priority: pod securityContext > flavor > default
-	// RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
-	var uidValue *int64
-
-	// Start with default UID from global config
-	if config.DefaultUID != nil {
-		uidValue = config.DefaultUID
-		log.G(Ctx).Debugf("Using default UID: %d", *uidValue)
-	}
-
-	// Override with flavor UID if available
-	if flavor != nil && flavor.UID != nil {
-		uidValue = flavor.UID
-		log.G(Ctx).Infof("Using UID %d from flavor '%s'", *uidValue, flavor.FlavorName)
-	}
-
-	// Override with pod securityContext.runAsUser if present (Kubernetes standard)
-	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil {
-		runAsUser := *pod.Spec.SecurityContext.RunAsUser
-		if runAsUser < 0 {
-			log.G(Ctx).Warningf("Invalid RunAsUser '%d' in pod securityContext (must be non-negative), ignoring", runAsUser)
-		} else {
-			uidValue = &runAsUser
-			log.G(Ctx).Infof("Using UID %d from pod spec.securityContext.runAsUser", runAsUser)
-		}
-	}
-
-	// Add UID flag to sbatch if configured
-	if uidValue != nil {
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, fmt.Sprintf("--uid=%d", *uidValue))
-		log.G(Ctx).Infof("Setting job UID to %d", *uidValue)
-	}
-
-	// Add CPU/memory limits as flags (highest priority)
 	if !isDefaultCPU {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
 		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
@@ -1297,47 +698,8 @@ func produceSLURMScript(
 		}
 	}
 
-	// Map GPU resources from the pod spec (nvidia.com/gpu, amd.com/gpu) to --gres.
-	// An explicit GPU request coming from the flavor or from the annotation flags
-	// always wins: it can name a specific model (--gres gpu:nvidia-h100:2), which
-	// the pod spec cannot express.
-	if gpuCount := detectGPUResources(Ctx, pod.Spec.Containers); gpuCount > 0 {
-		gpuGres := "gpu:" + strconv.FormatInt(gpuCount, 10)
-
-		if slices.ContainsFunc(sbatchFlagsFromArgo, declaresGPUs) {
-			log.G(Ctx).Infof("Ignoring the %d GPU(s) requested in the pod resources, GPUs are already requested through SLURM flags", gpuCount)
-		} else {
-			// Merge into an existing non-GPU --gres (e.g. --gres=lscratch:10) instead
-			// of appending a second one, since deduplication keeps only one per flag.
-			merged := false
-			for i, slurmFlag := range sbatchFlagsFromArgo {
-				if slurmFlagKey(slurmFlag) != "--gres" {
-					continue
-				}
-				if existing := slurmFlagValue(slurmFlag); existing != "" {
-					sbatchFlagsFromArgo[i] = "--gres=" + existing + "," + gpuGres
-				} else {
-					sbatchFlagsFromArgo[i] = "--gres=" + gpuGres
-				}
-				merged = true
-				break
-			}
-			if !merged {
-				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--gres="+gpuGres)
-			}
-			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with --gres=%s", gpuCount, gpuGres)
-		}
-	}
-
-	// Deduplicate flags - later flags override earlier ones
-	// Priority order: flavor flags < annotation flags < pod spec resource flags
-	sbatchFlagsFromArgo = deduplicateSlurmFlags(sbatchFlagsFromArgo)
-	log.G(Ctx).Debugf("Final deduplicated SLURM flags: %v", sbatchFlagsFromArgo)
-
 	for _, slurmFlag := range sbatchFlagsFromArgo {
-		if slurmFlag != "" {
-			sbatchFlagsAsString += "\n#SBATCH " + slurmFlag
-		}
+		sbatchFlagsAsString += "\n#SBATCH " + slurmFlag
 	}
 
 	if config.Tsocks {
@@ -1369,83 +731,12 @@ func produceSLURMScript(
 		prefix += "\n" + config.Commandprefix
 	}
 
-	// The pod's private directory for unix sockets, which the shadow tunnel connects
-	// to. The job creates it on the node as its own user. rm -rf clears what an
-	// earlier run of the same pod left behind (a requeue, or a job killed before its
-	// trap ran); it cannot empty a directory another account created, so mkdir
-	// without -p then fails and the job fails rather than adopt it. Two jobs of the
-	// same pod at once would share this directory, as they already share the job
-	// directory. This runs before the compute node is recorded, so a reported node
-	// means the directory exists. The trap is set here and not in job.sh, which has
-	// its own.
-	if socketDir := socketDirFor(config.SocketDirRoot, podUID); socketDir != "" {
-		prefix += "\nINTERLINK_SOCKET_DIR=" + shellescape.Quote(socketDir) + "; export INTERLINK_SOCKET_DIR"
-		prefix += "\n(umask 077 && mkdir -p " + shellescape.Quote(config.SocketDirRoot) + `); rm -rf "$INTERLINK_SOCKET_DIR" 2>/dev/null`
-		prefix += "\n" + `(umask 077 && mkdir "$INTERLINK_SOCKET_DIR" && chmod 0700 "$INTERLINK_SOCKET_DIR") || { echo "interLink: cannot create a private $INTERLINK_SOCKET_DIR: SocketDirRoot must be on a filesystem shared with ssh sessions on the node and writable by this account only" >&2; exit 1; }`
-		prefix += "\n" + `trap 'rm -rf "$INTERLINK_SOCKET_DIR"' EXIT`
-	}
-
-	// Record the compute node the job landed on, for StatusHandler to report back to
-	// interLink. The generator knows the pod's directory, so nothing has to derive it
-	// at runtime. Best-effort: a failed write must never take the workload down.
-	prefix += "\nhostname -f > " + filepath.Join(path, ComputeNodeFileName) + " || true"
-
 	if wstunnelClientCommands, ok := metadata.Annotations["interlink.eu/wstunnel-client-commands"]; ok {
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
 
-	// mesh.sh sets up the mesh network in an unshared netns and then execs its "$@".
-	// The workload has to be that argument, so it must end up on the SAME line as
-	// mesh.sh; the default newline separator below would run it after mesh.sh had
-	// already exited, outside the netns.
-	meshDetected := false
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
-		// Check if pre-exec contains a heredoc that creates mesh.sh
-		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
-			// Extract the heredoc content
-			meshScript, err := extractHeredoc(preExecAnnotations, "EOFMESH")
-			if err == nil && meshScript != "" {
-
-				meshPath := filepath.Join(path, "mesh.sh")
-				err := os.WriteFile(meshPath, []byte(meshScript), 0755)
-				if err != nil {
-					prefix += "\n" + preExecAnnotations
-				} else {
-					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
-					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
-					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
-					meshDetected = true
-				}
-
-				err = os.Chmod(path+"/mesh.sh", 0774)
-				if err != nil {
-					log.G(Ctx).Error("Unable to chmod file ", path, "/job.sh")
-					log.G(Ctx).Error(err)
-					return "", err
-				} else {
-					log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
-				}
-			} else {
-				// Could not extract heredoc, include as-is
-				prefix += "\n" + preExecAnnotations
-			}
-		} else {
-			// No heredoc pattern, include pre-exec as-is
-			prefix += "\n" + preExecAnnotations
-		}
-	}
-
-	// NOTE: prefix is separated from f.Name() by a newline, not a space.  When
-	// SHARED_FS=false the prefix ends with a base64 heredoc end-marker (e.g.
-	// "VKDATA_abc").  If f.Name() were appended on the same line ("VKDATA_abc
-	// /path/to/job.sh") bash would not recognise it as the end-of-heredoc, consume
-	// the rest of the script into the heredoc, and never execute job.sh.
-	//
-	// A mesh prefix is the exception: there job.sh must be mesh.sh's argument. The
-	// mesh prefix never ends in a heredoc marker, so the two cases cannot collide.
-	separator := "\n"
-	if meshDetected {
-		separator = " "
+		prefix += "\n" + preExecAnnotations
 	}
 
 	sbatch_macros := "#!" + config.BashPath +
@@ -1453,7 +744,7 @@ func produceSLURMScript(
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		prefix + separator + f.Name() +
+		prefix + " " + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
@@ -1512,7 +803,7 @@ runCtn() {
   ctn="$1"
   shift
   # This subshell below is NOT POSIX shell compatible, it needs for example bash.
-  time ( "$@" ) >> ${workingPath}/run-${ctn}.out 2>&1 &
+  time ( "$@" ) &> ${workingPath}/run-${ctn}.out &
   pid="$!"
   printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
   pidCtns="${pidCtns} ${pid}:${ctn}"
@@ -1533,8 +824,8 @@ waitCtns() {
     printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} ended with status ${exitCode}."
 	waitFileExist "${workingPath}/run-${ctn}.status"
   done
-  # Compatibility with jobScript, read the result of container .status files
-  for filestatus in $(ls ${workingPath}/*.status 2>/dev/null) ; do
+  # Compatibility with jobScript, read the result of conainer .status files
+  for filestatus in $(ls *.status) ; do
     exitCode=$(cat "$filestatus")
     test "${highestExitCode}" -lt "${exitCode}" && highestExitCode="${exitCode}"
   done
@@ -1575,6 +866,18 @@ highestExitCode=0
 	stringToBeWritten.WriteString(path)
 	stringToBeWritten.WriteString("\n")
 
+	// Create emptyDir directories on the compute node
+	// This ensures they exist before any containers start
+	if len(emptyDirPaths) > 0 {
+		stringToBeWritten.WriteString("\n# Create emptyDir volumes\n")
+		for volName, edPath := range emptyDirPaths {
+			stringToBeWritten.WriteString("mkdir -p \"")
+			stringToBeWritten.WriteString(edPath)
+			stringToBeWritten.WriteString("\"\n")
+			log.G(Ctx).Debug("-- Added emptyDir creation command for volume: ", volName, " at path: ", edPath)
+		}
+	}
+
 	// Generate probe cleanup script first if any probes exist
 	var hasProbes bool
 	for _, containerCommand := range commands {
@@ -1591,11 +894,6 @@ highestExitCode=0
 				break // Only need one cleanup script
 			}
 		}
-	}
-
-	// Inject SIGTERM trap for preStop lifecycle hooks if any container defines one.
-	if trapScript := generatePreStopTrap(config, commands); trapScript != "" {
-		stringToBeWritten.WriteString(trapScript)
 	}
 
 	for _, containerCommand := range commands {
@@ -1621,17 +919,6 @@ highestExitCode=0
 		if containerCommand.isInitContainer {
 			stringToBeWritten.WriteString("runInitCtn ")
 		} else {
-			// Inject postStart lifecycle hook before launching the container.
-			// The hook runs synchronously so that side-effects (e.g. creating
-			// marker files) are visible to the container's entrypoint.
-			if postStartScript := generatePostStartScript(config, containerCommand); postStartScript != "" {
-				stringToBeWritten.WriteString(postStartScript)
-				// When a postStart hook is present, add a shared /tmp bind mount to
-				// the runtime command so the container sees files written by the hook.
-				// Both the hook exec (in generatePostStartScript) and the container
-				// use --bind "${workingPath}/hook-tmp:/tmp".
-				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
-			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
 		stringToBeWritten.WriteString(containerCommand.containerName)
@@ -1657,7 +944,26 @@ highestExitCode=0
 
 		// Generate probe scripts if enabled and not an init container
 		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
-			imageName := containerCommand.containerImage
+			// Extract the image name from the singularity command
+			var imageName string
+			for i, arg := range containerCommand.runtimeCommand {
+				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
+					imageName = arg
+					break
+				}
+				// Look for image after singularity run/exec command
+				if (arg == "run" || arg == "exec") && i+1 < len(containerCommand.runtimeCommand) {
+					// Skip any options and find the image
+					for j := i + 1; j < len(containerCommand.runtimeCommand); j++ {
+						nextArg := containerCommand.runtimeCommand[j]
+						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
+							imageName = nextArg
+							break
+						}
+					}
+					break
+				}
+			}
 
 			if imageName != "" {
 				// Store probe metadata for status checking
@@ -1688,32 +994,6 @@ highestExitCode=0
 		log.G(Ctx).Debug("---- Written job.sh file")
 	}
 
-	// RFC requirement: Set file and directory ownership if UID is configured
-	// This allows the SLURM job to run as the specified user
-	if jobUID != nil {
-		uid := int(*jobUID)
-		gid := -1 // -1 means don't change group ownership
-
-		// Change ownership of the job directory and all its contents
-		if err := os.Chown(path, uid, gid); err != nil {
-			log.G(Ctx).Warningf("Failed to chown directory %s to UID %d: %v", path, uid, err)
-		} else {
-			log.G(Ctx).Debugf("Changed ownership of %s to UID %d", path, uid)
-		}
-
-		// Change ownership of job.slurm
-		if err := os.Chown(path+"/job.slurm", uid, gid); err != nil {
-			log.G(Ctx).Warningf("Failed to chown %s/job.slurm to UID %d: %v", path, uid, err)
-		}
-
-		// Change ownership of job.sh
-		if err := os.Chown(path+"/job.sh", uid, gid); err != nil {
-			log.G(Ctx).Warningf("Failed to chown %s/job.sh to UID %d: %v", path, uid, err)
-		}
-
-		log.G(Ctx).Infof("Set ownership of job files to UID %d", uid)
-	}
-
 	duration := time.Now().UnixMicro() - start
 	span.AddEvent("Produced SLURM script", trace.WithAttributes(
 		attribute.String("produceslurmscript.path", fJob.Name()),
@@ -1723,9 +1003,10 @@ highestExitCode=0
 	return fJob.Name(), nil
 }
 
-// SLURMBatchSubmit submits the job provided in the path argument to the SLURM queue.
-// At this point, it's up to the SLURM scheduler to manage the job.
-// Returns the output of the sbatch command and the first encoundered error.
+// SLURMBatchSubmit submits a SLURM batch script to the scheduler using the sbatch command.
+// The path parameter should point to the job.slurm file generated by produceSLURMScript.
+// Returns the sbatch command output (which includes the assigned job ID) and any error encountered.
+// After successful submission, the SLURM scheduler takes over job management.
 func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (string, error) {
 	log.G(Ctx).Info("- Submitting Slurm job")
 	shell := exec2.ExecTask{
@@ -1750,34 +1031,29 @@ func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (str
 	return string(execReturn.Stdout), nil
 }
 
-// handleJidAndPodUid creates a JID file to store the Job ID of the submitted job.
-// The output parameter must be the output of SLURMBatchSubmit function and the path
-// is the path where to store the JID file.
-// It also adds the JID to the JIDs main structure.
-// Finally, it stores the namespace and podUID info in the same location, to restore
-// status at startup.
-// Return the first encountered error.
-func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, filesPath string, workDir string) (string, error) {
-	if err := os.MkdirAll(filesPath, 0o755); err != nil {
-		return "", err
-	}
+// handleJidAndPodUid extracts the SLURM job ID from sbatch output and persists the mapping
+// between the pod and job ID. It creates three files (JobID.jid, PodUID.uid, PodNamespace.ns)
+// for state recovery, and updates the in-memory JIDs map. The output parameter should contain
+// the sbatch command output in the format "Submitted batch job <JID>".
+// Returns the extracted job ID and any error encountered.
+func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, path string) (string, error) {
 	r := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
 	jid := r.FindStringSubmatch(output)
-	fJID, err := os.Create(filesPath + "/JobID.jid")
+	fJID, err := os.Create(path + "/JobID.jid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create jid_file")
 		return "", err
 	}
 	defer fJID.Close()
 
-	fNS, err := os.Create(filesPath + "/PodNamespace.ns")
+	fNS, err := os.Create(path + "/PodNamespace.ns")
 	if err != nil {
 		log.G(Ctx).Error("Can't create namespace_file")
 		return "", err
 	}
 	defer fNS.Close()
 
-	fUID, err := os.Create(filesPath + "/PodUID.uid")
+	fUID, err := os.Create(path + "/PodUID.uid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create PodUID_file")
 		return "", err
@@ -1805,27 +1081,20 @@ func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidSt
 		return "", err
 	}
 
-	// If the job uses a custom working directory, persist it so it can be
-	// recovered across sidecar restarts (see LoadJIDs).
-	if workDir != filesPath {
-		(*JIDs)[string(pod.UID)].WorkDir = workDir
-		if err := os.WriteFile(filesPath+"/WorkDir.path", []byte(workDir), 0o644); err != nil {
-			log.G(Ctx).Error("Can't write WorkDir.path: ", err)
-			return "", err
-		}
-	}
-
 	return (*JIDs)[string(pod.UID)].JID, nil
 }
 
-// removeJID delete a JID from the structure
+// removeJID removes a job ID mapping from the in-memory JIDs map using the pod UID as the key.
+// This is called when a pod is deleted or its job is cancelled.
 func removeJID(podUID string, JIDs *map[string]*JidStruct) {
 	delete(*JIDs, podUID)
 }
 
-// deleteContainer checks if a Job has not yet been deleted and, in case, calls the scancel command to abort the job execution.
-// It then removes the JID from the main JIDs structure and all the related files on the disk.
-// Returns the first encountered error.
+// deleteContainer cancels a running SLURM job using scancel and cleans up all associated files.
+// It checks if the job exists in the JIDs map before attempting cancellation, then removes the
+// job ID mapping and deletes the working directory containing job scripts, logs, and metadata.
+// The function attempts deletion twice with a 5-second delay to handle cases where log files
+// may still be open. Returns any error encountered during the cleanup process.
 func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JIDs *map[string]*JidStruct, path string) error {
 	log.G(Ctx).Info("- Deleting Job for pod " + podUID)
 	span := trace.SpanFromContext(Ctx)
@@ -1838,13 +1107,7 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	// Not every pod that reaches here has a job: sbatch may have been rejected, or
-	// the plugin may have restarted since submission. Both leave no JIDs entry, and
-	// dereferencing the nil *JidStruct panics the whole request handler.
-	jid := ""
-	if entry := (*JIDs)[podUID]; entry != nil {
-		jid = entry.JID
-	}
+	jid := (*JIDs)[podUID].JID
 	removeJID(podUID, JIDs)
 
 	errFirstAttempt := os.RemoveAll(path)
@@ -2033,7 +1296,7 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			// Convert map of string to map of []byte
 			mountDataConfigMapsAsBytes := make(map[string][]byte)
 			for key := range retrievedDataObjectCasted.Data {
-				mountDataConfigMapsAsBytes[key] = normalizeVolumeFileContent(retrievedDataObjectCasted.Data[key])
+				mountDataConfigMapsAsBytes[key] = []byte(retrievedDataObjectCasted.Data[key])
 			}
 			fileMode := os.FileMode(*defaultMode)
 			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)
@@ -2051,30 +1314,25 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			if volume.EmptyDir != nil {
 				log.G(Ctx).Debugf("in mountData() volume found: %s type: emptyDir", volumeMount.Name)
 
-				var edPath string
-				edPath = filepath.Join(path, "emptyDirs", volume.Name)
-				log.G(Ctx).Info("-- Creating EmptyDir in ", edPath)
-				err := os.MkdirAll(edPath, os.FileMode(0755)|os.ModeDir)
-				if err != nil {
-					return []string{}, nil, fmt.Errorf("could not create whole directory of %s root cause %w", edPath, err)
-				}
-				log.G(Ctx).Debug("-- Created EmptyDir in ", edPath)
-				/*
-					cmd := []string{"-p " + edPath}
-					shell := exec2.ExecTask{
-						Command: "mkdir",
-						Args:    cmd,
-						Shell:   true,
-					}
+				// Use absolute path for the emptyDir on the host
+				var hostEmptyDirPath string
+				hostEmptyDirPath = filepath.Join(path, "emptyDirs", volume.Name)
 
-					_, err := shell.Execute()
+				// Ensure absolute path
+				if !filepath.IsAbs(hostEmptyDirPath) {
+					absPath, err := filepath.Abs(hostEmptyDirPath)
 					if err != nil {
-						log.G(Ctx).Error(err)
-						return []string{}, nil, err
-					} else {
-						log.G(Ctx).Debug("-- Created EmptyDir in ", edPath)
+						return []string{}, nil, fmt.Errorf("could not get absolute path for %s root cause %w", hostEmptyDirPath, err)
 					}
-				*/
+					hostEmptyDirPath = absPath
+				}
+
+				log.G(Ctx).Info("-- Creating EmptyDir at: ", hostEmptyDirPath)
+				err := os.MkdirAll(hostEmptyDirPath, os.FileMode(0755)|os.ModeDir)
+				if err != nil {
+					return []string{}, nil, fmt.Errorf("could not create whole directory of %s root cause %w", hostEmptyDirPath, err)
+				}
+				log.G(Ctx).Debug("-- Created EmptyDir at: ", hostEmptyDirPath)
 
 				mode := ""
 				if volumeMount.ReadOnly {
@@ -2082,8 +1340,18 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 				} else {
 					mode = ":rw"
 				}
-				edPath += (":" + volumeMount.MountPath + mode + " ")
-				edPaths = append(edPaths, " --bind "+edPath+" ")
+
+				// Build the bind mount string: hostPath:containerPath:mode
+				bindMount := hostEmptyDirPath + ":" + volumeMount.MountPath + mode
+				log.G(Ctx).Info("-- EmptyDir bind mount for container ", container.Name, ": ", bindMount)
+
+				// Add bind mount with proper formatting for singularity/enroot
+				switch config.ContainerRuntime {
+				case "singularity":
+					edPaths = append(edPaths, " --bind "+bindMount)
+				case "enroot":
+					edPaths = append(edPaths, " --mount "+bindMount)
+				}
 			}
 			duration := time.Now().UnixMicro() - start
 			span.AddEvent("Prepared emptydir mounts", trace.WithAttributes(
@@ -2099,7 +1367,8 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 	return nil, nil, nil
 }
 
-// checkIfJidExists checks if a JID is in the main JIDs struct
+// checkIfJidExists verifies whether a pod UID has an associated SLURM job ID in the JIDs map.
+// Returns true if the mapping exists, false otherwise. Adds a trace event when the job ID is not found.
 func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid string) bool {
 	span := trace.SpanFromContext(ctx)
 	_, ok := (*JIDs)[uid]
@@ -2112,22 +1381,11 @@ func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid stri
 	}
 }
 
-// failedJobExitCode gives the exit code to report for a container whose status
-// file is missing when the job ended in a failure state, where Slurm's own exit
-// code can still read 0. OOM gets 137, as an OOM-killed container in Kubernetes.
-func failedJobExitCode(state string) (int32, bool) {
-	switch state {
-	case "OOM":
-		return 137, true
-	case "F", "TO", "PR":
-		return 1, true
-	default:
-		return 0, false
-	}
-}
-
-// getExitCode returns the exit code read from the .status file of a specific container and returns it as an int32 number
-func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, state string, sessionContextMessage string) (int32, error) {
+// getExitCode retrieves the exit code of a container from its status file (run-<container>.status or
+// init-<container>.status). If the file doesn't exist (e.g., job was cancelled before completion),
+// it uses the SLURM job exit code as a fallback and creates the status file for future reads.
+// Returns the exit code as an int32 and any error encountered.
+func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, sessionContextMessage string) (int32, error) {
 	statusFilePath := path + "/run-" + ctName + ".status"
 	exitCode, err := os.ReadFile(statusFilePath)
 	if err != nil {
@@ -2144,12 +1402,7 @@ func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch 
 					log.G(ctx).Error(errWithContext)
 					return 11, errWithContext
 				}
-				// A job that ended in a failure state never succeeded, whatever its exit code says.
-				if code, failed := failedJobExitCode(state); failed && exitCodeInt == 0 {
-					log.G(ctx).Warning(sessionContextMessage, "job state ", state, " with exit code 0: reporting ", code)
-					exitCodeInt = int(code)
-				}
-				errWriteFile := os.WriteFile(statusFilePath, []byte(strconv.Itoa(exitCodeInt)), 0o600)
+				errWriteFile := os.WriteFile(statusFilePath, []byte(exitCodeMatch), 0644)
 				if errWriteFile != nil {
 					errWithContext := fmt.Errorf(sessionContextMessage+"error during WriteFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", errWriteFile), errWriteFile)
 					log.G(ctx).Error(errWithContext)
@@ -2233,17 +1486,12 @@ func prepareImage(Ctx context.Context, config SlurmConfig, metadata metav1.Objec
 
 	// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
 	// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
-	// Check if the image already has a URI scheme (e.g., docker://, oras://, library://, shub://)
-	// to avoid double-prefixing (e.g., docker://oras://...).
-	hasScheme := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*://`).MatchString(image)
 	if strings.HasPrefix(image, "/") {
 		log.G(Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
-	} else if hasScheme {
-		log.G(Ctx).Infof("image %s already has a URI scheme. Prefix won't be added.", image)
-	} else if imagePrefix != "" {
+	} else if !strings.HasPrefix(image, imagePrefix) {
 		image = imagePrefix + containerImage
 	} else {
-		log.G(Ctx).Warningf("imagePrefix is empty and image %s has no URI scheme. Image will be used as-is.", image)
+		log.G(Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
 	}
 	return image
 }

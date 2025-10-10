@@ -16,7 +16,9 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
-// StopHandler runs a scancel command, updating JIDs and cached statuses
+// StopHandler is the HTTP handler for pod deletion requests. It cancels the running SLURM job
+// using scancel, removes the job ID mapping from memory, and cleans up all associated files
+// (scripts, logs, mounted data). Returns HTTP 200 on successful deletion or an error status code.
 func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
