@@ -13,7 +13,7 @@ import (
 
 	"github.com/containerd/containerd/log"
 
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -179,12 +179,64 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
 	)
 
-	path, err := produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
-	if err != nil {
-		log.G(h.Ctx).Error(err)
-		os.RemoveAll(filesPath)
-		return
+	var path string
+
+	if data.JobScript == "" {
+		log.G(h.Ctx).Info("-- No custom job script provided, generating one...")
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+		if err != nil {
+			log.G(h.Ctx).Error(err)
+			os.RemoveAll(filesPath)
+			return
+		}
+	} else {
+
+		pathFile, err := os.Create(filesPath + "/jobScript.sh")
+		if err != nil {
+			log.G(h.Ctx).Error("Unable to create file ", path, "/jobScript.sh")
+			log.G(h.Ctx).Error(err)
+			span.AddEvent("Failed to submit the SLURM Job")
+			h.handleError(spanCtx, w, http.StatusInternalServerError, err)
+			//os.RemoveAll(filesPath)
+			return
+		}
+
+		mode := os.FileMode(0770)
+
+		// Change the file mode
+		if err := os.Chmod(filesPath+"/jobScript.sh", mode); err != nil {
+			panic(err)
+		}
+
+		_, err = pathFile.Write([]byte(data.JobScript))
+		if err != nil {
+			log.G(h.Ctx).Error("Unable to write to file ", path, "/jobScript.sh")
+			log.G(h.Ctx).Error(err)
+			span.AddEvent("Failed to submit the SLURM Job")
+			h.handleError(spanCtx, w, http.StatusInternalServerError, err)
+			//os.RemoveAll(filesPath)
+			return
+		}
+		runtime_command_pod := append([]ContainerCommand{}, ContainerCommand{
+			runtimeCommand:   []string{pathFile.Name()},
+			containerName:    "jobScript",
+			containerArgs:    []string{},
+			containerCommand: []string{},
+			isInitContainer:  false,
+			readinessProbes:  []ProbeCommand{},
+			livenessProbes:   []ProbeCommand{},
+			startupProbes:    []ProbeCommand{},
+			containerImage:   "n/a",
+		})
+
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+		if err != nil {
+			log.G(h.Ctx).Error(err)
+			os.RemoveAll(filesPath)
+			return
+		}
 	}
+
 	out, err := SLURMBatchSubmit(h.Ctx, h.Config, path)
 	if err != nil {
 		span.AddEvent("Failed to submit the SLURM Job")

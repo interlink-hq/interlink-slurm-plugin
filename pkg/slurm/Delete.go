@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/log"
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
 
 	"go.opentelemetry.io/otel"
