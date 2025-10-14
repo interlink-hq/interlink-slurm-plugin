@@ -16,7 +16,7 @@ import (
 
 	"github.com/containerd/containerd/log"
 
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

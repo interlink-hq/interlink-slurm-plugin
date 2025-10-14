@@ -22,7 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
