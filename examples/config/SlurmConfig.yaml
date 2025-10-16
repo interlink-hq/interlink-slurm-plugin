@@ -17,3 +17,35 @@ BashPath: /bin/bash
 VerboseLogging: true
 ErrorsOnlyLogging: false
 EnableProbes: true
+
+# Flavor configuration - predefined sets of SLURM submission options
+DefaultFlavor: "default"
+Flavors:
+  default:
+    Name: "default"
+    Description: "Standard CPU job (4 cores, 16GB RAM)"
+    CPUDefault: 4
+    MemoryDefault: "16G"
+    SlurmFlags:
+      - "--partition=cpu"
+      - "--time=01:00:00"
+
+  gpu-nvidia:
+    Name: "gpu-nvidia"
+    Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
+    CPUDefault: 8
+    MemoryDefault: "64G"
+    SlurmFlags:
+      - "--gres=gpu:1"
+      - "--partition=gpu"
+      - "--time=04:00:00"
+
+  high-io:
+    Name: "high-io"
+    Description: "High I/O job (16 cores, 32GB RAM, fast storage)"
+    CPUDefault: 16
+    MemoryDefault: "32G"
+    SlurmFlags:
+      - "--partition=fast-io"
+      - "--time=02:00:00"
+      - "--constraint=ssd"

@@ -57,6 +57,15 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	metadata := data.Pod.ObjectMeta
 	filesPath := h.Config.DataRootFolder + data.Pod.Namespace + "-" + string(data.Pod.UID)
 
+	// Resolve flavor to apply default CPU and memory
+	flavor, err := resolveFlavor(spanCtx, h.Config, metadata, data.Pod.Spec.Containers)
+	if err != nil {
+		log.G(h.Ctx).Error("Failed to resolve flavor: ", err)
+		statusCode = http.StatusInternalServerError
+		h.handleError(spanCtx, w, statusCode, err)
+		return
+	}
+
 	var runtime_command_pod []ContainerCommand
 	var resourceLimits ResourceLimits
 
@@ -68,6 +77,20 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	cpuLimit := int64(0)
 	memoryLimit := int64(0)
+
+	// Apply flavor defaults if available
+	if flavor != nil {
+		if flavor.CPUDefault > 0 {
+			cpuLimit = flavor.CPUDefault
+			maxCPULimit = int(flavor.CPUDefault)
+			log.G(h.Ctx).Infof("Applying CPU default from flavor '%s': %d", flavor.FlavorName, flavor.CPUDefault)
+		}
+		if flavor.MemoryDefault > 0 {
+			memoryLimit = flavor.MemoryDefault
+			maxMemoryLimit = int(flavor.MemoryDefault)
+			log.G(h.Ctx).Infof("Applying memory default from flavor '%s': %d bytes", flavor.FlavorName, flavor.MemoryDefault)
+		}
+	}
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
