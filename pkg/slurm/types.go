@@ -1,5 +1,10 @@
 package slurm
 
+import (
+	"fmt"
+	"strings"
+)
+
 // FlavorConfig holds the configuration for a specific flavor
 type FlavorConfig struct {
 	Name          string   `yaml:"Name"`
@@ -7,6 +12,38 @@ type FlavorConfig struct {
 	CPUDefault    int64    `yaml:"CPUDefault"`
 	MemoryDefault string   `yaml:"MemoryDefault"` // e.g., "16G", "32000M", "1024"
 	SlurmFlags    []string `yaml:"SlurmFlags"`
+}
+
+// Validate checks if the FlavorConfig is valid
+func (f *FlavorConfig) Validate() error {
+	if f.Name == "" {
+		return fmt.Errorf("flavor Name cannot be empty")
+	}
+
+	if f.CPUDefault < 0 {
+		return fmt.Errorf("flavor '%s': CPUDefault cannot be negative (got %d)", f.Name, f.CPUDefault)
+	}
+
+	if f.MemoryDefault != "" {
+		// Try to parse the memory string to ensure it's valid
+		if _, err := parseMemoryString(f.MemoryDefault); err != nil {
+			return fmt.Errorf("flavor '%s': invalid MemoryDefault format '%s': %w", f.Name, f.MemoryDefault, err)
+		}
+	}
+
+	// Validate SLURM flags format (basic check)
+	for i, flag := range f.SlurmFlags {
+		flag = strings.TrimSpace(flag)
+		if flag == "" {
+			return fmt.Errorf("flavor '%s': SLURM flag at index %d is empty", f.Name, i)
+		}
+		// Check if flag starts with -- or -
+		if !strings.HasPrefix(flag, "--") && !strings.HasPrefix(flag, "-") {
+			return fmt.Errorf("flavor '%s': SLURM flag '%s' should start with '--' or '-'", f.Name, flag)
+		}
+	}
+
+	return nil
 }
 
 // InterLinkConfig holds the whole configuration

@@ -135,6 +135,13 @@ func NewSlurmConfig() (SlurmConfig, error) {
 					flavor.Name = name
 					SlurmConfigInst.Flavors[name] = flavor
 				}
+
+				// Validate the flavor configuration
+				if err := flavor.Validate(); err != nil {
+					log.G(context.Background()).Errorf("Invalid flavor configuration for '%s': %v", name, err)
+					return SlurmConfig{}, fmt.Errorf("invalid flavor '%s': %w", name, err)
+				}
+
 				log.G(context.Background()).Infof("  - %s: %s (CPU: %d, Memory: %s, SLURM flags: %d)",
 					flavor.Name, flavor.Description, flavor.CPUDefault, flavor.MemoryDefault, len(flavor.SlurmFlags))
 			}

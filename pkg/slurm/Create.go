@@ -72,25 +72,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	isDefaultCPU := true
 	isDefaultRam := true
 
-	maxCPULimit := 0
-	maxMemoryLimit := 0
-
 	cpuLimit := int64(0)
 	memoryLimit := int64(0)
-
-	// Apply flavor defaults if available
-	if flavor != nil {
-		if flavor.CPUDefault > 0 {
-			cpuLimit = flavor.CPUDefault
-			maxCPULimit = int(flavor.CPUDefault)
-			log.G(h.Ctx).Infof("Applying CPU default from flavor '%s': %d", flavor.FlavorName, flavor.CPUDefault)
-		}
-		if flavor.MemoryDefault > 0 {
-			memoryLimit = flavor.MemoryDefault
-			maxMemoryLimit = int(flavor.MemoryDefault)
-			log.G(h.Ctx).Infof("Applying memory default from flavor '%s': %d bytes", flavor.FlavorName, flavor.MemoryDefault)
-		}
-	}
 
 	for i, container := range containers {
 		log.G(h.Ctx).Info("- Beginning script generation for container " + container.Name)
@@ -102,28 +85,40 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
 
-		if cpuLimitFromContainer == 0 && isDefaultCPU {
-			log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
-			resourceLimits.CPU = 1
+		if cpuLimitFromContainer == 0 {
+			// No CPU limit specified in container, check if we should use flavor default
+			if isDefaultCPU && flavor != nil && flavor.CPUDefault > 0 {
+				log.G(h.Ctx).Infof("Max CPU resource not set for %s. Using flavor '%s' default: %d CPU", container.Name, flavor.FlavorName, flavor.CPUDefault)
+				cpuLimit = flavor.CPUDefault
+			} else if isDefaultCPU {
+				log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
+				cpuLimit = 1
+			}
 		} else {
-			if cpuLimitFromContainer > resourceLimits.CPU && maxCPULimit < int(cpuLimitFromContainer) {
+			// Container specified CPU limit
+			if cpuLimitFromContainer > cpuLimit {
 				log.G(h.Ctx).Info("Setting CPU limit to " + strconv.FormatInt(cpuLimitFromContainer, 10))
 				cpuLimit = cpuLimitFromContainer
-				maxCPULimit = int(cpuLimitFromContainer)
-				isDefaultCPU = false
 			}
+			isDefaultCPU = false
 		}
 
-		if memoryLimitFromContainer == 0 && isDefaultRam {
-			log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
-			resourceLimits.Memory = 1024 * 1024
+		if memoryLimitFromContainer == 0 {
+			// No memory limit specified in container, check if we should use flavor default
+			if isDefaultRam && flavor != nil && flavor.MemoryDefault > 0 {
+				log.G(h.Ctx).Infof("Max Memory resource not set for %s. Using flavor '%s' default: %d bytes", container.Name, flavor.FlavorName, flavor.MemoryDefault)
+				memoryLimit = flavor.MemoryDefault
+			} else if isDefaultRam {
+				log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
+				memoryLimit = 1024 * 1024
+			}
 		} else {
-			if memoryLimitFromContainer > resourceLimits.Memory && maxMemoryLimit < int(memoryLimitFromContainer) {
+			// Container specified memory limit
+			if memoryLimitFromContainer > memoryLimit {
 				log.G(h.Ctx).Info("Setting Memory limit to " + strconv.FormatInt(memoryLimitFromContainer, 10))
 				memoryLimit = memoryLimitFromContainer
-				maxMemoryLimit = int(memoryLimitFromContainer)
-				isDefaultRam = false
 			}
+			isDefaultRam = false
 		}
 
 		resourceLimits.CPU = cpuLimit
@@ -206,7 +201,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	if data.JobScript == "" {
 		log.G(h.Ctx).Info("-- No custom job script provided, generating one...")
-		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
 		if err != nil {
 			log.G(h.Ctx).Error(err)
 			os.RemoveAll(filesPath)
@@ -252,7 +247,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			containerImage:   "n/a",
 		})
 
-		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam)
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
 		if err != nil {
 			log.G(h.Ctx).Error(err)
 			os.RemoveAll(filesPath)
