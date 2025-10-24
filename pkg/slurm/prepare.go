@@ -53,6 +53,14 @@ type ResourceLimits struct {
 	Memory int64
 }
 
+// FlavorResolution holds the resolved flavor information
+type FlavorResolution struct {
+	FlavorName    string
+	CPUDefault    int64
+	MemoryDefault int64 // in bytes
+	SlurmFlags    []string
+}
+
 // stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
 func stringToHex(str string) string {
 	var buffer bytes.Buffer
@@ -92,6 +100,239 @@ func parsingTimeFromString(Ctx context.Context, stringTime string, timestampForm
 	}
 
 	return parsedTime, nil
+}
+
+// parseMemoryString converts memory string formats (e.g., "16G", "32000M", "1024") to bytes
+func parseMemoryString(memStr string) (int64, error) {
+	if memStr == "" {
+		return 0, nil
+	}
+
+	memStr = strings.TrimSpace(strings.ToUpper(memStr))
+
+	// Check for suffix
+	if strings.HasSuffix(memStr, "G") || strings.HasSuffix(memStr, "GB") {
+		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "G")
+		val, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
+		}
+		return val * 1024 * 1024 * 1024, nil
+	} else if strings.HasSuffix(memStr, "M") || strings.HasSuffix(memStr, "MB") {
+		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "M")
+		val, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
+		}
+		return val * 1024 * 1024, nil
+	} else if strings.HasSuffix(memStr, "K") || strings.HasSuffix(memStr, "KB") {
+		numStr := strings.TrimSuffix(strings.TrimSuffix(memStr, "B"), "K")
+		val, err := strconv.ParseInt(numStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
+		}
+		return val * 1024, nil
+	}
+
+	// No suffix, assume bytes
+	val, err := strconv.ParseInt(memStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory format %s: %w", memStr, err)
+	}
+	return val, nil
+}
+
+// detectGPUResources checks if the pod requests GPU resources and returns the GPU count
+func detectGPUResources(Ctx context.Context, containers []v1.Container) int64 {
+	var totalGPUs int64 = 0
+
+	for _, container := range containers {
+		// Check for nvidia.com/gpu
+		if gpuLimit, ok := container.Resources.Limits["nvidia.com/gpu"]; ok {
+			gpuCount := gpuLimit.Value()
+			if gpuCount > 0 {
+				log.G(Ctx).Infof("Detected %d NVIDIA GPU(s) requested in container %s", gpuCount, container.Name)
+				totalGPUs += gpuCount
+			}
+		}
+
+		// Check for amd.com/gpu
+		if gpuLimit, ok := container.Resources.Limits["amd.com/gpu"]; ok {
+			gpuCount := gpuLimit.Value()
+			if gpuCount > 0 {
+				log.G(Ctx).Infof("Detected %d AMD GPU(s) requested in container %s", gpuCount, container.Name)
+				totalGPUs += gpuCount
+			}
+		}
+	}
+
+	return totalGPUs
+}
+
+// extractGPUCountFromFlags extracts GPU count from SLURM flags like --gres=gpu:2
+func extractGPUCountFromFlags(flags []string) int64 {
+	gresPattern := regexp.MustCompile(`--gres=gpu:(\d+)`)
+	for _, flag := range flags {
+		matches := gresPattern.FindStringSubmatch(flag)
+		if len(matches) > 1 {
+			if count, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
+				return count
+			}
+		}
+	}
+	return 0
+}
+
+// hasGPUInFlags checks if any SLURM flag contains GPU-related configuration
+func hasGPUInFlags(flags []string) bool {
+	for _, flag := range flags {
+		if strings.Contains(flag, "--gres=gpu") || strings.Contains(flag, "gpu") {
+			return true
+		}
+	}
+	return false
+}
+
+// deduplicateSlurmFlags removes duplicate SLURM flags, keeping the last occurrence
+// This implements proper priority: later flags override earlier ones
+func deduplicateSlurmFlags(flags []string) []string {
+	// Map to track flag keys and their last values
+	flagMap := make(map[string]string)
+	var order []string // Track order of first appearance
+
+	for _, flag := range flags {
+		flag = strings.TrimSpace(flag)
+		if flag == "" {
+			continue
+		}
+
+		// Extract the flag key (e.g., "--partition" from "--partition=cpu")
+		key := flag
+		if strings.Contains(flag, "=") {
+			parts := strings.SplitN(flag, "=", 2)
+			key = parts[0]
+		} else if strings.HasPrefix(flag, "--") {
+			// Handle flags like "--flag value" (split on space)
+			parts := strings.Fields(flag)
+			if len(parts) > 0 {
+				key = parts[0]
+			}
+		}
+
+		// If we haven't seen this key before, track its order
+		if _, exists := flagMap[key]; !exists {
+			order = append(order, key)
+		}
+
+		// Update the value (later occurrences override earlier ones)
+		flagMap[key] = flag
+	}
+
+	// Rebuild the slice in original order with deduplicated values
+	result := make([]string, 0, len(order))
+	for _, key := range order {
+		result = append(result, flagMap[key])
+	}
+
+	return result
+}
+
+// resolveFlavor determines which flavor to use based on annotations, GPU detection, and default flavor
+func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.ObjectMeta, containers []v1.Container) (*FlavorResolution, error) {
+	// No flavors configured, return nil
+	if len(config.Flavors) == 0 {
+		return nil, nil
+	}
+
+	var selectedFlavor *FlavorConfig
+	var flavorName string
+
+	// Priority 1: Check for explicit flavor annotation
+	if annotationFlavor, ok := metadata.Annotations["slurm-job.vk.io/flavor"]; ok {
+		if flavor, exists := config.Flavors[annotationFlavor]; exists {
+			flavorCopy := flavor
+			selectedFlavor = &flavorCopy
+			flavorName = annotationFlavor
+			log.G(Ctx).Infof("Using flavor '%s' from annotation", flavorName)
+		} else {
+			log.G(Ctx).Warningf("Flavor '%s' specified in annotation not found, falling back to auto-detection", annotationFlavor)
+		}
+	}
+
+	// Priority 2: Auto-detect GPU and select GPU flavor
+	if selectedFlavor == nil {
+		gpuCount := detectGPUResources(Ctx, containers)
+		if gpuCount > 0 {
+			log.G(Ctx).Infof("Detected %d GPU(s) requested, searching for matching flavor", gpuCount)
+
+			// Find best matching GPU flavor
+			// Priority: exact GPU count match > any GPU flavor > name contains "gpu"
+			var exactMatchFlavor *FlavorConfig
+			var exactMatchName string
+			var anyGPUFlavor *FlavorConfig
+			var anyGPUName string
+
+			for name, flavor := range config.Flavors {
+				if !hasGPUInFlags(flavor.SlurmFlags) && !strings.Contains(strings.ToLower(name), "gpu") {
+					continue
+				}
+
+				flavorGPUCount := extractGPUCountFromFlags(flavor.SlurmFlags)
+				if flavorGPUCount == gpuCount {
+					// Exact match - prefer this
+					flavorCopy := flavor
+					exactMatchFlavor = &flavorCopy
+					exactMatchName = name
+					break
+				} else if hasGPUInFlags(flavor.SlurmFlags) && anyGPUFlavor == nil {
+					// Any GPU flavor - use as fallback
+					flavorCopy := flavor
+					anyGPUFlavor = &flavorCopy
+					anyGPUName = name
+				}
+			}
+
+			if exactMatchFlavor != nil {
+				selectedFlavor = exactMatchFlavor
+				flavorName = exactMatchName
+				log.G(Ctx).Infof("Auto-detected GPU resources, using exact match flavor '%s' with %d GPU(s)", flavorName, gpuCount)
+			} else if anyGPUFlavor != nil {
+				selectedFlavor = anyGPUFlavor
+				flavorName = anyGPUName
+				log.G(Ctx).Infof("Auto-detected GPU resources, using GPU flavor '%s' (no exact GPU count match found)", flavorName)
+			} else {
+				log.G(Ctx).Warningf("GPU resources detected but no GPU flavor found, falling back to default")
+			}
+		}
+	}
+
+	// Priority 3: Use default flavor
+	if selectedFlavor == nil && config.DefaultFlavor != "" {
+		if flavor, exists := config.Flavors[config.DefaultFlavor]; exists {
+			flavorCopy := flavor
+			selectedFlavor = &flavorCopy
+			flavorName = config.DefaultFlavor
+			log.G(Ctx).Infof("Using default flavor '%s'", flavorName)
+		}
+	}
+
+	// No flavor selected
+	if selectedFlavor == nil {
+		return nil, nil
+	}
+
+	// Parse memory default
+	memoryBytes, err := parseMemoryString(selectedFlavor.MemoryDefault)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse memory for flavor %s: %w", flavorName, err)
+	}
+
+	return &FlavorResolution{
+		FlavorName:    flavorName,
+		CPUDefault:    selectedFlavor.CPUDefault,
+		MemoryDefault: memoryBytes,
+		SlurmFlags:    selectedFlavor.SlurmFlags,
+	}, nil
 }
 
 // CreateDirectories is just a function to be sure directories exists at runtime
@@ -542,6 +783,7 @@ func produceSLURMScript(
 	resourceLimits ResourceLimits,
 	isDefaultCPU bool,
 	isDefaultRam bool,
+	flavor *FlavorResolution,
 ) (string, error) {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
@@ -599,6 +841,14 @@ func produceSLURMScript(
 
 	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
+
+	// Add flavor SLURM flags first (lowest priority)
+	if flavor != nil && len(flavor.SlurmFlags) > 0 {
+		log.G(Ctx).Infof("Applying %d SLURM flag(s) from flavor '%s'", len(flavor.SlurmFlags), flavor.FlavorName)
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, flavor.SlurmFlags...)
+	}
+
+	// Then process annotation flags (higher priority)
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
 
 		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
@@ -627,14 +877,8 @@ func produceSLURMScript(
 			}
 		}
 
-		sbatchFlagsFromArgo = strings.Split(slurmFlags, " ")
-
-		for i := 0; i < len(sbatchFlagsFromArgo); i++ {
-			if sbatchFlagsFromArgo[i] == "" {
-				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo[:i], sbatchFlagsFromArgo[i+1:]...)
-				i--
-			}
-		}
+		annotationFlags := strings.Split(slurmFlags, " ")
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlags...)
 	}
 
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
@@ -646,6 +890,7 @@ func produceSLURMScript(
 		}
 	}
 
+	// Add CPU/memory limits as flags (highest priority)
 	if !isDefaultCPU {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
 		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
@@ -665,8 +910,15 @@ func produceSLURMScript(
 		}
 	}
 
+	// Deduplicate flags - later flags override earlier ones
+	// Priority order: flavor flags < annotation flags < pod spec resource flags
+	sbatchFlagsFromArgo = deduplicateSlurmFlags(sbatchFlagsFromArgo)
+	log.G(Ctx).Debugf("Final deduplicated SLURM flags: %v", sbatchFlagsFromArgo)
+
 	for _, slurmFlag := range sbatchFlagsFromArgo {
-		sbatchFlagsAsString += "\n#SBATCH " + slurmFlag
+		if slurmFlag != "" {
+			sbatchFlagsAsString += "\n#SBATCH " + slurmFlag
+		}
 	}
 
 	if config.Tsocks {

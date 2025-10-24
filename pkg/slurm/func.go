@@ -125,6 +125,39 @@ func NewSlurmConfig() (SlurmConfig, error) {
 		if len(SlurmConfigInst.SingularityDefaultOptions) == 0 {
 			SlurmConfigInst.SingularityDefaultOptions = []string{"--nv", "--no-eval", "--containall"}
 		}
+
+		// Validate and log flavor configuration
+		if len(SlurmConfigInst.Flavors) > 0 {
+			log.G(context.Background()).Infof("Loaded %d flavor(s):", len(SlurmConfigInst.Flavors))
+			for name, flavor := range SlurmConfigInst.Flavors {
+				if flavor.Name == "" {
+					log.G(context.Background()).Warningf("Flavor '%s' has no Name field set, using key as name", name)
+					flavor.Name = name
+					SlurmConfigInst.Flavors[name] = flavor
+				}
+
+				// Validate the flavor configuration
+				if err := flavor.Validate(); err != nil {
+					log.G(context.Background()).Errorf("Invalid flavor configuration for '%s': %v", name, err)
+					return SlurmConfig{}, fmt.Errorf("invalid flavor '%s': %w", name, err)
+				}
+
+				log.G(context.Background()).Infof("  - %s: %s (CPU: %d, Memory: %s, SLURM flags: %d)",
+					flavor.Name, flavor.Description, flavor.CPUDefault, flavor.MemoryDefault, len(flavor.SlurmFlags))
+			}
+
+			// Validate DefaultFlavor if set
+			if SlurmConfigInst.DefaultFlavor != "" {
+				if _, exists := SlurmConfigInst.Flavors[SlurmConfigInst.DefaultFlavor]; !exists {
+					log.G(context.Background()).Warningf("DefaultFlavor '%s' not found in Flavors map, ignoring", SlurmConfigInst.DefaultFlavor)
+					SlurmConfigInst.DefaultFlavor = ""
+				} else {
+					log.G(context.Background()).Infof("Default flavor set to: %s", SlurmConfigInst.DefaultFlavor)
+				}
+			}
+		} else {
+			log.G(context.Background()).Info("No flavors configured, using default behavior")
+		}
 	}
 	return SlurmConfigInst, nil
 }

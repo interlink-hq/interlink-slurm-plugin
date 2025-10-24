@@ -128,6 +128,111 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/image-root | Used to specify the root path of the Singularity Image |
 | slurm-job.vk.io/flags | Used to specify SLURM flags. These flags will be added to the SLURM script in the form of #SBATCH flag1, #SBATCH flag2, etc |
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
+| slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
+
+### :art: Flavor System
+
+The SLURM plugin supports "flavors" - predefined configurations that provide default resource values and SLURM-specific settings. This simplifies pod definitions and ensures consistent resource allocation across jobs.
+
+#### How Flavors Work
+
+Flavors are resolved in the following priority order:
+1. **Explicit annotation**: `slurm-job.vk.io/flavor: "flavor-name"`
+2. **Auto-detection**: GPU resources automatically select GPU flavors (exact GPU count match preferred)
+3. **Default flavor**: Falls back to the flavor specified in `DefaultFlavor` config
+
+#### Configuring Flavors
+
+Add flavors to your `SlurmConfig.yaml`:
+
+```yaml
+DefaultFlavor: "default"
+Flavors:
+  default:
+    Name: "default"
+    Description: "Standard CPU job (4 cores, 16GB RAM)"
+    CPUDefault: 4
+    MemoryDefault: "16G"
+    SlurmFlags:
+      - "--partition=cpu"
+      - "--time=01:00:00"
+
+  gpu-nvidia:
+    Name: "gpu-nvidia"
+    Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
+    CPUDefault: 8
+    MemoryDefault: "64G"
+    SlurmFlags:
+      - "--gres=gpu:1"
+      - "--partition=gpu"
+      - "--time=04:00:00"
+
+  high-io:
+    Name: "high-io"
+    Description: "High I/O job (16 cores, 32GB RAM, fast storage)"
+    CPUDefault: 16
+    MemoryDefault: "32G"
+    SlurmFlags:
+      - "--partition=fast-io"
+      - "--constraint=ssd"
+```
+
+#### Flavor Behavior
+
+- **Default Resources**: Flavor CPU/memory defaults apply ONLY when pod doesn't specify resource limits
+- **Pod Overrides**: If pod specifies resource limits, those take precedence over flavor defaults
+- **SLURM Flag Priority**: Flavor flags < Annotation flags < Pod resource limits
+- **Flag Deduplication**: Duplicate flags are automatically removed, with later flags overriding earlier ones
+
+#### Example: Using Flavors
+
+**Example 1: Auto-detected GPU flavor**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-job
+spec:
+  containers:
+  - name: pytorch
+    image: docker://pytorch/pytorch:latest
+    resources:
+      limits:
+        nvidia.com/gpu: 1  # Automatically selects "gpu-nvidia" flavor
+```
+
+**Example 2: Explicit flavor selection**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: io-intensive-job
+  annotations:
+    slurm-job.vk.io/flavor: "high-io"
+spec:
+  containers:
+  - name: data-processor
+    image: docker://myapp:latest
+    # Will use high-io flavor's 16 CPU and 32GB RAM defaults
+```
+
+**Example 3: Pod resources override flavor defaults**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: custom-resources
+  annotations:
+    slurm-job.vk.io/flavor: "default"
+spec:
+  containers:
+  - name: app
+    image: docker://myapp:latest
+    resources:
+      limits:
+        cpu: "32"        # Overrides flavor's 4 CPU default
+        memory: "128Gi"  # Overrides flavor's 16GB default
+```
 
 ### :gear: Explanation of the SLURM Config file
 
@@ -156,6 +261,8 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | VerboseLogging | Enable or disable Debug messages on logs. True or False values only |
 | ErrorsOnlyLogging | Specify if you want to get errors only on logs. True or false values only |
 | EnableProbes | Enable or disable health and readiness probes. True or False values only |
+| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, and SlurmFlags. See Flavor System section above for details |
+| DefaultFlavor | Name of the default flavor to use when no explicit flavor is specified and no auto-detection applies |
 
 ### :wrench: Environment Variables list
 

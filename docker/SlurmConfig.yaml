@@ -20,3 +20,23 @@ ContainerRuntime: singularity
 EnrootDefaultOptions: ["--rw"]
 EnrootPrefix: ""
 EnrootPath: enroot
+
+# Flavor configuration - predefined sets of SLURM submission options
+DefaultFlavor: "default"
+Flavors:
+  default:
+    Name: "default"
+    Description: "Standard CPU job (2 cores, 8GB RAM)"
+    CPUDefault: 2
+    MemoryDefault: "8G"
+    SlurmFlags:
+      - "--partition=normal"
+
+  gpu-nvidia:
+    Name: "gpu-nvidia"
+    Description: "GPU job with NVIDIA GPU (4 cores, 32GB RAM, 1 GPU)"
+    CPUDefault: 4
+    MemoryDefault: "32G"
+    SlurmFlags:
+      - "--gres=gpu:1"
+      - "--partition=gpu"
