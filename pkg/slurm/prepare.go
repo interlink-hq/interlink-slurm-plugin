@@ -61,6 +61,32 @@ type FlavorResolution struct {
 	SlurmFlags    []string
 }
 
+func extractHeredoc(content, marker string) (string, error) {
+	// Find the start of the heredoc
+	startPattern := fmt.Sprintf("cat <<'%s'", marker)
+	startIdx := strings.Index(content, startPattern)
+	if startIdx == -1 {
+		return "", fmt.Errorf("heredoc start marker not found")
+	}
+
+	// Find the line after the cat command (start of actual content)
+	contentStart := strings.Index(content[startIdx:], "\n")
+	if contentStart == -1 {
+		return "", fmt.Errorf("invalid heredoc format")
+	}
+	contentStart += startIdx + 1
+
+	// Find the end marker
+	endMarker := "\n" + marker
+	endIdx := strings.Index(content[contentStart:], endMarker)
+	if endIdx == -1 {
+		return "", fmt.Errorf("heredoc end marker not found")
+	}
+
+	// Extract the content between start and end markers
+	return content[contentStart : contentStart+endIdx], nil
+}
+
 // stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
 func stringToHex(str string) string {
 	var buffer bytes.Buffer
@@ -955,7 +981,39 @@ func produceSLURMScript(
 	}
 
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
-		prefix += "\n" + preExecAnnotations
+		// Check if pre-exec contains a heredoc that creates mesh.sh
+		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
+			// Extract the heredoc content
+			meshScript, err := extractHeredoc(preExecAnnotations, "EOFMESH")
+			if err == nil && meshScript != "" {
+
+				meshPath := filepath.Join(path, "mesh.sh")
+				err := os.WriteFile(meshPath, []byte(meshScript), 0755)
+				if err != nil {
+					// Fallback: include the full pre-exec as-is
+					prefix += "\n" + preExecAnnotations
+				} else {
+					// Successfully wrote mesh.sh, just add the execution command
+					//prefix += "\n" + fmt.Sprintf("source %s", meshPath)
+					prefix += "\n" + fmt.Sprintf(" %s", meshPath)
+				}
+
+				err = os.Chmod(path+"/mesh.sh", 0774)
+				if err != nil {
+					log.G(Ctx).Error("Unable to chmod file ", path, "/job.sh")
+					log.G(Ctx).Error(err)
+					return "", err
+				} else {
+					log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
+				}
+			} else {
+				// Could not extract heredoc, include as-is
+				prefix += "\n" + preExecAnnotations
+			}
+		} else {
+			// No heredoc pattern, include pre-exec as-is
+			prefix += "\n" + preExecAnnotations
+		}
 	}
 
 	sbatch_macros := "#!" + config.BashPath +
