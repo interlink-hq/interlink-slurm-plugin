@@ -87,6 +87,40 @@ func extractHeredoc(content, marker string) (string, error) {
 	return content[contentStart : contentStart+endIdx], nil
 }
 
+func removeHeredoc(content, marker string) string {
+	// Find the start of the heredoc
+	startPattern := fmt.Sprintf("cat <<'%s'", marker)
+	startIdx := strings.Index(content, startPattern)
+	if startIdx == -1 {
+		return content // No heredoc found, return as-is
+	}
+
+	// Find the line after the cat command (start of actual content)
+	contentStart := strings.Index(content[startIdx:], "\n")
+	if contentStart == -1 {
+		return content // Invalid heredoc format
+	}
+	contentStart += startIdx + 1
+
+	// Find the end marker
+	endMarker := "\n" + marker
+	endIdx := strings.Index(content[contentStart:], endMarker)
+	if endIdx == -1 {
+		return content // Heredoc end marker not found
+	}
+
+	// Calculate the actual end position (after the end marker)
+	heredocEnd := contentStart + endIdx + len(endMarker)
+
+	// Skip trailing newline if present
+	if heredocEnd < len(content) && content[heredocEnd] == '\n' {
+		heredocEnd++
+	}
+
+	// Remove the heredoc block and return
+	return content[:startIdx] + content[heredocEnd:]
+}
+
 // stringToHex encodes the provided str string into a hex string and removes all trailing redundant zeroes to keep the output more compact
 func stringToHex(str string) string {
 	var buffer bytes.Buffer
@@ -990,12 +1024,11 @@ func produceSLURMScript(
 				meshPath := filepath.Join(path, "mesh.sh")
 				err := os.WriteFile(meshPath, []byte(meshScript), 0755)
 				if err != nil {
-					// Fallback: include the full pre-exec as-is
 					prefix += "\n" + preExecAnnotations
 				} else {
-					// Successfully wrote mesh.sh, just add the execution command
-					//prefix += "\n" + fmt.Sprintf("source %s", meshPath)
-					prefix += "\n" + fmt.Sprintf(" %s", meshPath)
+					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
+					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
+					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
 				}
 
 				err = os.Chmod(path+"/mesh.sh", 0774)
