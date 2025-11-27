@@ -212,12 +212,17 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
+							readinessCount, _, startupCount, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
 							} else {
-								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+								// Container is ready only if:
+								// 1. Startup probes have completed (or none configured), AND
+								// 2. Readiness probes have succeeded (or none configured)
+								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
+								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+								isReady = startupComplete && readinessOK
 							}
 
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
@@ -287,12 +292,17 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
+							readinessCount, _, startupCount, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
 							} else {
-								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+								// Container is ready only if:
+								// 1. Startup probes have completed (or none configured), AND
+								// 2. Readiness probes have succeeded (or none configured)
+								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
+								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+								isReady = startupComplete && readinessOK
 							}
 
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
