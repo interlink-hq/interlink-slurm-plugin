@@ -129,6 +129,7 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/flags | Used to specify SLURM flags. These flags will be added to the SLURM script in the form of #SBATCH flag1, #SBATCH flag2, etc |
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
 | slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
+| slurm-job.vk.io/gid | Used to specify a custom Group ID (GID) for the SLURM job. Only works if AllowGIDOverride is enabled in the config |
 
 ### :art: Flavor System
 
@@ -162,6 +163,7 @@ Flavors:
     Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
     CPUDefault: 8
     MemoryDefault: "64G"
+    GID: 2000  # Optional: Set a specific GID for this flavor
     SlurmFlags:
       - "--gres=gpu:1"
       - "--partition=gpu"
@@ -234,6 +236,98 @@ spec:
         memory: "128Gi"  # Overrides flavor's 16GB default
 ```
 
+### :busts_in_silhouette: GID (Group ID) Configuration
+
+The SLURM plugin supports setting a custom Group ID (GID) for SLURM jobs. This is useful for controlling file access permissions, license group management, and shared storage access.
+
+#### How GID Works
+
+GIDs are resolved with the following priority (highest to lowest):
+1. **Pod annotation**: `slurm-job.vk.io/gid` (only if `AllowGIDOverride: true`)
+2. **Flavor GID**: Configured in the flavor definition
+3. **Default GID**: Configured globally in `DefaultGID`
+
+#### Configuring GID
+
+**Global Configuration** (in `SlurmConfig.yaml`):
+```yaml
+# Optional: Set a default GID for all jobs
+DefaultGID: 1000
+
+# Optional: Allow pods to override GID via annotations
+AllowGIDOverride: true
+```
+
+**Per-Flavor Configuration**:
+```yaml
+Flavors:
+  licensed-software:
+    Name: "licensed-software"
+    Description: "Jobs requiring licensed software access"
+    CPUDefault: 8
+    MemoryDefault: "32G"
+    GID: 5001  # Group with software license access
+    SlurmFlags:
+      - "--partition=licensed"
+```
+
+#### Using GID in Pods
+
+**Example 1: Using annotation to set GID**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: custom-gid-job
+  annotations:
+    slurm-job.vk.io/gid: "1001"  # Set custom GID
+spec:
+  containers:
+  - name: app
+    image: docker://myapp:latest
+    resources:
+      limits:
+        cpu: 4
+        memory: 16Gi
+```
+
+**Example 2: Using flavor GID**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: licensed-job
+  annotations:
+    slurm-job.vk.io/flavor: "licensed-software"  # Uses GID 5001
+spec:
+  containers:
+  - name: matlab-job
+    image: docker://matlab:latest
+```
+
+**Example 3: Complete GID priority example**
+```yaml
+# Config: DefaultGID: 1000, AllowGIDOverride: true
+# Flavor "gpu": GID: 2000
+# Pod annotation: slurm-job.vk.io/gid: "3000"
+#
+# Result: Job runs with GID 3000 (annotation wins)
+```
+
+#### GID Use Cases
+
+- **Research Group Isolation**: Assign different GIDs to different research groups
+- **Shared Storage Access**: Set GID to match shared filesystem group permissions
+- **License Management**: Use GID to control access to licensed software
+- **Multi-tenancy**: Isolate jobs from different tenants using group permissions
+
+#### Important Notes
+
+- GID must be a non-negative integer
+- Invalid GID values in annotations are ignored (falls back to flavor or default)
+- The SLURM cluster must be configured to allow GID specification
+- The `--gid` flag is added to the SBATCH script as `#SBATCH --gid=<value>`
+
 ### :gear: Explanation of the SLURM Config file
 
 Detailed explanation of the SLURM config file key values. Edit the config file before running the binary or before
@@ -261,7 +355,9 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | VerboseLogging | Enable or disable Debug messages on logs. True or False values only |
 | ErrorsOnlyLogging | Specify if you want to get errors only on logs. True or false values only |
 | EnableProbes | Enable or disable health and readiness probes. True or False values only |
-| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, and SlurmFlags. See Flavor System section above for details |
+| DefaultGID | Optional default Group ID (GID) for all SLURM jobs. Must be a non-negative integer |
+| AllowGIDOverride | Allow pods to override the GID via the `slurm-job.vk.io/gid` annotation. True or False values only |
+| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, GID, and SlurmFlags. See Flavor System and GID Configuration sections for details |
 | DefaultFlavor | Name of the default flavor to use when no explicit flavor is specified and no auto-detection applies |
 
 ### :wrench: Environment Variables list

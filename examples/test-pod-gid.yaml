@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-gid
+  namespace: vk
+  annotations:
+    # Example: Set a custom GID for this job
+    slurm-job.vk.io/gid: "1001"
+    # Optional: Specify a flavor
+    slurm-job.vk.io/flavor: "default"
+    # Optional: Additional SLURM flags
+    slurm-job.vk.io/flags: "--time=01:00:00"
+spec:
+  restartPolicy: Never
+  containers:
+  - image: docker://ghcr.io/grycap/cowsay
+    command: ["/bin/sh"]
+    args: ["-c", "echo 'Running with custom GID!' | /usr/games/cowsay && id"]
+    imagePullPolicy: Always
+    name: cowsay-gid
+    resources:
+      limits:
+        cpu: 2
+        memory: 4Gi
+  dnsPolicy: ClusterFirst
+  nodeSelector:
+    kubernetes.io/hostname: test-vk
+  tolerations:
+  - key: virtual-node.interlink/no-schedule
+    operator: Exists

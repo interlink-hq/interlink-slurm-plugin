@@ -158,6 +158,24 @@ func NewSlurmConfig() (SlurmConfig, error) {
 		} else {
 			log.G(context.Background()).Info("No flavors configured, using default behavior")
 		}
+
+		// Validate and log GID configuration
+		if SlurmConfigInst.DefaultGID != nil {
+			if *SlurmConfigInst.DefaultGID < 0 {
+				err := fmt.Errorf("DefaultGID cannot be negative (got %d)", *SlurmConfigInst.DefaultGID)
+				log.G(context.Background()).Error(err)
+				return SlurmConfig{}, err
+			}
+			log.G(context.Background()).Infof("Default GID set to: %d", *SlurmConfigInst.DefaultGID)
+
+			if SlurmConfigInst.AllowGIDOverride {
+				log.G(context.Background()).Info("GID override via pod annotations is enabled")
+			} else {
+				log.G(context.Background()).Info("GID override via pod annotations is disabled")
+			}
+		} else if SlurmConfigInst.AllowGIDOverride {
+			log.G(context.Background()).Info("GID override via pod annotations is enabled (no default GID set)")
+		}
 	}
 	return SlurmConfigInst, nil
 }

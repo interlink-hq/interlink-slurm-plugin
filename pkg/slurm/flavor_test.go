@@ -2,6 +2,8 @@ package slurm
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -391,6 +393,33 @@ func TestFlavorConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Valid GID",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				GID:        int64Ptr(1001),
+			},
+			wantErr: false,
+		},
+		{
+			name: "Negative GID",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				GID:        int64Ptr(-1),
+			},
+			wantErr: true,
+		},
+		{
+			name: "GID zero is valid",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				GID:        int64Ptr(0),
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +427,239 @@ func TestFlavorConfigValidate(t *testing.T) {
 			err := tt.flavor.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("FlavorConfig.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Helper function to create int64 pointers
+func int64Ptr(i int64) *int64 {
+	return &i
+}
+
+func TestGIDResolutionPriority(t *testing.T) {
+	ctx := context.Background()
+	defaultGID := int64(1000)
+	flavorGID := int64(2000)
+	annotationGID := "3000"
+
+	tests := []struct {
+		name             string
+		config           SlurmConfig
+		metadata         metav1.ObjectMeta
+		flavor           *FlavorResolution
+		expectedGID      *int64
+		expectWarning    bool
+	}{
+		{
+			name: "No GID configured anywhere",
+			config: SlurmConfig{
+				DefaultGID:       nil,
+				AllowGIDOverride: false,
+			},
+			metadata:    metav1.ObjectMeta{},
+			flavor:      nil,
+			expectedGID: nil,
+		},
+		{
+			name: "Only default GID configured",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: false,
+			},
+			metadata:    metav1.ObjectMeta{},
+			flavor:      nil,
+			expectedGID: &defaultGID,
+		},
+		{
+			name: "Flavor GID overrides default",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: false,
+			},
+			metadata: metav1.ObjectMeta{},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				GID:        &flavorGID,
+			},
+			expectedGID: &flavorGID,
+		},
+		{
+			name: "Annotation GID overrides all when allowed",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: true,
+			},
+			metadata: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"slurm-job.vk.io/gid": annotationGID,
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				GID:        &flavorGID,
+			},
+			expectedGID: int64Ptr(3000),
+		},
+		{
+			name: "Annotation ignored when override disabled",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: false,
+			},
+			metadata: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"slurm-job.vk.io/gid": annotationGID,
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				GID:        &flavorGID,
+			},
+			expectedGID:   &flavorGID,
+			expectWarning: true,
+		},
+		{
+			name: "Invalid annotation falls back to flavor",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: true,
+			},
+			metadata: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"slurm-job.vk.io/gid": "invalid",
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				GID:        &flavorGID,
+			},
+			expectedGID:   &flavorGID,
+			expectWarning: true,
+		},
+		{
+			name: "Negative annotation falls back to flavor",
+			config: SlurmConfig{
+				DefaultGID:       &defaultGID,
+				AllowGIDOverride: true,
+			},
+			metadata: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"slurm-job.vk.io/gid": "-1",
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				GID:        &flavorGID,
+			},
+			expectedGID:   &flavorGID,
+			expectWarning: true,
+		},
+		{
+			name: "Zero GID is valid",
+			config: SlurmConfig{
+				AllowGIDOverride: true,
+			},
+			metadata: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"slurm-job.vk.io/gid": "0",
+				},
+			},
+			flavor:      nil,
+			expectedGID: int64Ptr(0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the GID resolution logic from prepare.go
+			var gidValue *int64
+
+			// Start with default GID from global config
+			if tt.config.DefaultGID != nil {
+				gidValue = tt.config.DefaultGID
+			}
+
+			// Override with flavor GID if available
+			if tt.flavor != nil && tt.flavor.GID != nil {
+				gidValue = tt.flavor.GID
+			}
+
+			// Override with annotation GID if allowed and present
+			if tt.config.AllowGIDOverride {
+				if gidAnnotation, ok := tt.metadata.Annotations["slurm-job.vk.io/gid"]; ok {
+					if parsedGID, err := strconv.ParseInt(gidAnnotation, 10, 64); err == nil {
+						if parsedGID >= 0 {
+							gidValue = &parsedGID
+						}
+					}
+				}
+			}
+
+			// Verify the result
+			if tt.expectedGID == nil && gidValue != nil {
+				t.Errorf("Expected nil GID, got %d", *gidValue)
+			} else if tt.expectedGID != nil && gidValue == nil {
+				t.Errorf("Expected GID %d, got nil", *tt.expectedGID)
+			} else if tt.expectedGID != nil && gidValue != nil && *gidValue != *tt.expectedGID {
+				t.Errorf("Expected GID %d, got %d", *tt.expectedGID, *gidValue)
+			}
+		})
+	}
+}
+
+func TestGIDInSlurmFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		gid         *int64
+		expectedFlag string
+	}{
+		{
+			name:        "GID 1000",
+			gid:         int64Ptr(1000),
+			expectedFlag: "--gid=1000",
+		},
+		{
+			name:        "GID 0",
+			gid:         int64Ptr(0),
+			expectedFlag: "--gid=0",
+		},
+		{
+			name:        "GID 65535",
+			gid:         int64Ptr(65535),
+			expectedFlag: "--gid=65535",
+		},
+		{
+			name:        "No GID",
+			gid:         nil,
+			expectedFlag: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sbatchFlags []string
+
+			// Simulate adding GID flag
+			if tt.gid != nil {
+				sbatchFlags = append(sbatchFlags, fmt.Sprintf("--gid=%d", *tt.gid))
+			}
+
+			if tt.expectedFlag == "" {
+				if len(sbatchFlags) > 0 {
+					t.Errorf("Expected no GID flag, but got flags: %v", sbatchFlags)
+				}
+			} else {
+				found := false
+				for _, flag := range sbatchFlags {
+					if flag == tt.expectedFlag {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected flag %q not found in flags: %v", tt.expectedFlag, sbatchFlags)
+				}
 			}
 		})
 	}

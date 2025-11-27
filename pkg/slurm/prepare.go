@@ -890,6 +890,45 @@ func produceSLURMScript(
 		}
 	}
 
+	// Process GID configuration with priority: annotation > flavor > default
+	var gidValue *int64
+
+	// Start with default GID from global config
+	if config.DefaultGID != nil {
+		gidValue = config.DefaultGID
+		log.G(Ctx).Debugf("Using default GID: %d", *gidValue)
+	}
+
+	// Override with flavor GID if available
+	if flavor != nil && flavor.GID != nil {
+		gidValue = flavor.GID
+		log.G(Ctx).Infof("Using GID %d from flavor '%s'", *gidValue, flavor.FlavorName)
+	}
+
+	// Override with annotation GID if allowed and present
+	if config.AllowGIDOverride {
+		if gidAnnotation, ok := metadata.Annotations["slurm-job.vk.io/gid"]; ok {
+			if parsedGID, err := strconv.ParseInt(gidAnnotation, 10, 64); err == nil {
+				if parsedGID < 0 {
+					log.G(Ctx).Warningf("Invalid GID annotation '%s' (must be non-negative), ignoring", gidAnnotation)
+				} else {
+					gidValue = &parsedGID
+					log.G(Ctx).Infof("Using GID %d from pod annotation", parsedGID)
+				}
+			} else {
+				log.G(Ctx).Warningf("Invalid GID annotation '%s' (not a valid integer), ignoring", gidAnnotation)
+			}
+		}
+	} else if _, ok := metadata.Annotations["slurm-job.vk.io/gid"]; ok {
+		log.G(Ctx).Warning("GID annotation present but AllowGIDOverride is disabled, ignoring annotation")
+	}
+
+	// Add GID flag to sbatch if configured
+	if gidValue != nil {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, fmt.Sprintf("--gid=%d", *gidValue))
+		log.G(Ctx).Infof("Setting job GID to %d", *gidValue)
+	}
+
 	// Add CPU/memory limits as flags (highest priority)
 	if !isDefaultCPU {
 		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))

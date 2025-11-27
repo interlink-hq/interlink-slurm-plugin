@@ -18,6 +18,10 @@ VerboseLogging: true
 ErrorsOnlyLogging: false
 EnableProbes: true
 
+# GID (Group ID) configuration - set the group ID for SLURM jobs
+# DefaultGID: 1000                # Optional: Set a default GID for all jobs
+# AllowGIDOverride: true          # Optional: Allow pods to override GID via annotation
+
 # Flavor configuration - predefined sets of SLURM submission options
 DefaultFlavor: "default"
 Flavors:
@@ -35,6 +39,7 @@ Flavors:
     Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
     CPUDefault: 8
     MemoryDefault: "64G"
+    # GID: 2000                   # Optional: Set a specific GID for this flavor
     SlurmFlags:
       - "--gres=gpu:1"
       - "--partition=gpu"

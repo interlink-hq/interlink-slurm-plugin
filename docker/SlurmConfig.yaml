@@ -21,6 +21,10 @@ EnrootDefaultOptions: ["--rw"]
 EnrootPrefix: ""
 EnrootPath: enroot
 
+# GID (Group ID) configuration - set the group ID for SLURM jobs
+# DefaultGID: 1000                # Optional: Set a default GID for all jobs
+# AllowGIDOverride: true          # Optional: Allow pods to override GID via annotation
+
 # Flavor configuration - predefined sets of SLURM submission options
 DefaultFlavor: "default"
 Flavors:

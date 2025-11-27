@@ -11,6 +11,7 @@ type FlavorConfig struct {
 	Description   string   `yaml:"Description"`
 	CPUDefault    int64    `yaml:"CPUDefault"`
 	MemoryDefault string   `yaml:"MemoryDefault"` // e.g., "16G", "32000M", "1024"
+	GID           *int64   `yaml:"GID"`           // Optional Group ID for this flavor
 	SlurmFlags    []string `yaml:"SlurmFlags"`
 }
 
@@ -41,6 +42,11 @@ func (f *FlavorConfig) Validate() error {
 		if !strings.HasPrefix(flag, "--") && !strings.HasPrefix(flag, "-") {
 			return fmt.Errorf("flavor '%s': SLURM flag '%s' should start with '--' or '-'", f.Name, flag)
 		}
+	}
+
+	// Validate GID if set
+	if f.GID != nil && *f.GID < 0 {
+		return fmt.Errorf("flavor '%s': GID cannot be negative (got %d)", f.Name, *f.GID)
 	}
 
 	return nil
@@ -77,6 +83,8 @@ type SlurmConfig struct {
 	ContainerRuntime          string                  `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
 	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
+	DefaultGID                *int64                  `yaml:"DefaultGID"`        // Optional default Group ID for all jobs
+	AllowGIDOverride          bool                    `yaml:"AllowGIDOverride"`  // Allow pod annotations to override GID
 }
 
 type CreateStruct struct {
