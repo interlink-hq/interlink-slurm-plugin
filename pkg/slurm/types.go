@@ -54,28 +54,28 @@ func (f *FlavorConfig) Validate() error {
 
 // InterLinkConfig holds the whole configuration
 type SlurmConfig struct {
-	VKConfigPath              string                  `yaml:"VKConfigPath"`
-	Sbatchpath                string                  `yaml:"SbatchPath"`
-	Scancelpath               string                  `yaml:"ScancelPath"`
-	Squeuepath                string                  `yaml:"SqueuePath"`
-	Sinfopath                 string                  `yaml:"SinfoPath"`
-	Sidecarport               string                  `yaml:"SidecarPort"`
-	Socket                    string                  `yaml:"Socket"`
-	ExportPodData             bool                    `yaml:"ExportPodData"`
-	Commandprefix             string                  `yaml:"CommandPrefix"`
-	ImagePrefix               string                  `yaml:"ImagePrefix"`
-	DataRootFolder            string                  `yaml:"DataRootFolder"`
-	Namespace                 string                  `yaml:"Namespace"`
-	Tsocks                    bool                    `yaml:"Tsocks"`
-	Tsockspath                string                  `yaml:"TsocksPath"`
-	Tsockslogin               string                  `yaml:"TsocksLoginNode"`
-	BashPath                  string                  `yaml:"BashPath"`
-	VerboseLogging            bool                    `yaml:"VerboseLogging"`
-	ErrorsOnlyLogging         bool                    `yaml:"ErrorsOnlyLogging"`
-	SingularityDefaultOptions []string                `yaml:"SingularityDefaultOptions"`
-	SingularityPrefix         string                  `yaml:"SingularityPrefix"`
-	SingularityPath           string                  `yaml:"SingularityPath"`
-	EnableProbes              bool                    `yaml:"EnableProbes"`
+	VKConfigPath              string   `yaml:"VKConfigPath"`
+	Sbatchpath                string   `yaml:"SbatchPath"`
+	Scancelpath               string   `yaml:"ScancelPath"`
+	Squeuepath                string   `yaml:"SqueuePath"`
+	Sinfopath                 string   `yaml:"SinfoPath"`
+	Sidecarport               string   `yaml:"SidecarPort"`
+	Socket                    string   `yaml:"Socket"`
+	ExportPodData             bool     `yaml:"ExportPodData"`
+	Commandprefix             string   `yaml:"CommandPrefix"`
+	ImagePrefix               string   `yaml:"ImagePrefix"`
+	DataRootFolder            string   `yaml:"DataRootFolder"`
+	Namespace                 string   `yaml:"Namespace"`
+	Tsocks                    bool     `yaml:"Tsocks"`
+	Tsockspath                string   `yaml:"TsocksPath"`
+	Tsockslogin               string   `yaml:"TsocksLoginNode"`
+	BashPath                  string   `yaml:"BashPath"`
+	VerboseLogging            bool     `yaml:"VerboseLogging"`
+	ErrorsOnlyLogging         bool     `yaml:"ErrorsOnlyLogging"`
+	SingularityDefaultOptions []string `yaml:"SingularityDefaultOptions"`
+	SingularityPrefix         string   `yaml:"SingularityPrefix"`
+	SingularityPath           string   `yaml:"SingularityPath"`
+	EnableProbes              bool     `yaml:"EnableProbes"`
 	set                       bool
 	EnrootDefaultOptions      []string                `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
 	EnrootPrefix              string                  `yaml:"EnrootPrefix"`
@@ -83,8 +83,8 @@ type SlurmConfig struct {
 	ContainerRuntime          string                  `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
 	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
-	DefaultGID                *int64                  `yaml:"DefaultGID"`        // Optional default Group ID for all jobs
-	AllowGIDOverride          bool                    `yaml:"AllowGIDOverride"`  // Allow pod annotations to override GID
+	DefaultGID                *int64                  `yaml:"DefaultGID"`       // Optional default Group ID for all jobs
+	AllowGIDOverride          bool                    `yaml:"AllowGIDOverride"` // Allow pod annotations to override GID
 }
 
 type CreateStruct struct {

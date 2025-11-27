@@ -263,11 +263,11 @@ func TestResolveFlavor(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		metadata     metav1.ObjectMeta
-		containers   []v1.Container
-		wantFlavor   string
-		wantNil      bool
+		name       string
+		metadata   metav1.ObjectMeta
+		containers []v1.Container
+		wantFlavor string
+		wantNil    bool
 	}{
 		{
 			name: "Explicit annotation",
@@ -444,12 +444,12 @@ func TestGIDResolutionPriority(t *testing.T) {
 	annotationGID := "3000"
 
 	tests := []struct {
-		name             string
-		config           SlurmConfig
-		metadata         metav1.ObjectMeta
-		flavor           *FlavorResolution
-		expectedGID      *int64
-		expectWarning    bool
+		name          string
+		config        SlurmConfig
+		metadata      metav1.ObjectMeta
+		flavor        *FlavorResolution
+		expectedGID   *int64
+		expectWarning bool
 	}{
 		{
 			name: "No GID configured anywhere",
@@ -610,28 +610,28 @@ func TestGIDResolutionPriority(t *testing.T) {
 
 func TestGIDInSlurmFlags(t *testing.T) {
 	tests := []struct {
-		name        string
-		gid         *int64
+		name         string
+		gid          *int64
 		expectedFlag string
 	}{
 		{
-			name:        "GID 1000",
-			gid:         int64Ptr(1000),
+			name:         "GID 1000",
+			gid:          int64Ptr(1000),
 			expectedFlag: "--gid=1000",
 		},
 		{
-			name:        "GID 0",
-			gid:         int64Ptr(0),
+			name:         "GID 0",
+			gid:          int64Ptr(0),
 			expectedFlag: "--gid=0",
 		},
 		{
-			name:        "GID 65535",
-			gid:         int64Ptr(65535),
+			name:         "GID 65535",
+			gid:          int64Ptr(65535),
 			expectedFlag: "--gid=65535",
 		},
 		{
-			name:        "No GID",
-			gid:         nil,
+			name:         "No GID",
+			gid:          nil,
 			expectedFlag: "",
 		},
 	}
