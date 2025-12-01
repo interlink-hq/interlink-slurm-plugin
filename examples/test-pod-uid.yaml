@@ -1,23 +1,25 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: test-pod-gid
+  name: test-pod-uid
   namespace: vk
   annotations:
-    # Example: Set a custom GID for this job
-    slurm-job.vk.io/gid: "1001"
     # Optional: Specify a flavor
     slurm-job.vk.io/flavor: "default"
     # Optional: Additional SLURM flags
     slurm-job.vk.io/flags: "--time=01:00:00"
 spec:
   restartPolicy: Never
+  # RFC: Use Kubernetes standard securityContext to set UID
+  # https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+  securityContext:
+    runAsUser: 1001  # SLURM job will run as this user
   containers:
   - image: docker://ghcr.io/grycap/cowsay
     command: ["/bin/sh"]
-    args: ["-c", "echo 'Running with custom GID!' | /usr/games/cowsay && id"]
+    args: ["-c", "echo 'Running with custom UID!' | /usr/games/cowsay && id"]
     imagePullPolicy: Always
-    name: cowsay-gid
+    name: cowsay-uid
     resources:
       limits:
         cpu: 2

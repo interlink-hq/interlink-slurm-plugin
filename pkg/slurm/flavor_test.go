@@ -394,29 +394,29 @@ func TestFlavorConfigValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "Valid GID",
+			name: "Valid UID",
 			flavor: FlavorConfig{
 				Name:       "test",
 				CPUDefault: 4,
-				GID:        int64Ptr(1001),
+				UID:        int64Ptr(1001),
 			},
 			wantErr: false,
 		},
 		{
-			name: "Negative GID",
+			name: "Negative UID",
 			flavor: FlavorConfig{
 				Name:       "test",
 				CPUDefault: 4,
-				GID:        int64Ptr(-1),
+				UID:        int64Ptr(-1),
 			},
 			wantErr: true,
 		},
 		{
-			name: "GID zero is valid",
+			name: "UID zero is valid",
 			flavor: FlavorConfig{
 				Name:       "test",
 				CPUDefault: 4,
-				GID:        int64Ptr(0),
+				UID:        int64Ptr(0),
 			},
 			wantErr: false,
 		},
@@ -437,201 +437,160 @@ func int64Ptr(i int64) *int64 {
 	return &i
 }
 
-func TestGIDResolutionPriority(t *testing.T) {
-	ctx := context.Background()
-	defaultGID := int64(1000)
-	flavorGID := int64(2000)
-	annotationGID := "3000"
+func TestUIDResolutionPriority(t *testing.T) {
+	defaultUID := int64(1000)
+	flavorUID := int64(2000)
+	podSecurityContextUID := int64(3000)
 
 	tests := []struct {
 		name          string
 		config        SlurmConfig
-		metadata      metav1.ObjectMeta
+		pod           v1.Pod
 		flavor        *FlavorResolution
-		expectedGID   *int64
+		expectedUID   *int64
 		expectWarning bool
 	}{
 		{
-			name: "No GID configured anywhere",
+			name: "No UID configured anywhere",
 			config: SlurmConfig{
-				DefaultGID:       nil,
-				AllowGIDOverride: false,
+				DefaultUID: nil,
 			},
-			metadata:    metav1.ObjectMeta{},
+			pod:         v1.Pod{},
 			flavor:      nil,
-			expectedGID: nil,
+			expectedUID: nil,
 		},
 		{
-			name: "Only default GID configured",
+			name: "Only default UID configured",
 			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: false,
+				DefaultUID: &defaultUID,
 			},
-			metadata:    metav1.ObjectMeta{},
+			pod:         v1.Pod{},
 			flavor:      nil,
-			expectedGID: &defaultGID,
+			expectedUID: &defaultUID,
 		},
 		{
-			name: "Flavor GID overrides default",
+			name: "Flavor UID overrides default",
 			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: false,
+				DefaultUID: &defaultUID,
 			},
-			metadata: metav1.ObjectMeta{},
+			pod: v1.Pod{},
 			flavor: &FlavorResolution{
 				FlavorName: "test-flavor",
-				GID:        &flavorGID,
+				UID:        &flavorUID,
 			},
-			expectedGID: &flavorGID,
+			expectedUID: &flavorUID,
 		},
 		{
-			name: "Annotation GID overrides all when allowed",
+			name: "Pod securityContext.runAsUser overrides all",
 			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: true,
+				DefaultUID: &defaultUID,
 			},
-			metadata: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					"slurm-job.vk.io/gid": annotationGID,
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: &podSecurityContextUID,
+					},
 				},
 			},
 			flavor: &FlavorResolution{
 				FlavorName: "test-flavor",
-				GID:        &flavorGID,
+				UID:        &flavorUID,
 			},
-			expectedGID: int64Ptr(3000),
+			expectedUID: &podSecurityContextUID,
 		},
 		{
-			name: "Annotation ignored when override disabled",
+			name: "Negative runAsUser is ignored",
 			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: false,
+				DefaultUID: &defaultUID,
 			},
-			metadata: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					"slurm-job.vk.io/gid": annotationGID,
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: int64Ptr(-1),
+					},
 				},
 			},
 			flavor: &FlavorResolution{
 				FlavorName: "test-flavor",
-				GID:        &flavorGID,
+				UID:        &flavorUID,
 			},
-			expectedGID:   &flavorGID,
+			expectedUID:   &flavorUID,
 			expectWarning: true,
 		},
 		{
-			name: "Invalid annotation falls back to flavor",
-			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: true,
-			},
-			metadata: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					"slurm-job.vk.io/gid": "invalid",
-				},
-			},
-			flavor: &FlavorResolution{
-				FlavorName: "test-flavor",
-				GID:        &flavorGID,
-			},
-			expectedGID:   &flavorGID,
-			expectWarning: true,
-		},
-		{
-			name: "Negative annotation falls back to flavor",
-			config: SlurmConfig{
-				DefaultGID:       &defaultGID,
-				AllowGIDOverride: true,
-			},
-			metadata: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					"slurm-job.vk.io/gid": "-1",
-				},
-			},
-			flavor: &FlavorResolution{
-				FlavorName: "test-flavor",
-				GID:        &flavorGID,
-			},
-			expectedGID:   &flavorGID,
-			expectWarning: true,
-		},
-		{
-			name: "Zero GID is valid",
-			config: SlurmConfig{
-				AllowGIDOverride: true,
-			},
-			metadata: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					"slurm-job.vk.io/gid": "0",
+			name:   "Zero UID is valid",
+			config: SlurmConfig{},
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: int64Ptr(0),
+					},
 				},
 			},
 			flavor:      nil,
-			expectedGID: int64Ptr(0),
+			expectedUID: int64Ptr(0),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the GID resolution logic from prepare.go
-			var gidValue *int64
+			// Simulate the UID resolution logic from prepare.go
+			var uidValue *int64
 
-			// Start with default GID from global config
-			if tt.config.DefaultGID != nil {
-				gidValue = tt.config.DefaultGID
+			// Start with default UID from global config
+			if tt.config.DefaultUID != nil {
+				uidValue = tt.config.DefaultUID
 			}
 
-			// Override with flavor GID if available
-			if tt.flavor != nil && tt.flavor.GID != nil {
-				gidValue = tt.flavor.GID
+			// Override with flavor UID if available
+			if tt.flavor != nil && tt.flavor.UID != nil {
+				uidValue = tt.flavor.UID
 			}
 
-			// Override with annotation GID if allowed and present
-			if tt.config.AllowGIDOverride {
-				if gidAnnotation, ok := tt.metadata.Annotations["slurm-job.vk.io/gid"]; ok {
-					if parsedGID, err := strconv.ParseInt(gidAnnotation, 10, 64); err == nil {
-						if parsedGID >= 0 {
-							gidValue = &parsedGID
-						}
-					}
+			// Override with pod securityContext.runAsUser if present
+			if tt.pod.Spec.SecurityContext != nil && tt.pod.Spec.SecurityContext.RunAsUser != nil {
+				runAsUser := *tt.pod.Spec.SecurityContext.RunAsUser
+				if runAsUser >= 0 {
+					uidValue = &runAsUser
 				}
 			}
 
 			// Verify the result
-			if tt.expectedGID == nil && gidValue != nil {
-				t.Errorf("Expected nil GID, got %d", *gidValue)
-			} else if tt.expectedGID != nil && gidValue == nil {
-				t.Errorf("Expected GID %d, got nil", *tt.expectedGID)
-			} else if tt.expectedGID != nil && gidValue != nil && *gidValue != *tt.expectedGID {
-				t.Errorf("Expected GID %d, got %d", *tt.expectedGID, *gidValue)
+			if tt.expectedUID == nil && uidValue != nil {
+				t.Errorf("Expected nil UID, got %d", *uidValue)
+			} else if tt.expectedUID != nil && uidValue == nil {
+				t.Errorf("Expected UID %d, got nil", *tt.expectedUID)
+			} else if tt.expectedUID != nil && uidValue != nil && *uidValue != *tt.expectedUID {
+				t.Errorf("Expected UID %d, got %d", *tt.expectedUID, *uidValue)
 			}
 		})
 	}
 }
 
-func TestGIDInSlurmFlags(t *testing.T) {
+func TestUIDInSlurmFlags(t *testing.T) {
 	tests := []struct {
 		name         string
-		gid          *int64
+		uid          *int64
 		expectedFlag string
 	}{
 		{
-			name:         "GID 1000",
-			gid:          int64Ptr(1000),
-			expectedFlag: "--gid=1000",
+			name:         "UID 1000",
+			uid:          int64Ptr(1000),
+			expectedFlag: "--uid=1000",
 		},
 		{
-			name:         "GID 0",
-			gid:          int64Ptr(0),
-			expectedFlag: "--gid=0",
+			name:         "UID 0",
+			uid:          int64Ptr(0),
+			expectedFlag: "--uid=0",
 		},
 		{
-			name:         "GID 65535",
-			gid:          int64Ptr(65535),
-			expectedFlag: "--gid=65535",
+			name:         "UID 65535",
+			uid:          int64Ptr(65535),
+			expectedFlag: "--uid=65535",
 		},
 		{
-			name:         "No GID",
-			gid:          nil,
+			name:         "No UID",
+			uid:          nil,
 			expectedFlag: "",
 		},
 	}
@@ -640,14 +599,14 @@ func TestGIDInSlurmFlags(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var sbatchFlags []string
 
-			// Simulate adding GID flag
-			if tt.gid != nil {
-				sbatchFlags = append(sbatchFlags, fmt.Sprintf("--gid=%d", *tt.gid))
+			// Simulate adding UID flag
+			if tt.uid != nil {
+				sbatchFlags = append(sbatchFlags, fmt.Sprintf("--uid=%d", *tt.uid))
 			}
 
 			if tt.expectedFlag == "" {
 				if len(sbatchFlags) > 0 {
-					t.Errorf("Expected no GID flag, but got flags: %v", sbatchFlags)
+					t.Errorf("Expected no UID flag, but got flags: %v", sbatchFlags)
 				}
 			} else {
 				found := false

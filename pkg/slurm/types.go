@@ -11,7 +11,7 @@ type FlavorConfig struct {
 	Description   string   `yaml:"Description"`
 	CPUDefault    int64    `yaml:"CPUDefault"`
 	MemoryDefault string   `yaml:"MemoryDefault"` // e.g., "16G", "32000M", "1024"
-	GID           *int64   `yaml:"GID"`           // Optional Group ID for this flavor
+	UID           *int64   `yaml:"UID"`           // Optional User ID for this flavor
 	SlurmFlags    []string `yaml:"SlurmFlags"`
 }
 
@@ -44,9 +44,9 @@ func (f *FlavorConfig) Validate() error {
 		}
 	}
 
-	// Validate GID if set
-	if f.GID != nil && *f.GID < 0 {
-		return fmt.Errorf("flavor '%s': GID cannot be negative (got %d)", f.Name, *f.GID)
+	// Validate UID if set
+	if f.UID != nil && *f.UID < 0 {
+		return fmt.Errorf("flavor '%s': UID cannot be negative (got %d)", f.Name, *f.UID)
 	}
 
 	return nil
@@ -83,8 +83,7 @@ type SlurmConfig struct {
 	ContainerRuntime          string                  `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
 	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
-	DefaultGID                *int64                  `yaml:"DefaultGID"`       // Optional default Group ID for all jobs
-	AllowGIDOverride          bool                    `yaml:"AllowGIDOverride"` // Allow pod annotations to override GID
+	DefaultUID                *int64                  `yaml:"DefaultUID"` // Optional default User ID for all jobs (RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58)
 }
 
 type CreateStruct struct {

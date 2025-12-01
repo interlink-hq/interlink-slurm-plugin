@@ -129,7 +129,8 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/flags | Used to specify SLURM flags. These flags will be added to the SLURM script in the form of #SBATCH flag1, #SBATCH flag2, etc |
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
 | slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
-| slurm-job.vk.io/gid | Used to specify a custom Group ID (GID) for the SLURM job. Only works if AllowGIDOverride is enabled in the config |
+
+**Note**: To specify a custom User ID (UID) for SLURM jobs, use the Kubernetes standard `spec.securityContext.runAsUser` field in your pod specification (see UID Configuration section below).
 
 ### :art: Flavor System
 
@@ -163,7 +164,7 @@ Flavors:
     Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
     CPUDefault: 8
     MemoryDefault: "64G"
-    GID: 2000  # Optional: Set a specific GID for this flavor
+    UID: 2000  # Optional: Set a specific UID for this flavor
     SlurmFlags:
       - "--gres=gpu:1"
       - "--partition=gpu"
@@ -236,52 +237,57 @@ spec:
         memory: "128Gi"  # Overrides flavor's 16GB default
 ```
 
-### :busts_in_silhouette: GID (Group ID) Configuration
+### :busts_in_silhouette: UID (User ID) Configuration
 
-The SLURM plugin supports setting a custom Group ID (GID) for SLURM jobs. This is useful for controlling file access permissions, license group management, and shared storage access.
+**RFC**: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
 
-#### How GID Works
+The SLURM plugin supports setting a custom User ID (UID) for SLURM jobs. This allows jobs to run as specific users, enabling proper file ownership, permission management, and user attribution for HPC resource accounting.
 
-GIDs are resolved with the following priority (highest to lowest):
-1. **Pod annotation**: `slurm-job.vk.io/gid` (only if `AllowGIDOverride: true`)
-2. **Flavor GID**: Configured in the flavor definition
-3. **Default GID**: Configured globally in `DefaultGID`
+#### How UID Works
 
-#### Configuring GID
+UIDs are resolved with the following priority (highest to lowest):
+1. **Pod securityContext**: `spec.securityContext.runAsUser` (Kubernetes standard)
+2. **Flavor UID**: Configured in the flavor definition
+3. **Default UID**: Configured globally in `DefaultUID`
+
+When a UID is configured, the plugin:
+- Adds `--uid=<value>` to the SBATCH script
+- Sets file ownership (`chown`) of job directories and scripts to the specified UID
+- Ensures the SLURM job runs as the specified user
+
+#### Configuring UID
 
 **Global Configuration** (in `SlurmConfig.yaml`):
 ```yaml
-# Optional: Set a default GID for all jobs
-DefaultGID: 1000
-
-# Optional: Allow pods to override GID via annotations
-AllowGIDOverride: true
+# Optional: Set a default UID for all jobs
+DefaultUID: 1000
 ```
 
 **Per-Flavor Configuration**:
 ```yaml
 Flavors:
-  licensed-software:
-    Name: "licensed-software"
-    Description: "Jobs requiring licensed software access"
+  user-jobs:
+    Name: "user-jobs"
+    Description: "Jobs for regular users"
     CPUDefault: 8
     MemoryDefault: "32G"
-    GID: 5001  # Group with software license access
+    UID: 1001  # Jobs run as this user
     SlurmFlags:
-      - "--partition=licensed"
+      - "--partition=users"
 ```
 
-#### Using GID in Pods
+#### Using UID in Pods
 
-**Example 1: Using annotation to set GID**
+**Example 1: Using Kubernetes securityContext (recommended)**
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: custom-gid-job
-  annotations:
-    slurm-job.vk.io/gid: "1001"  # Set custom GID
+  name: custom-uid-job
 spec:
+  # Standard Kubernetes securityContext
+  securityContext:
+    runAsUser: 1001  # SLURM job will run as UID 1001
   containers:
   - name: app
     image: docker://myapp:latest
@@ -291,42 +297,56 @@ spec:
         memory: 16Gi
 ```
 
-**Example 2: Using flavor GID**
+**Example 2: Using flavor UID**
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: licensed-job
+  name: user-job
   annotations:
-    slurm-job.vk.io/flavor: "licensed-software"  # Uses GID 5001
+    slurm-job.vk.io/flavor: "user-jobs"  # Uses UID 1001 from flavor
 spec:
   containers:
-  - name: matlab-job
-    image: docker://matlab:latest
+  - name: computation
+    image: docker://scientific-app:latest
 ```
 
-**Example 3: Complete GID priority example**
+**Example 3: Complete UID priority example**
 ```yaml
-# Config: DefaultGID: 1000, AllowGIDOverride: true
-# Flavor "gpu": GID: 2000
-# Pod annotation: slurm-job.vk.io/gid: "3000"
+# Config: DefaultUID: 1000
+# Flavor "compute": UID: 2000
+# Pod securityContext.runAsUser: 3000
 #
-# Result: Job runs with GID 3000 (annotation wins)
+# Result: Job runs with UID 3000 (securityContext wins)
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    slurm-job.vk.io/flavor: "compute"
+spec:
+  securityContext:
+    runAsUser: 3000  # This takes precedence
+  containers:
+  - name: app
+    image: docker://myapp:latest
 ```
 
-#### GID Use Cases
+#### UID Use Cases
 
-- **Research Group Isolation**: Assign different GIDs to different research groups
-- **Shared Storage Access**: Set GID to match shared filesystem group permissions
-- **License Management**: Use GID to control access to licensed software
-- **Multi-tenancy**: Isolate jobs from different tenants using group permissions
+- **User Attribution**: Jobs appear in SLURM accounting under the correct user
+- **File Ownership**: Output files are owned by the correct user
+- **Permission Management**: Jobs respect filesystem permissions
+- **Multi-user Environments**: Different users submit jobs through the same Kubernetes cluster
+- **HPC Integration**: Integrate with existing HPC user management systems
 
 #### Important Notes
 
-- GID must be a non-negative integer
-- Invalid GID values in annotations are ignored (falls back to flavor or default)
-- The SLURM cluster must be configured to allow GID specification
-- The `--gid` flag is added to the SBATCH script as `#SBATCH --gid=<value>`
+- UID must be a non-negative integer
+- Invalid UID values in `securityContext.runAsUser` are ignored (falls back to flavor or default)
+- The SLURM cluster must be configured to allow UID specification (plugin typically runs as root)
+- File ownership is set via `chown` for job directories (`job.slurm`, `job.sh`)
+- The `--uid` flag is added to the SBATCH script as `#SBATCH --uid=<value>`
+- This feature is designed for scenarios where the plugin runs as root and needs to impersonate users
 
 ### :gear: Explanation of the SLURM Config file
 
@@ -355,9 +375,8 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | VerboseLogging | Enable or disable Debug messages on logs. True or False values only |
 | ErrorsOnlyLogging | Specify if you want to get errors only on logs. True or false values only |
 | EnableProbes | Enable or disable health and readiness probes. True or False values only |
-| DefaultGID | Optional default Group ID (GID) for all SLURM jobs. Must be a non-negative integer |
-| AllowGIDOverride | Allow pods to override the GID via the `slurm-job.vk.io/gid` annotation. True or False values only |
-| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, GID, and SlurmFlags. See Flavor System and GID Configuration sections for details |
+| DefaultUID | Optional default User ID (UID) for all SLURM jobs. Must be a non-negative integer. See [RFC #58](https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58) |
+| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, UID, and SlurmFlags. See Flavor System and UID Configuration sections for details |
 | DefaultFlavor | Name of the default flavor to use when no explicit flavor is specified and no auto-detection applies |
 
 ### :wrench: Environment Variables list
