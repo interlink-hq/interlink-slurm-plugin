@@ -16,7 +16,8 @@ ENV TIMEZONE=America/New_York
 # Install system packages
 RUN DEBIAN_FRONTEND=noninteractive \
   dnf install -y epel-release \
-  && dnf install -y slurm-slurmd rpm-build slurm-slurmctld apptainer sshpass \
+  && dnf install -y --allowerasing slurm-slurmd rpm-build slurm-slurmctld apptainer sshpass slirp4netns iproute curl tar xz make gcc ca-certificates \
+  && update-ca-trust \
   && dnf clean all
 
 RUN slurm-setuser -y
