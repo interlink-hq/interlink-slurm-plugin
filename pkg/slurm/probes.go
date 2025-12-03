@@ -587,6 +587,38 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 	return allProbesSuccessful
 }
 
+// checkContainerStartupComplete evaluates if a container's startup probes have completed successfully
+func checkContainerStartupComplete(ctx context.Context, config SlurmConfig, workingPath, containerName string, startupProbeCount int) bool {
+	if !config.EnableProbes || startupProbeCount == 0 {
+		// No startup probes configured, startup is considered complete
+		return true
+	}
+
+	span := trace.SpanFromContext(ctx)
+	allProbesSuccessful := true
+
+	for i := 0; i < startupProbeCount; i++ {
+		probeStatus, err := getProbeStatus(ctx, workingPath, "startup", containerName, i)
+		if err != nil {
+			log.G(ctx).Error("Failed to check startup probe status: ", err)
+			allProbesSuccessful = false
+			continue
+		}
+
+		span.SetAttributes(attribute.String(fmt.Sprintf("startup.probe.%d.status", i), probeStatus.Status))
+
+		// Startup probes must have status "SUCCESS" to be considered complete
+		// RUNNING, FAILURE, FAILED_THRESHOLD, or UNKNOWN all mean startup is not complete
+		if probeStatus.Status != "SUCCESS" {
+			allProbesSuccessful = false
+			log.G(ctx).Debugf("Startup probe %d for container %s is not successful: %s", i, containerName, probeStatus.Status)
+		}
+	}
+
+	span.SetAttributes(attribute.Bool("container.startup.complete", allProbesSuccessful))
+	return allProbesSuccessful
+}
+
 // storeProbeMetadata saves probe count information for later status checking
 func storeProbeMetadata(workingPath, containerName string, readinessProbeCount, livenessProbeCount, startupProbeCount int) error {
 	metadataFile := fmt.Sprintf("%s/probe-metadata-%s.txt", workingPath, containerName)
