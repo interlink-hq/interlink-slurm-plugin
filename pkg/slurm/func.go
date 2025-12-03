@@ -158,6 +158,16 @@ func NewSlurmConfig() (SlurmConfig, error) {
 		} else {
 			log.G(context.Background()).Info("No flavors configured, using default behavior")
 		}
+
+		// Validate and log UID configuration (RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58)
+		if SlurmConfigInst.DefaultUID != nil {
+			if *SlurmConfigInst.DefaultUID < 0 {
+				err := fmt.Errorf("DefaultUID cannot be negative (got %d)", *SlurmConfigInst.DefaultUID)
+				log.G(context.Background()).Error(err)
+				return SlurmConfig{}, err
+			}
+			log.G(context.Background()).Infof("Default UID set to: %d (jobs will run as this user unless overridden by pod securityContext)", *SlurmConfigInst.DefaultUID)
+		}
 	}
 	return SlurmConfigInst, nil
 }

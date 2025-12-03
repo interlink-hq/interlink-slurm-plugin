@@ -860,6 +860,21 @@ func produceSLURMScript(
 	} else {
 		log.G(Ctx).Info("-- Created directory " + path)
 	}
+
+	// RFC requirement: Set directory ownership if UID is configured
+	// This will be applied after files are created to ensure proper ownership
+	var jobUID *int64
+	if config.DefaultUID != nil {
+		jobUID = config.DefaultUID
+	}
+	if flavor != nil && flavor.UID != nil {
+		jobUID = flavor.UID
+	}
+	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil && *pod.Spec.SecurityContext.RunAsUser >= 0 {
+		uid := *pod.Spec.SecurityContext.RunAsUser
+		jobUID = &uid
+	}
+
 	postfix := ""
 
 	fJob, err := os.Create(path + "/job.slurm")
@@ -948,6 +963,39 @@ func produceSLURMScript(
 				containerCommand.runtimeCommand = append(mpi, containerCommand.runtimeCommand...)
 			}
 		}
+	}
+
+	// Process UID configuration with priority: pod securityContext > flavor > default
+	// RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+	var uidValue *int64
+
+	// Start with default UID from global config
+	if config.DefaultUID != nil {
+		uidValue = config.DefaultUID
+		log.G(Ctx).Debugf("Using default UID: %d", *uidValue)
+	}
+
+	// Override with flavor UID if available
+	if flavor != nil && flavor.UID != nil {
+		uidValue = flavor.UID
+		log.G(Ctx).Infof("Using UID %d from flavor '%s'", *uidValue, flavor.FlavorName)
+	}
+
+	// Override with pod securityContext.runAsUser if present (Kubernetes standard)
+	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil {
+		runAsUser := *pod.Spec.SecurityContext.RunAsUser
+		if runAsUser < 0 {
+			log.G(Ctx).Warningf("Invalid RunAsUser '%d' in pod securityContext (must be non-negative), ignoring", runAsUser)
+		} else {
+			uidValue = &runAsUser
+			log.G(Ctx).Infof("Using UID %d from pod spec.securityContext.runAsUser", runAsUser)
+		}
+	}
+
+	// Add UID flag to sbatch if configured
+	if uidValue != nil {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, fmt.Sprintf("--uid=%d", *uidValue))
+		log.G(Ctx).Infof("Setting job UID to %d", *uidValue)
 	}
 
 	// Add CPU/memory limits as flags (highest priority)
@@ -1290,6 +1338,32 @@ highestExitCode=0
 		return "", err
 	} else {
 		log.G(Ctx).Debug("---- Written job.sh file")
+	}
+
+	// RFC requirement: Set file and directory ownership if UID is configured
+	// This allows the SLURM job to run as the specified user
+	if jobUID != nil {
+		uid := int(*jobUID)
+		gid := -1 // -1 means don't change group ownership
+
+		// Change ownership of the job directory and all its contents
+		if err := os.Chown(path, uid, gid); err != nil {
+			log.G(Ctx).Warningf("Failed to chown directory %s to UID %d: %v", path, uid, err)
+		} else {
+			log.G(Ctx).Debugf("Changed ownership of %s to UID %d", path, uid)
+		}
+
+		// Change ownership of job.slurm
+		if err := os.Chown(path+"/job.slurm", uid, gid); err != nil {
+			log.G(Ctx).Warningf("Failed to chown %s/job.slurm to UID %d: %v", path, uid, err)
+		}
+
+		// Change ownership of job.sh
+		if err := os.Chown(path+"/job.sh", uid, gid); err != nil {
+			log.G(Ctx).Warningf("Failed to chown %s/job.sh to UID %d: %v", path, uid, err)
+		}
+
+		log.G(Ctx).Infof("Set ownership of job files to UID %d", uid)
 	}
 
 	duration := time.Now().UnixMicro() - start

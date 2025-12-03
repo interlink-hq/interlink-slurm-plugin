@@ -21,6 +21,11 @@ EnrootDefaultOptions: ["--rw"]
 EnrootPrefix: ""
 EnrootPath: enroot
 
+# UID (User ID) configuration - set the user ID for SLURM jobs
+# RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+# DefaultUID: 1000                # Optional: Set a default UID for all jobs
+#                                 # Can be overridden per-pod using spec.securityContext.runAsUser
+
 # Flavor configuration - predefined sets of SLURM submission options
 DefaultFlavor: "default"
 Flavors:

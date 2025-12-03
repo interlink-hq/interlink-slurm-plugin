@@ -18,6 +18,11 @@ VerboseLogging: true
 ErrorsOnlyLogging: false
 EnableProbes: true
 
+# UID (User ID) configuration - set the user ID for SLURM jobs
+# RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+# DefaultUID: 1000                # Optional: Set a default UID for all jobs
+#                                 # Can be overridden per-pod using spec.securityContext.runAsUser
+
 # Flavor configuration - predefined sets of SLURM submission options
 DefaultFlavor: "default"
 Flavors:
@@ -35,6 +40,7 @@ Flavors:
     Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
     CPUDefault: 8
     MemoryDefault: "64G"
+    # UID: 2000                   # Optional: Set a specific UID for this flavor
     SlurmFlags:
       - "--gres=gpu:1"
       - "--partition=gpu"

@@ -130,6 +130,8 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
 | slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
 
+**Note**: To specify a custom User ID (UID) for SLURM jobs, use the Kubernetes standard `spec.securityContext.runAsUser` field in your pod specification (see UID Configuration section below).
+
 ### :art: Flavor System
 
 The SLURM plugin supports "flavors" - predefined configurations that provide default resource values and SLURM-specific settings. This simplifies pod definitions and ensures consistent resource allocation across jobs.
@@ -162,6 +164,7 @@ Flavors:
     Description: "GPU job with NVIDIA GPU (8 cores, 64GB RAM, 1 GPU)"
     CPUDefault: 8
     MemoryDefault: "64G"
+    UID: 2000  # Optional: Set a specific UID for this flavor
     SlurmFlags:
       - "--gres=gpu:1"
       - "--partition=gpu"
@@ -234,6 +237,117 @@ spec:
         memory: "128Gi"  # Overrides flavor's 16GB default
 ```
 
+### :busts_in_silhouette: UID (User ID) Configuration
+
+**RFC**: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+
+The SLURM plugin supports setting a custom User ID (UID) for SLURM jobs. This allows jobs to run as specific users, enabling proper file ownership, permission management, and user attribution for HPC resource accounting.
+
+#### How UID Works
+
+UIDs are resolved with the following priority (highest to lowest):
+1. **Pod securityContext**: `spec.securityContext.runAsUser` (Kubernetes standard)
+2. **Flavor UID**: Configured in the flavor definition
+3. **Default UID**: Configured globally in `DefaultUID`
+
+When a UID is configured, the plugin:
+- Adds `--uid=<value>` to the SBATCH script
+- Sets file ownership (`chown`) of job directories and scripts to the specified UID
+- Ensures the SLURM job runs as the specified user
+
+#### Configuring UID
+
+**Global Configuration** (in `SlurmConfig.yaml`):
+```yaml
+# Optional: Set a default UID for all jobs
+DefaultUID: 1000
+```
+
+**Per-Flavor Configuration**:
+```yaml
+Flavors:
+  user-jobs:
+    Name: "user-jobs"
+    Description: "Jobs for regular users"
+    CPUDefault: 8
+    MemoryDefault: "32G"
+    UID: 1001  # Jobs run as this user
+    SlurmFlags:
+      - "--partition=users"
+```
+
+#### Using UID in Pods
+
+**Example 1: Using Kubernetes securityContext (recommended)**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: custom-uid-job
+spec:
+  # Standard Kubernetes securityContext
+  securityContext:
+    runAsUser: 1001  # SLURM job will run as UID 1001
+  containers:
+  - name: app
+    image: docker://myapp:latest
+    resources:
+      limits:
+        cpu: 4
+        memory: 16Gi
+```
+
+**Example 2: Using flavor UID**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: user-job
+  annotations:
+    slurm-job.vk.io/flavor: "user-jobs"  # Uses UID 1001 from flavor
+spec:
+  containers:
+  - name: computation
+    image: docker://scientific-app:latest
+```
+
+**Example 3: Complete UID priority example**
+```yaml
+# Config: DefaultUID: 1000
+# Flavor "compute": UID: 2000
+# Pod securityContext.runAsUser: 3000
+#
+# Result: Job runs with UID 3000 (securityContext wins)
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    slurm-job.vk.io/flavor: "compute"
+spec:
+  securityContext:
+    runAsUser: 3000  # This takes precedence
+  containers:
+  - name: app
+    image: docker://myapp:latest
+```
+
+#### UID Use Cases
+
+- **User Attribution**: Jobs appear in SLURM accounting under the correct user
+- **File Ownership**: Output files are owned by the correct user
+- **Permission Management**: Jobs respect filesystem permissions
+- **Multi-user Environments**: Different users submit jobs through the same Kubernetes cluster
+- **HPC Integration**: Integrate with existing HPC user management systems
+
+#### Important Notes
+
+- UID must be a non-negative integer
+- Invalid UID values in `securityContext.runAsUser` are ignored (falls back to flavor or default)
+- The SLURM cluster must be configured to allow UID specification (plugin typically runs as root)
+- File ownership is set via `chown` for job directories (`job.slurm`, `job.sh`)
+- The `--uid` flag is added to the SBATCH script as `#SBATCH --uid=<value>`
+- This feature is designed for scenarios where the plugin runs as root and needs to impersonate users
+
 ### :gear: Explanation of the SLURM Config file
 
 Detailed explanation of the SLURM config file key values. Edit the config file before running the binary or before
@@ -261,7 +375,8 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | VerboseLogging | Enable or disable Debug messages on logs. True or False values only |
 | ErrorsOnlyLogging | Specify if you want to get errors only on logs. True or false values only |
 | EnableProbes | Enable or disable health and readiness probes. True or False values only |
-| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, and SlurmFlags. See Flavor System section above for details |
+| DefaultUID | Optional default User ID (UID) for all SLURM jobs. Must be a non-negative integer. See [RFC #58](https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58) |
+| Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, UID, and SlurmFlags. See Flavor System and UID Configuration sections for details |
 | DefaultFlavor | Name of the default flavor to use when no explicit flavor is specified and no auto-detection applies |
 
 ### :wrench: Environment Variables list

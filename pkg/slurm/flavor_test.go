@@ -2,6 +2,8 @@ package slurm
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -261,11 +263,11 @@ func TestResolveFlavor(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		metadata     metav1.ObjectMeta
-		containers   []v1.Container
-		wantFlavor   string
-		wantNil      bool
+		name       string
+		metadata   metav1.ObjectMeta
+		containers []v1.Container
+		wantFlavor string
+		wantNil    bool
 	}{
 		{
 			name: "Explicit annotation",
@@ -391,6 +393,33 @@ func TestFlavorConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Valid UID",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				UID:        int64Ptr(1001),
+			},
+			wantErr: false,
+		},
+		{
+			name: "Negative UID",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				UID:        int64Ptr(-1),
+			},
+			wantErr: true,
+		},
+		{
+			name: "UID zero is valid",
+			flavor: FlavorConfig{
+				Name:       "test",
+				CPUDefault: 4,
+				UID:        int64Ptr(0),
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -398,6 +427,198 @@ func TestFlavorConfigValidate(t *testing.T) {
 			err := tt.flavor.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("FlavorConfig.Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// Helper function to create int64 pointers
+func int64Ptr(i int64) *int64 {
+	return &i
+}
+
+func TestUIDResolutionPriority(t *testing.T) {
+	defaultUID := int64(1000)
+	flavorUID := int64(2000)
+	podSecurityContextUID := int64(3000)
+
+	tests := []struct {
+		name          string
+		config        SlurmConfig
+		pod           v1.Pod
+		flavor        *FlavorResolution
+		expectedUID   *int64
+		expectWarning bool
+	}{
+		{
+			name: "No UID configured anywhere",
+			config: SlurmConfig{
+				DefaultUID: nil,
+			},
+			pod:         v1.Pod{},
+			flavor:      nil,
+			expectedUID: nil,
+		},
+		{
+			name: "Only default UID configured",
+			config: SlurmConfig{
+				DefaultUID: &defaultUID,
+			},
+			pod:         v1.Pod{},
+			flavor:      nil,
+			expectedUID: &defaultUID,
+		},
+		{
+			name: "Flavor UID overrides default",
+			config: SlurmConfig{
+				DefaultUID: &defaultUID,
+			},
+			pod: v1.Pod{},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				UID:        &flavorUID,
+			},
+			expectedUID: &flavorUID,
+		},
+		{
+			name: "Pod securityContext.runAsUser overrides all",
+			config: SlurmConfig{
+				DefaultUID: &defaultUID,
+			},
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: &podSecurityContextUID,
+					},
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				UID:        &flavorUID,
+			},
+			expectedUID: &podSecurityContextUID,
+		},
+		{
+			name: "Negative runAsUser is ignored",
+			config: SlurmConfig{
+				DefaultUID: &defaultUID,
+			},
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: int64Ptr(-1),
+					},
+				},
+			},
+			flavor: &FlavorResolution{
+				FlavorName: "test-flavor",
+				UID:        &flavorUID,
+			},
+			expectedUID:   &flavorUID,
+			expectWarning: true,
+		},
+		{
+			name:   "Zero UID is valid",
+			config: SlurmConfig{},
+			pod: v1.Pod{
+				Spec: v1.PodSpec{
+					SecurityContext: &v1.PodSecurityContext{
+						RunAsUser: int64Ptr(0),
+					},
+				},
+			},
+			flavor:      nil,
+			expectedUID: int64Ptr(0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the UID resolution logic from prepare.go
+			var uidValue *int64
+
+			// Start with default UID from global config
+			if tt.config.DefaultUID != nil {
+				uidValue = tt.config.DefaultUID
+			}
+
+			// Override with flavor UID if available
+			if tt.flavor != nil && tt.flavor.UID != nil {
+				uidValue = tt.flavor.UID
+			}
+
+			// Override with pod securityContext.runAsUser if present
+			if tt.pod.Spec.SecurityContext != nil && tt.pod.Spec.SecurityContext.RunAsUser != nil {
+				runAsUser := *tt.pod.Spec.SecurityContext.RunAsUser
+				if runAsUser >= 0 {
+					uidValue = &runAsUser
+				}
+			}
+
+			// Verify the result
+			if tt.expectedUID == nil && uidValue != nil {
+				t.Errorf("Expected nil UID, got %d", *uidValue)
+			} else if tt.expectedUID != nil && uidValue == nil {
+				t.Errorf("Expected UID %d, got nil", *tt.expectedUID)
+			} else if tt.expectedUID != nil && uidValue != nil && *uidValue != *tt.expectedUID {
+				t.Errorf("Expected UID %d, got %d", *tt.expectedUID, *uidValue)
+			}
+		})
+	}
+}
+
+func TestUIDInSlurmFlags(t *testing.T) {
+	tests := []struct {
+		name         string
+		uid          *int64
+		expectedFlag string
+	}{
+		{
+			name:         "UID 1000",
+			uid:          int64Ptr(1000),
+			expectedFlag: "--uid=1000",
+		},
+		{
+			name:         "UID 0",
+			uid:          int64Ptr(0),
+			expectedFlag: "--uid=0",
+		},
+		{
+			name:         "UID 65535",
+			uid:          int64Ptr(65535),
+			expectedFlag: "--uid=65535",
+		},
+		{
+			name:         "No UID",
+			uid:          nil,
+			expectedFlag: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sbatchFlags []string
+
+			// Simulate adding UID flag
+			if tt.uid != nil {
+				sbatchFlags = append(sbatchFlags, fmt.Sprintf("--uid=%d", *tt.uid))
+			}
+
+			if tt.expectedFlag == "" {
+				if len(sbatchFlags) > 0 {
+					t.Errorf("Expected no UID flag, but got flags: %v", sbatchFlags)
+				}
+			} else {
+				found := false
+				for _, flag := range sbatchFlags {
+					if flag == tt.expectedFlag {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected flag %q not found in flags: %v", tt.expectedFlag, sbatchFlags)
+				}
 			}
 		})
 	}

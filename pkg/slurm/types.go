@@ -11,6 +11,7 @@ type FlavorConfig struct {
 	Description   string   `yaml:"Description"`
 	CPUDefault    int64    `yaml:"CPUDefault"`
 	MemoryDefault string   `yaml:"MemoryDefault"` // e.g., "16G", "32000M", "1024"
+	UID           *int64   `yaml:"UID"`           // Optional User ID for this flavor
 	SlurmFlags    []string `yaml:"SlurmFlags"`
 }
 
@@ -43,33 +44,38 @@ func (f *FlavorConfig) Validate() error {
 		}
 	}
 
+	// Validate UID if set
+	if f.UID != nil && *f.UID < 0 {
+		return fmt.Errorf("flavor '%s': UID cannot be negative (got %d)", f.Name, *f.UID)
+	}
+
 	return nil
 }
 
 // InterLinkConfig holds the whole configuration
 type SlurmConfig struct {
-	VKConfigPath              string                  `yaml:"VKConfigPath"`
-	Sbatchpath                string                  `yaml:"SbatchPath"`
-	Scancelpath               string                  `yaml:"ScancelPath"`
-	Squeuepath                string                  `yaml:"SqueuePath"`
-	Sinfopath                 string                  `yaml:"SinfoPath"`
-	Sidecarport               string                  `yaml:"SidecarPort"`
-	Socket                    string                  `yaml:"Socket"`
-	ExportPodData             bool                    `yaml:"ExportPodData"`
-	Commandprefix             string                  `yaml:"CommandPrefix"`
-	ImagePrefix               string                  `yaml:"ImagePrefix"`
-	DataRootFolder            string                  `yaml:"DataRootFolder"`
-	Namespace                 string                  `yaml:"Namespace"`
-	Tsocks                    bool                    `yaml:"Tsocks"`
-	Tsockspath                string                  `yaml:"TsocksPath"`
-	Tsockslogin               string                  `yaml:"TsocksLoginNode"`
-	BashPath                  string                  `yaml:"BashPath"`
-	VerboseLogging            bool                    `yaml:"VerboseLogging"`
-	ErrorsOnlyLogging         bool                    `yaml:"ErrorsOnlyLogging"`
-	SingularityDefaultOptions []string                `yaml:"SingularityDefaultOptions"`
-	SingularityPrefix         string                  `yaml:"SingularityPrefix"`
-	SingularityPath           string                  `yaml:"SingularityPath"`
-	EnableProbes              bool                    `yaml:"EnableProbes"`
+	VKConfigPath              string   `yaml:"VKConfigPath"`
+	Sbatchpath                string   `yaml:"SbatchPath"`
+	Scancelpath               string   `yaml:"ScancelPath"`
+	Squeuepath                string   `yaml:"SqueuePath"`
+	Sinfopath                 string   `yaml:"SinfoPath"`
+	Sidecarport               string   `yaml:"SidecarPort"`
+	Socket                    string   `yaml:"Socket"`
+	ExportPodData             bool     `yaml:"ExportPodData"`
+	Commandprefix             string   `yaml:"CommandPrefix"`
+	ImagePrefix               string   `yaml:"ImagePrefix"`
+	DataRootFolder            string   `yaml:"DataRootFolder"`
+	Namespace                 string   `yaml:"Namespace"`
+	Tsocks                    bool     `yaml:"Tsocks"`
+	Tsockspath                string   `yaml:"TsocksPath"`
+	Tsockslogin               string   `yaml:"TsocksLoginNode"`
+	BashPath                  string   `yaml:"BashPath"`
+	VerboseLogging            bool     `yaml:"VerboseLogging"`
+	ErrorsOnlyLogging         bool     `yaml:"ErrorsOnlyLogging"`
+	SingularityDefaultOptions []string `yaml:"SingularityDefaultOptions"`
+	SingularityPrefix         string   `yaml:"SingularityPrefix"`
+	SingularityPath           string   `yaml:"SingularityPath"`
+	EnableProbes              bool     `yaml:"EnableProbes"`
 	set                       bool
 	EnrootDefaultOptions      []string                `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
 	EnrootPrefix              string                  `yaml:"EnrootPrefix"`
@@ -77,6 +83,7 @@ type SlurmConfig struct {
 	ContainerRuntime          string                  `yaml:"ContainerRuntime" default:"singularity"` // "singularity" or "enroot"
 	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
 	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
+	DefaultUID                *int64                  `yaml:"DefaultUID"` // Optional default User ID for all jobs (RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58)
 }
 
 type CreateStruct struct {
