@@ -57,7 +57,8 @@ type ResourceLimits struct {
 type FlavorResolution struct {
 	FlavorName    string
 	CPUDefault    int64
-	MemoryDefault int64 // in bytes
+	MemoryDefault int64  // in bytes
+	UID           *int64 // Optional User ID for this flavor
 	SlurmFlags    []string
 }
 
@@ -391,6 +392,7 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 		FlavorName:    flavorName,
 		CPUDefault:    selectedFlavor.CPUDefault,
 		MemoryDefault: memoryBytes,
+		UID:           selectedFlavor.UID,
 		SlurmFlags:    selectedFlavor.SlurmFlags,
 	}, nil
 }
