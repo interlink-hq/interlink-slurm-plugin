@@ -292,8 +292,8 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, startupCount, err := loadProbeMetadata(path, ct.Name)
-							isReady := true
+							readinessCount, livenessCount, startupCount, err := loadProbeMetadata(path, ct.Name)
+							isReady := false
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
 							} else {
@@ -302,10 +302,19 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								// 2. Readiness probes have succeeded (or none configured)
 								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
 								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
-								isReady = startupComplete && readinessOK
+								livenessOK := checkContainerLiveness(spanCtx, h.Config, path, ct.Name, livenessCount)
+								isReady = startupComplete && readinessOK && livenessOK
+
+								log.G(h.Ctx).Debugf("%sContainer %s: startupComplete=%v, readinessOK=%v, liveneessOK=%v, isReady=%v", sessionContextMessage, ct.Name, startupComplete, readinessOK, livenessOK, isReady)
 							}
 
-							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
+							var containerStatus v1.ContainerStatus
+
+							if isReady {
+								containerStatus = v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
+							} else {
+								containerStatus = v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "Waiting for probes to be ready."}}, Ready: isReady}
+							}
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
