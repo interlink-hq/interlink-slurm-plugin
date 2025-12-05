@@ -177,7 +177,7 @@ runProbe() {
     local probe_status_file="${workingPath}/${probe_name}-probe-${container_name}-${probe_index}.status"
     local probe_timestamp_file="${workingPath}/${probe_name}-probe-${container_name}-${probe_index}.timestamp"
     
-    printf "%%s\n" "$(date -Is --utc) Starting ${probe_name} probe for container ${container_name}..."
+    printf "%s\n" "$(date -Is --utc) Starting ${probe_name} probe for container ${container_name}..."
     
     # Initialize probe status as unknown
     echo "UNKNOWN" > "$probe_status_file"
@@ -185,7 +185,7 @@ runProbe() {
     
     # Initial delay
     if [ "$initial_delay" -gt 0 ]; then
-        printf "%%s\n" "$(date -Is --utc) Waiting ${initial_delay}s before starting ${probe_name} probe..."
+        printf "%s\n" "$(date -Is --utc) Waiting ${initial_delay}s before starting ${probe_name} probe..."
         sleep "$initial_delay"
     fi
     
@@ -208,29 +208,39 @@ runProbe() {
         if [ $exit_code -eq 0 ]; then
             consecutive_successes=$((consecutive_successes + 1))
             consecutive_failures=0
-            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} (${consecutive_successes}/${success_threshold})"
             
-            if [ $consecutive_successes -ge $success_threshold ] && [ "$probe_ready" = false ]; then
-                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe successful for ${container_name}"
+            if [ $consecutive_successes -ge $success_threshold ]; then
+		            if [ $probe_name = "readiness" ]; then
+                     printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} for ${success_threshold} times. Container is healthy."
+		            elif [ $probe_name = "liveness" ]; then
+		                 # Print message only if probe was previously not ready
+								     if [ "$probe_ready" = false ]; then
+										       printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} for ${success_threshold} times. Container is alive."
+		                 fi
+		            fi
                 echo "SUCCESS" > "$probe_status_file"
                 probe_ready=true
-            elif [ "$probe_ready" = true ]; then
-                # Keep updating status for already successful probes
-                echo "SUCCESS" > "$probe_status_file"
+		            if [ "$probe_name" = "readiness" ]; then
+									# For readiness probes, once successful, we can exit the loop
+									return 0
+								fi
             fi
         else
             consecutive_failures=$((consecutive_failures + 1))
             consecutive_successes=0
-            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
+            printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
             
             # Always write failure status immediately
             echo "FAILURE" > "$probe_status_file"
             probe_ready=false
             
             if [ $consecutive_failures -ge $failure_threshold ]; then
-                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts" >&2
+                printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts" >&2
                 echo "FAILED_THRESHOLD" > "$probe_status_file"
-                return 1
+		            if [ "$probe_name" = "readiness" ]; then
+										# For readiness probes, on failure threshold, exit with error
+										exit 1
+		            fi
             fi
         fi
         
@@ -238,6 +248,17 @@ runProbe() {
     done
     
     return 0
+}
+
+shutDownContainersOnProbeFail() {
+  for pidCtn in ${pidCtns} ; do
+    pid="${pidCtn%:*}"
+    ctn="${pidCtn#*:}"
+    printf "%s\n" "$(date -Is --utc) Container ${ctn} pid ${pid} killed for failed probes."
+    kill "${pid}"
+    printf "%s\n" "1" > "${workingPath}/run-${ctn}.status"
+	waitFileExist "${workingPath}/run-${ctn}.status"
+  done
 }
 
 runStartupProbe() {
@@ -255,14 +276,14 @@ runStartupProbe() {
 
     local probe_status_file="${workingPath}/${probe_name}-probe-${container_name}-${probe_index}.status"
 
-    printf "%%s\n" "$(date -Is --utc) Starting ${probe_name} probe for container ${container_name}..."
+    printf "%s\n" "$(date -Is --utc) Starting ${probe_name} probe for container ${container_name}..."
 
     # Initialize probe status as running
     echo "RUNNING" > "$probe_status_file"
 
     # Initial delay - startup probe waits before starting
     if [ "$initial_delay" -gt 0 ]; then
-        printf "%%s\n" "$(date -Is --utc) Waiting ${initial_delay}s before starting ${probe_name} probe..."
+        printf "%s\n" "$(date -Is --utc) Waiting ${initial_delay}s before starting ${probe_name} probe..."
         sleep "$initial_delay"
     fi
 
@@ -281,22 +302,22 @@ runStartupProbe() {
         if [ $exit_code -eq 0 ]; then
             consecutive_successes=$((consecutive_successes + 1))
             consecutive_failures=0
-            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} (${consecutive_successes}/${success_threshold})"
+            printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} (${consecutive_successes}/${success_threshold})"
 
             if [ $consecutive_successes -ge $success_threshold ]; then
-                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe successful for ${container_name} - other probes can now start"
+                printf "%s\n" "$(date -Is --utc) ${probe_name} probe successful for ${container_name} - other probes can now start"
                 echo "SUCCESS" > "$probe_status_file"
                 return 0
             fi
         else
             consecutive_failures=$((consecutive_failures + 1))
             consecutive_successes=0
-            printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
+            printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
 
             if [ $consecutive_failures -ge $failure_threshold ]; then
-                printf "%%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts - container should be restarted" >&2
+                printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts - container should be restarted" >&2
                 echo "FAILED_THRESHOLD" > "$probe_status_file"
-                return 1
+                exit 1
             fi
         fi
 
@@ -304,39 +325,40 @@ runStartupProbe() {
     done
 }
 
-waitForStartupProbes() {
-    local container_name="$1"
-    local startup_probe_count="$2"
+waitForProbes() {
+		local probe_name="$1"
+		local container_name="$2"
+		local probe_count="$3"
 
-    if [ "$startup_probe_count" -eq 0 ]; then
+    if [ "$probe_count" -eq 0 ]; then
         return 0
     fi
 
-    printf "%%s\n" "$(date -Is --utc) Waiting for startup probes to succeed before starting other probes for ${container_name}..."
+    printf "%s\n" "$(date -Is --utc) Waiting for ${probe_name} probes to succeed before starting other probes for ${container_name}..."
 
     while true; do
-        local all_startup_probes_successful=true
+        local all_probes_successful=true
 
-        for i in $(seq 0 $((startup_probe_count - 1))); do
-            local probe_status_file="${workingPath}/startup-probe-${container_name}-${i}.status"
+        for i in $(seq 0 $((probe_count - 1))); do
+            local probe_status_file="${workingPath}/${probe_name}-probe-${container_name}-${i}.status"
             if [ ! -f "$probe_status_file" ]; then
-                all_startup_probes_successful=false
+                all_probes_successful=false
                 break
             fi
 
             local status=$(cat "$probe_status_file")
             if [ "$status" != "SUCCESS" ]; then
                 if [ "$status" = "FAILED_THRESHOLD" ]; then
-                    printf "%%s\n" "$(date -Is --utc) Startup probe failed for ${container_name} - other probes will not start" >&2
+                    printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} - exiting" >&2
                     return 1
                 fi
-                all_startup_probes_successful=false
+                all_probes_successful=false
                 break
             fi
         done
 
-        if [ "$all_startup_probes_successful" = true ]; then
-            printf "%%s\n" "$(date -Is --utc) All startup probes successful for ${container_name} - other probes can now start"
+        if [ "$all_probes_successful" = true ]; then
+            printf "%s\n" "$(date -Is --utc) All ${probe_name} probes successful for ${container_name} - other probes can now start"
             return 0
         fi
 
@@ -363,7 +385,7 @@ STARTUP_PROBE_%s_%d_PID=$!
 		scriptBuilder.WriteString(fmt.Sprintf(`
 # Wait for startup probes to complete before starting readiness/liveness probes
 (
-    waitForStartupProbes "%s" %d
+    waitForProbes "startup" "%s" %d
     if [ $? -eq 0 ]; then
 `, containerName, len(startupProbes)))
 	}
@@ -373,11 +395,20 @@ STARTUP_PROBE_%s_%d_PID=$!
 		probeArgs := buildProbeArgs(probe)
 		containerVarName := strings.ReplaceAll(containerName, "-", "_")
 		scriptBuilder.WriteString(fmt.Sprintf(`
-# Readiness probe %d for %s
-runProbe "%s" "%s" %d %d %d %d %d "readiness" %d %s &
-READINESS_PROBE_%s_%d_PID=$!
+      # Readiness probe %d for %s
+			runProbe "%s" "%s" %d %d %d %d %d "readiness" %d %s &
+			READINESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
 			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
+	}
+
+	// Wait for readiness probes to complete if startup probes are defined
+	if len(readinessProbes) > 0 {
+		scriptBuilder.WriteString(fmt.Sprintf(`
+      # Wait for readiness probes to complete
+		  waitForProbes "readiness" "%s" %d
+		  if [ $? -eq 0 ]; then
+`, containerName, len(readinessProbes)))
 	}
 
 	// Generate liveness probe calls
@@ -385,9 +416,9 @@ READINESS_PROBE_%s_%d_PID=$!
 		probeArgs := buildProbeArgs(probe)
 		containerVarName := strings.ReplaceAll(containerName, "-", "_")
 		scriptBuilder.WriteString(fmt.Sprintf(`
-# Liveness probe %d for %s
-runProbe "%s" "%s" %d %d %d %d %d "liveness" %d %s &
-LIVENESS_PROBE_%s_%d_PID=$!
+        # Liveness probe %d for %s
+        runProbe "%s" "%s" %d %d %d %d %d "liveness" %d %s &
+        LIVENESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
 			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
 	}
@@ -395,7 +426,16 @@ LIVENESS_PROBE_%s_%d_PID=$!
 	// Close the startup probe conditional block
 	if len(startupProbes) > 0 {
 		scriptBuilder.WriteString(`
-    fi
+		  else
+				printf "%s\n" "$(date -Is --utc) Readiness probes failed - not starting liveness probes" >&2
+        shutDownContainersOnProbeFail
+				exit 1
+			fi
+		else
+			    printf "%s\n" "$(date -Is --utc) Startup probes failed - not starting readiness probes" >&2
+			    shutDownContainersOnProbeFail
+			    exit 1
+		fi
 ) &
 `)
 	}
@@ -414,11 +454,12 @@ LIVENESS_PROBE_%s_%d_PID=$!
 func buildProbeArgs(probe ProbeCommand) string {
 	switch probe.Type {
 	case ProbeTypeHTTP:
-		return fmt.Sprintf(`"%s" "%s" %d "%s"`,
+		return fmt.Sprintf(`"%s" "%s" %d "%s" %d`,
 			probe.HTTPGetAction.Scheme,
 			probe.HTTPGetAction.Host,
 			probe.HTTPGetAction.Port,
-			probe.HTTPGetAction.Path)
+			probe.HTTPGetAction.Path,
+			probe.TimeoutSeconds)
 	case ProbeTypeExec:
 		args := make([]string, len(probe.ExecAction.Command))
 		for i, cmd := range probe.ExecAction.Command {
@@ -534,7 +575,7 @@ func checkContainerReadiness(ctx context.Context, config SlurmConfig, workingPat
 	}
 
 	span := trace.SpanFromContext(ctx)
-	allProbesSuccessful := true
+	allProbesSuccessful := false
 
 	for i := 0; i < readinessProbeCount; i++ {
 		probeStatus, err := getProbeStatus(ctx, workingPath, "readiness", containerName, i)
@@ -549,6 +590,8 @@ func checkContainerReadiness(ctx context.Context, config SlurmConfig, workingPat
 		if probeStatus.Status != "SUCCESS" {
 			allProbesSuccessful = false
 			log.G(ctx).Debugf("Readiness probe %d for container %s is not successful: %s", i, containerName, probeStatus.Status)
+		} else {
+			allProbesSuccessful = true
 		}
 	}
 
@@ -564,7 +607,7 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 	}
 
 	span := trace.SpanFromContext(ctx)
-	allProbesSuccessful := true
+	allProbesSuccessful := false
 
 	for i := 0; i < livenessProbeCount; i++ {
 		probeStatus, err := getProbeStatus(ctx, workingPath, "liveness", containerName, i)
@@ -580,6 +623,12 @@ func checkContainerLiveness(ctx context.Context, config SlurmConfig, workingPath
 		if probeStatus.Status == "FAILED_THRESHOLD" {
 			allProbesSuccessful = false
 			log.G(ctx).Warningf("Liveness probe %d for container %s has failed threshold: %s", i, containerName, probeStatus.Status)
+			continue
+		}
+
+		// SUCCESS means the probe is healthy
+		if probeStatus.Status == "SUCCESS" {
+			allProbesSuccessful = true
 		}
 	}
 
@@ -595,7 +644,7 @@ func checkContainerStartupComplete(ctx context.Context, config SlurmConfig, work
 	}
 
 	span := trace.SpanFromContext(ctx)
-	allProbesSuccessful := true
+	allProbesSuccessful := false
 
 	for i := 0; i < startupProbeCount; i++ {
 		probeStatus, err := getProbeStatus(ctx, workingPath, "startup", containerName, i)
@@ -612,6 +661,8 @@ func checkContainerStartupComplete(ctx context.Context, config SlurmConfig, work
 		if probeStatus.Status != "SUCCESS" {
 			allProbesSuccessful = false
 			log.G(ctx).Debugf("Startup probe %d for container %s is not successful: %s", i, containerName, probeStatus.Status)
+		} else {
+			allProbesSuccessful = true
 		}
 	}
 
