@@ -8,5 +8,49 @@ and this project adheres to
 
 ## [Unreleased]
 
-## [X.X.XX]
-- Change description (#PR_NUMBER) (AUTHOR)
+## [0.6.0] - 2025-12-06
+
+### Added
+
+- **UID Configuration Support**: Added support for custom User ID (UID) for SLURM jobs following [RFC #58](https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58) (#105, #106)
+  - UIDs can be specified via Kubernetes `securityContext.runAsUser`, flavor configuration, or global `DefaultUID`
+  - Enables proper file ownership, permission management, and HPC resource accounting
+  - Jobs run with correct user attribution in SLURM accounting systems
+- **Flavor System**: Introduced predefined configuration "flavors" for simplified pod definitions (#101)
+  - Auto-detection of appropriate flavors based on GPU resource requests
+  - Support for default resources (CPU/memory), SLURM flags, and UID per flavor
+  - Priority-based resolution: explicit annotation > auto-detection > default flavor
+- **Kubernetes Probe Support**: Added support for startup probes, readiness probes, and liveness probes (#78, #94, #104, #107)
+  - Configurable via `EnableProbes` setting in SlurmConfig.yaml
+  - Proper state machine handling for pod lifecycle
+- **Enroot Container Runtime**: Added support for Enroot as an alternative container runtime to Singularity (#79)
+- **Unit Tests**: Added comprehensive unit tests for core utility functions (#96, #98)
+  - Integrated unit tests into Dagger CI pipeline (#99)
+- **Full Mesh Script Support**: Enhanced SLURM script generation to handle mesh.sh pre-exec when fullMesh is enabled (#103)
+
+### Fixed
+
+- Fixed probe behavior with proper job.sh logic (#107)
+- Fixed startup probe delay to respect configured delay before marking pod as ready (#104)
+- Fixed default ContainerRuntime to singularity when not configured (#94)
+- Fixed compilation errors in probe script generation (#89)
+- Fixed job script handling when requested by pods (#100)
+- Fixed resource annotation handling and SLURM script directive generation (#75)
+- Fixed pod-to-job ID mapping and traceability (#82)
+- Fixed regressions from interLink 0.3.7 to 0.5.2 migration (#77)
+
+### Changed
+
+- **Breaking**: Changed from GID to UID following RFC #58 - migrate to using `securityContext.runAsUser` or flavor-based UID settings (#106)
+- Migrated from archived `gopkg.in/yaml.v2` to `goccy/go-yaml` (#98)
+- Improved flavor system implementation with better code organization (#101)
+- Updated SLURM config documentation with missing fields (#88)
+- Updated CI checks to point to latest interlink image (#96)
+
+### Configuration Changes
+
+New configuration options in `SlurmConfig.yaml`:
+- `DefaultUID`: Optional default User ID for all SLURM jobs
+- `Flavors`: Map of flavor configurations with CPU, memory, UID, and SLURM flags
+- `DefaultFlavor`: Name of default flavor to use
+- `EnableProbes`: Enable/disable Kubernetes probe support
