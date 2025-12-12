@@ -446,9 +446,7 @@ echo "No startup probes defined, starting readiness/liveness probes directly."
 		}
 	}
 
-	// Close the startup probe conditional block
-	if len(startupProbes) > 0 {
-		scriptBuilder.WriteString(`
+	scriptBuilder.WriteString(`
 		  else
 				printf "%s\n" "$(date -Is --utc) Readiness probes failed - not starting liveness probes" >&2
         shutDownContainersOnProbeFail
@@ -461,7 +459,6 @@ echo "No startup probes defined, starting readiness/liveness probes directly."
 		fi
 ) &
 `)
-	}
 
 	span.SetAttributes(
 		attribute.String("probes.container.name", containerName),
