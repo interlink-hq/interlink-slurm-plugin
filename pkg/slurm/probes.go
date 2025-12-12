@@ -388,6 +388,13 @@ STARTUP_PROBE_%s_%d_PID=$!
     waitForProbes "startup" "%s" %d
     if [ $? -eq 0 ]; then
 `, containerName, len(startupProbes)))
+	} else {
+		// If no startup probes, start readiness/liveness directly
+		scriptBuilder.WriteString(`
+(
+echo "No startup probes defined, starting readiness/liveness probes directly."
+			if true; then
+`)
 	}
 
 	// Wait for readiness probes to complete if startup probes are defined
