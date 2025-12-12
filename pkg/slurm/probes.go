@@ -388,44 +388,65 @@ STARTUP_PROBE_%s_%d_PID=$!
     waitForProbes "startup" "%s" %d
     if [ $? -eq 0 ]; then
 `, containerName, len(startupProbes)))
+	} else {
+		// If no startup probes, start readiness/liveness directly
+		scriptBuilder.WriteString(`
+(
+echo "No startup probes defined, starting readiness/liveness probes directly."
+			if true; then
+`)
 	}
 
-	// Generate readiness probe calls
-	for i, probe := range readinessProbes {
-		probeArgs := buildProbeArgs(probe)
-		containerVarName := strings.ReplaceAll(containerName, "-", "_")
-		scriptBuilder.WriteString(fmt.Sprintf(`
+	// Wait for readiness probes to complete if startup probes are defined
+	// else start liveness probes directly if any
+	if len(readinessProbes) > 0 {
+
+		// Generate readiness probe calls
+		for i, probe := range readinessProbes {
+			probeArgs := buildProbeArgs(probe)
+			containerVarName := strings.ReplaceAll(containerName, "-", "_")
+			scriptBuilder.WriteString(fmt.Sprintf(`
       # Readiness probe %d for %s
 			runProbe "%s" "%s" %d %d %d %d %d "readiness" %d %s &
 			READINESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
-			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
-	}
+				probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
+		}
 
-	// Wait for readiness probes to complete if startup probes are defined
-	if len(readinessProbes) > 0 {
 		scriptBuilder.WriteString(fmt.Sprintf(`
       # Wait for readiness probes to complete
 		  waitForProbes "readiness" "%s" %d
 		  if [ $? -eq 0 ]; then
 `, containerName, len(readinessProbes)))
+	} else {
+		// If no readiness probes start liveness directly
+		scriptBuilder.WriteString(`
+			echo "No readiness probes defined, starting liveness probes directly."
+			if true; then
+`)
 	}
 
-	// Generate liveness probe calls
-	for i, probe := range livenessProbes {
-		probeArgs := buildProbeArgs(probe)
-		containerVarName := strings.ReplaceAll(containerName, "-", "_")
-		scriptBuilder.WriteString(fmt.Sprintf(`
+	// If len of livenessProbes > 0, generate liveness probes inside the conditional block
+	// else close the conditional blocks with a success message
+	if len(livenessProbes) == 0 {
+		scriptBuilder.WriteString(`
+				printf "%s\n" "$(date -Is --utc) No liveness probes defined, all probes completed successfully for container ` + containerName + `."
+			`)
+	} else {
+		// Generate liveness probe calls
+		for i, probe := range livenessProbes {
+			probeArgs := buildProbeArgs(probe)
+			containerVarName := strings.ReplaceAll(containerName, "-", "_")
+			scriptBuilder.WriteString(fmt.Sprintf(`
         # Liveness probe %d for %s
         runProbe "%s" "%s" %d %d %d %d %d "liveness" %d %s &
         LIVENESS_PROBE_%s_%d_PID=$!
 `, i, containerName, probe.Type, containerName, probe.InitialDelaySeconds, probe.PeriodSeconds,
-			probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
+				probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
+		}
 	}
 
-	// Close the startup probe conditional block
-	if len(startupProbes) > 0 {
-		scriptBuilder.WriteString(`
+	scriptBuilder.WriteString(`
 		  else
 				printf "%s\n" "$(date -Is --utc) Readiness probes failed - not starting liveness probes" >&2
         shutDownContainersOnProbeFail
@@ -438,7 +459,6 @@ STARTUP_PROBE_%s_%d_PID=$!
 		fi
 ) &
 `)
-	}
 
 	span.SetAttributes(
 		attribute.String("probes.container.name", containerName),
