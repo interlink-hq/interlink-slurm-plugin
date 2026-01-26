@@ -1266,14 +1266,19 @@ runPreStop_%s() {
 `, c.containerName, containerVarName))
 			for idx, ps := range c.preStopCommands {
 				if ps.Type == ProbeTypeHTTP {
-					args := buildProbeArgs(ProbeCommand{Type: ps.Type, HTTPGetAction: ps.HTTPGetAction, TimeoutSeconds: 5})
+					// executeHTTPProbe expects: scheme host port path timeout container_name
+					scheme := ps.HTTPGetAction.Scheme
+					host := ps.HTTPGetAction.Host
+					port := strconv.Itoa(int(ps.HTTPGetAction.Port))
+					pathArg := ps.HTTPGetAction.Path
+					timeout := 5
 					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running preStop HTTP handler %d for container %s"
-  executeHTTPProbe %s %s %s %d
+  executeHTTPProbe "%s" "%s" %s "%s" %d "%s"
   return_code=$?
   if [ $return_code -ne 0 ]; then
     printf "%%s\n" "$(date -Is --utc) preStop HTTP handler %d for container %s failed with code $return_code"
   fi
-`, idx, c.containerName, ps.HTTPGetAction.Scheme, ps.HTTPGetAction.Host, strconv.Itoa(int(ps.HTTPGetAction.Port)), ps.HTTPGetAction.Path, idx, c.containerName))
+`, idx, c.containerName, scheme, host, port, pathArg, timeout, c.containerName, idx, c.containerName))
 				} else if ps.Type == ProbeTypeExec {
 					// we run exec using executeExecProbe with configured timeout
 					cmdArgs := ""
