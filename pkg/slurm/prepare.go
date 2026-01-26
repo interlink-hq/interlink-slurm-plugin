@@ -1244,6 +1244,81 @@ highestExitCode=0
 		}
 	}
 
+	// Generate preStop functions and runner if any preStops are configured and enabled
+	var hasPreStops bool
+	for _, c := range commands {
+		if len(c.preStopCommands) > 0 {
+			hasPreStops = true
+			break
+		}
+	}
+	if hasPreStops && config.EnablePreStop {
+		// Generate per-container preStop functions
+		for _, c := range commands {
+			if len(c.preStopCommands) == 0 {
+				continue
+			}
+			containerVarName := strings.ReplaceAll(c.containerName, "-", "_")
+			// function
+			stringToBeWritten.WriteString(fmt.Sprintf(`
+# preStop for container %s
+runPreStop_%s() {
+`, c.containerName, containerVarName))
+			for idx, ps := range c.preStopCommands {
+				if ps.Type == ProbeTypeHTTP {
+					args := buildProbeArgs(ProbeCommand{Type: ps.Type, HTTPGetAction: ps.HTTPGetAction, TimeoutSeconds: 5})
+					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running preStop HTTP handler %d for container %s"
+  executeHTTPProbe %s %s %s %d
+  return_code=$?
+  if [ $return_code -ne 0 ]; then
+    printf "%%s\n" "$(date -Is --utc) preStop HTTP handler %d for container %s failed with code $return_code"
+  fi
+`, idx, c.containerName, ps.HTTPGetAction.Scheme, ps.HTTPGetAction.Host, strconv.Itoa(int(ps.HTTPGetAction.Port)), ps.HTTPGetAction.Path, idx, c.containerName))
+				} else if ps.Type == ProbeTypeExec {
+					// we run exec using executeExecProbe with configured timeout
+					cmdArgs := ""
+					for _, cmd := range ps.ExecAction.Command {
+						cmdArgs += fmt.Sprintf(" \"%s\"", cmd)
+					}
+					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running preStop Exec handler %d for container %s"
+  executeExecProbe %d %s %s
+  return_code=$?
+  if [ $return_code -ne 0 ]; then
+    printf "%%s\n" "$(date -Is --utc) preStop Exec handler %d for container %s failed with code $return_code"
+  fi
+`, idx, c.containerName, config.PreStopTimeoutSeconds, c.containerName, cmdArgs, idx, c.containerName))
+				}
+			}
+			stringToBeWritten.WriteString("}\n")
+		}
+
+		// Generate runner that calls all preStops in order with timeout
+		stringToBeWritten.WriteString(`
+runAllPreStops() {
+  printf "%s\n" "$(date -Is --utc) Running all preStop handlers in order..."
+`)
+		for _, c := range commands {
+			if len(c.preStopCommands) == 0 {
+				continue
+			}
+			containerVarName := strings.ReplaceAll(c.containerName, "-", "_")
+			// Use timeout to enforce per-preStop timeout
+			stringToBeWritten.WriteString(fmt.Sprintf("  timeout %d runPreStop_%s || true\n", config.PreStopTimeoutSeconds, containerVarName))
+		}
+		stringToBeWritten.WriteString("  printf \"%s\\n\" \"$(date -Is --utc) All preStop handlers completed\"\n}")
+
+		// Trap SIGTERM to run preStops before probe cleanup
+		stringToBeWritten.WriteString(`
+# Run preStop handlers on SIGTERM only, then cleanup probes and exit
+prestop_and_cleanup() {
+  runAllPreStops
+  cleanup_probes || true
+  exit
+}
+trap prestop_and_cleanup SIGTERM
+`)
+	}
+
 	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
