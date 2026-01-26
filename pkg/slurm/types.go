@@ -140,5 +140,5 @@ type ContainerCommand struct {
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
-	preStopCommands   []PreStopCommand
+	preStopCommands  []PreStopCommand
 }
