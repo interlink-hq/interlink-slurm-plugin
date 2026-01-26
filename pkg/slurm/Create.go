@@ -179,6 +179,16 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Process preStop handlers if enabled
+		var preStopCommands []PreStopCommand
+		if h.Config.EnablePreStop && !isInit {
+			preStopCommands = translateKubernetesPreStops(spanCtx, container)
+			if len(preStopCommands) > 0 {
+				log.G(h.Ctx).Info("-- Container " + container.Name + " has preStop configured")
+				span.SetAttributes(attribute.Int("job.container"+strconv.Itoa(i)+".prestop_count", len(preStopCommands)))
+			}
+		}
+
 		runtime_command_pod = append(runtime_command_pod, ContainerCommand{
 			runtimeCommand:   runtime_command,
 			containerName:    container.Name,
@@ -188,6 +198,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			readinessProbes:  readinessProbes,
 			livenessProbes:   livenessProbes,
 			startupProbes:    startupProbes,
+			preStopCommands:  preStopCommands,
 			containerImage:   image,
 		})
 	}

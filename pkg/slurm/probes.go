@@ -49,6 +49,43 @@ func translateKubernetesProbes(ctx context.Context, container v1.Container) ([]P
 	return readinessProbes, livenessProbes, startupProbes
 }
 
+// translateKubernetesPreStops converts Kubernetes lifecycle preStop handlers to internal PreStopCommand format
+func translateKubernetesPreStops(ctx context.Context, container v1.Container) []PreStopCommand {
+	var preStops []PreStopCommand
+	span := trace.SpanFromContext(ctx)
+
+	if container.Lifecycle != nil && container.Lifecycle.PreStop != nil {
+		handler := container.Lifecycle.PreStop
+		var cmd PreStopCommand
+		if handler.HTTPGet != nil {
+			cmd.Type = ProbeTypeHTTP
+			cmd.HTTPGetAction = &HTTPGetAction{
+				Path:   handler.HTTPGet.Path,
+				Port:   handler.HTTPGet.Port.IntVal,
+				Host:   handler.HTTPGet.Host,
+				Scheme: string(handler.HTTPGet.Scheme),
+			}
+			if cmd.HTTPGetAction.Scheme == "" {
+				cmd.HTTPGetAction.Scheme = "HTTP"
+			}
+			if cmd.HTTPGetAction.Path == "" {
+				cmd.HTTPGetAction.Path = "/"
+			}
+			preStops = append(preStops, cmd)
+			span.AddEvent("Translated preStop HTTP for container " + container.Name)
+		} else if handler.Exec != nil {
+			cmd.Type = ProbeTypeExec
+			cmd.ExecAction = &ExecAction{Command: handler.Exec.Command}
+			preStops = append(preStops, cmd)
+			span.AddEvent("Translated preStop Exec for container " + container.Name)
+		} else {
+			log.G(ctx).Warning("Unsupported preStop handler (only HTTP and Exec are supported)")
+		}
+	}
+
+	return preStops
+}
+
 // translateSingleProbe converts a single Kubernetes probe to internal format
 func translateSingleProbe(ctx context.Context, k8sProbe *v1.Probe) *ProbeCommand {
 	if k8sProbe == nil {
