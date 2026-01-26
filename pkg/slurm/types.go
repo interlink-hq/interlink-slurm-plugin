@@ -76,6 +76,8 @@ type SlurmConfig struct {
 	SingularityPrefix         string   `yaml:"SingularityPrefix"`
 	SingularityPath           string   `yaml:"SingularityPath"`
 	EnableProbes              bool     `yaml:"EnableProbes"`
+	EnablePreStop             bool     `yaml:"EnablePreStop"`
+	PreStopTimeoutSeconds     int      `yaml:"PreStopTimeoutSeconds"`
 	set                       bool
 	EnrootDefaultOptions      []string                `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
 	EnrootPrefix              string                  `yaml:"EnrootPrefix"`
@@ -109,6 +111,14 @@ type ProbeCommand struct {
 	FailureThreshold    int32
 }
 
+// PreStopCommand represents a lifecycle preStop handler (exec or httpGet)
+// PreStop handlers are executed synchronously on SIGTERM when enabled in config.
+type PreStopCommand struct {
+	Type          ProbeType
+	HTTPGetAction *HTTPGetAction
+	ExecAction    *ExecAction
+}
+
 type HTTPGetAction struct {
 	Path   string
 	Port   int32
@@ -130,4 +140,5 @@ type ContainerCommand struct {
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
+	preStopCommands   []PreStopCommand
 }
