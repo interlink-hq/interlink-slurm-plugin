@@ -65,4 +65,4 @@ spec:
       - "-c"
       - "sleep 300"
 
-When the container starts, the postStart handler will execute synchronously before the container proceeds with normal operation.
+When the container starts, the postStart handler will execute synchronously after the container process begins. Note that the container runs in the background and is not blocked by the postStart handler execution.

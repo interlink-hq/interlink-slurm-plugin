@@ -1271,7 +1271,10 @@ runPreStop_%s() {
 					host := ps.HTTPGetAction.Host
 					port := strconv.Itoa(int(ps.HTTPGetAction.Port))
 					pathArg := ps.HTTPGetAction.Path
-					timeout := 5
+					timeout := config.PreStopTimeoutSeconds
+					if timeout == 0 {
+						timeout = 5 // default timeout
+					}
 					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running preStop HTTP handler %d for container %s"
   executeHTTPProbe "%s" "%s" %s "%s" %d "%s"
   return_code=$?
@@ -1470,11 +1473,7 @@ runPostStart_%s() {
 		// Call postStart handlers if enabled and not an init container
 		if config.EnablePostStart && !containerCommand.isInitContainer && len(containerCommand.postStartCommands) > 0 {
 			containerVarName := strings.ReplaceAll(containerCommand.containerName, "-", "_")
-			timeout := config.PostStartTimeoutSeconds
-			if timeout == 0 {
-				timeout = 5 // default timeout
-			}
-			stringToBeWritten.WriteString(fmt.Sprintf("\n# Run postStart handlers for %s\ntimeout %d runPostStart_%s || true\n", containerCommand.containerName, timeout, containerVarName))
+			stringToBeWritten.WriteString(fmt.Sprintf("\n# Run postStart handlers for %s\nrunPostStart_%s || true\n", containerCommand.containerName, containerVarName))
 		}
 	}
 
