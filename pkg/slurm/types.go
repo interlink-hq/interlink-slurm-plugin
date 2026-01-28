@@ -78,6 +78,8 @@ type SlurmConfig struct {
 	EnableProbes              bool     `yaml:"EnableProbes"`
 	EnablePreStop             bool     `yaml:"EnablePreStop"`
 	PreStopTimeoutSeconds     int      `yaml:"PreStopTimeoutSeconds"`
+	EnablePostStart           bool     `yaml:"EnablePostStart"`
+	PostStartTimeoutSeconds   int      `yaml:"PostStartTimeoutSeconds"`
 	set                       bool
 	EnrootDefaultOptions      []string                `yaml:"EnrootDefaultOptions" default:"[\"--rw\"]"`
 	EnrootPrefix              string                  `yaml:"EnrootPrefix"`
@@ -119,6 +121,14 @@ type PreStopCommand struct {
 	ExecAction    *ExecAction
 }
 
+// PostStartCommand represents a lifecycle postStart handler (exec or httpGet)
+// PostStart handlers are executed synchronously after container starts when enabled in config.
+type PostStartCommand struct {
+	Type          ProbeType
+	HTTPGetAction *HTTPGetAction
+	ExecAction    *ExecAction
+}
+
 type HTTPGetAction struct {
 	Path   string
 	Port   int32
@@ -131,14 +141,15 @@ type ExecAction struct {
 }
 
 type ContainerCommand struct {
-	containerName    string
-	isInitContainer  bool
-	runtimeCommand   []string
-	containerCommand []string
-	containerArgs    []string
-	containerImage   string
-	readinessProbes  []ProbeCommand
-	livenessProbes   []ProbeCommand
-	startupProbes    []ProbeCommand
-	preStopCommands  []PreStopCommand
+	containerName     string
+	isInitContainer   bool
+	runtimeCommand    []string
+	containerCommand  []string
+	containerArgs     []string
+	containerImage    string
+	readinessProbes   []ProbeCommand
+	livenessProbes    []ProbeCommand
+	startupProbes     []ProbeCommand
+	preStopCommands   []PreStopCommand
+	postStartCommands []PostStartCommand
 }

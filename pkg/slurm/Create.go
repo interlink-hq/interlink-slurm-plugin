@@ -189,17 +189,28 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Process postStart handlers if enabled
+		var postStartCommands []PostStartCommand
+		if h.Config.EnablePostStart && !isInit {
+			postStartCommands = translateKubernetesPostStarts(spanCtx, container)
+			if len(postStartCommands) > 0 {
+				log.G(h.Ctx).Info("-- Container " + container.Name + " has postStart configured")
+				span.SetAttributes(attribute.Int("job.container"+strconv.Itoa(i)+".poststart_count", len(postStartCommands)))
+			}
+		}
+
 		runtime_command_pod = append(runtime_command_pod, ContainerCommand{
-			runtimeCommand:   runtime_command,
-			containerName:    container.Name,
-			containerArgs:    container.Args,
-			containerCommand: container.Command,
-			isInitContainer:  isInit,
-			readinessProbes:  readinessProbes,
-			livenessProbes:   livenessProbes,
-			startupProbes:    startupProbes,
-			preStopCommands:  preStopCommands,
-			containerImage:   image,
+			runtimeCommand:    runtime_command,
+			containerName:     container.Name,
+			containerArgs:     container.Args,
+			containerCommand:  container.Command,
+			isInitContainer:   isInit,
+			readinessProbes:   readinessProbes,
+			livenessProbes:    livenessProbes,
+			startupProbes:     startupProbes,
+			preStopCommands:   preStopCommands,
+			postStartCommands: postStartCommands,
+			containerImage:    image,
 		})
 	}
 

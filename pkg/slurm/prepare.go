@@ -1324,6 +1324,67 @@ trap prestop_and_cleanup SIGTERM
 `)
 	}
 
+	// Generate postStart functions if any postStarts are configured and enabled
+	var hasPostStarts bool
+	for _, c := range commands {
+		if len(c.postStartCommands) > 0 {
+			hasPostStarts = true
+			break
+		}
+	}
+	if hasPostStarts && config.EnablePostStart {
+		// Generate per-container postStart functions
+		for _, c := range commands {
+			if len(c.postStartCommands) == 0 {
+				continue
+			}
+			containerVarName := strings.ReplaceAll(c.containerName, "-", "_")
+			// function
+			stringToBeWritten.WriteString(fmt.Sprintf(`
+# postStart for container %s
+runPostStart_%s() {
+`, c.containerName, containerVarName))
+			for idx, ps := range c.postStartCommands {
+				if ps.Type == ProbeTypeHTTP {
+					// executeHTTPProbe expects: scheme host port path timeout container_name
+					scheme := ps.HTTPGetAction.Scheme
+					host := ps.HTTPGetAction.Host
+					port := strconv.Itoa(int(ps.HTTPGetAction.Port))
+					pathArg := ps.HTTPGetAction.Path
+					timeout := config.PostStartTimeoutSeconds
+					if timeout == 0 {
+						timeout = 5 // default timeout
+					}
+					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running postStart HTTP handler %d for container %s"
+  executeHTTPProbe "%s" "%s" %s "%s" %d "%s"
+  return_code=$?
+  if [ $return_code -ne 0 ]; then
+    printf "%%s\n" "$(date -Is --utc) postStart HTTP handler %d for container %s failed with code $return_code"
+  fi
+`, idx, c.containerName, scheme, host, port, pathArg, timeout, c.containerName, idx, c.containerName))
+				} else if ps.Type == ProbeTypeExec {
+					// we run exec using executeExecProbe with configured timeout
+					cmdArgs := ""
+					for _, cmd := range ps.ExecAction.Command {
+						cmdArgs += fmt.Sprintf(" \"%s\"", cmd)
+					}
+					timeout := config.PostStartTimeoutSeconds
+					if timeout == 0 {
+						timeout = 5 // default timeout
+					}
+					stringToBeWritten.WriteString(fmt.Sprintf(`  printf "%%s\n" "$(date -Is --utc) Running postStart Exec handler %d for container %s"
+  executeExecProbe %d %s %s
+  return_code=$?
+  if [ $return_code -ne 0 ]; then
+    printf "%%s\n" "$(date -Is --utc) postStart Exec handler %d for container %s failed with code $return_code"
+  fi
+`, idx, c.containerName, timeout, c.containerName, cmdArgs, idx, c.containerName))
+				}
+			}
+			stringToBeWritten.WriteString("}\n")
+		}
+	}
+
 	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
@@ -1404,6 +1465,16 @@ trap prestop_and_cleanup SIGTERM
 				stringToBeWritten.WriteString("\n")
 				stringToBeWritten.WriteString(probeScript)
 			}
+		}
+
+		// Call postStart handlers if enabled and not an init container
+		if config.EnablePostStart && !containerCommand.isInitContainer && len(containerCommand.postStartCommands) > 0 {
+			containerVarName := strings.ReplaceAll(containerCommand.containerName, "-", "_")
+			timeout := config.PostStartTimeoutSeconds
+			if timeout == 0 {
+				timeout = 5 // default timeout
+			}
+			stringToBeWritten.WriteString(fmt.Sprintf("\n# Run postStart handlers for %s\ntimeout %d runPostStart_%s || true\n", containerCommand.containerName, timeout, containerVarName))
 		}
 	}
 
