@@ -86,6 +86,43 @@ func translateKubernetesPreStops(ctx context.Context, container v1.Container) []
 	return preStops
 }
 
+// translateKubernetesPostStarts converts Kubernetes lifecycle postStart handlers to internal PostStartCommand format
+func translateKubernetesPostStarts(ctx context.Context, container v1.Container) []PostStartCommand {
+	var postStarts []PostStartCommand
+	span := trace.SpanFromContext(ctx)
+
+	if container.Lifecycle != nil && container.Lifecycle.PostStart != nil {
+		handler := container.Lifecycle.PostStart
+		var cmd PostStartCommand
+		if handler.HTTPGet != nil {
+			cmd.Type = ProbeTypeHTTP
+			cmd.HTTPGetAction = &HTTPGetAction{
+				Path:   handler.HTTPGet.Path,
+				Port:   handler.HTTPGet.Port.IntVal,
+				Host:   handler.HTTPGet.Host,
+				Scheme: string(handler.HTTPGet.Scheme),
+			}
+			if cmd.HTTPGetAction.Scheme == "" {
+				cmd.HTTPGetAction.Scheme = "HTTP"
+			}
+			if cmd.HTTPGetAction.Path == "" {
+				cmd.HTTPGetAction.Path = "/"
+			}
+			postStarts = append(postStarts, cmd)
+			span.AddEvent("Translated postStart HTTP for container " + container.Name)
+		} else if handler.Exec != nil {
+			cmd.Type = ProbeTypeExec
+			cmd.ExecAction = &ExecAction{Command: handler.Exec.Command}
+			postStarts = append(postStarts, cmd)
+			span.AddEvent("Translated postStart Exec for container " + container.Name)
+		} else {
+			log.G(ctx).Warning("Unsupported postStart handler (only HTTP and Exec are supported)")
+		}
+	}
+
+	return postStarts
+}
+
 // translateSingleProbe converts a single Kubernetes probe to internal format
 func translateSingleProbe(ctx context.Context, k8sProbe *v1.Probe) *ProbeCommand {
 	if k8sProbe == nil {
