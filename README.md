@@ -125,10 +125,23 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/pre-exec | Used to add commands to be executed before the Job starts. It adds a command in the SLURM batch file after the #SBATCH directives |
 | slurm-job.vk.io/singularity-mounts | Used to add mountpoints to the Singularity Containers |
 | slurm-job.vk.io/singularity-options | Used to specify Singularity arguments |
+| slurm-job.vk.io/nfs-mount-options | Optional comma-separated options appended to automatic NFS mounts for PVC-backed volumes |
+| slurm-job.vk.io/nfs-mode | Selects how NFS-backed PVCs are exposed on the worker. Supported values are `host` (default), `fuse`, and `helper` |
+| slurm-job.vk.io/nfs-fuse-command | Required when `slurm-job.vk.io/nfs-mode=fuse`. Template for the Apptainer FUSE client command |
+| slurm-job.vk.io/nfs-fusemount-type | Optional Apptainer fusemount type such as `host-daemon` or `container-daemon`. Defaults to `host-daemon` |
+| slurm-job.vk.io/nfs-helper-command | Required when `slurm-job.vk.io/nfs-mode=helper`. Template for a host-side helper command managed by the plugin |
+| slurm-job.vk.io/nfs-helper-fusemount-type | Optional Apptainer fusemount type for helper mode. Defaults to `host-daemon` |
 | slurm-job.vk.io/image-root | Used to specify the root path of the Singularity Image |
 | slurm-job.vk.io/flags | Used to specify SLURM flags. These flags will be added to the SLURM script in the form of #SBATCH flag1, #SBATCH flag2, etc |
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
 | slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
+
+NFS-backed PVCs are mounted automatically on the SLURM worker under `/tmp/interlink-nfs/<pod-uid>/<volume-name>` and then bind-mounted into the container runtime.
+If the site does not allow host mounts, you can switch to `slurm-job.vk.io/nfs-mode: "fuse"` and provide an Apptainer `--fusemount` command template through `slurm-job.vk.io/nfs-fuse-command`.
+The template supports `{{SERVER}}`, `{{PATH}}`, `{{SOURCE}}`, `{{OPTIONS}}`, `{{READONLY}}`, `{{PVC_NAME}}`, and `{{PV_NAME}}`.
+For example, `slurm-job.vk.io/nfs-fusemount-type: "container-daemon"` together with `slurm-job.vk.io/nfs-fuse-command: "/usr/local/bin/fuse-nfs {{SOURCE}} -o {{OPTIONS}}"` will generate a container-side FUSE mount instead of a host `mount -t nfs`.
+If you want to keep workload images unchanged, switch to `slurm-job.vk.io/nfs-mode: "helper"` and provide a host-side helper command through `slurm-job.vk.io/nfs-helper-command`. The plugin writes a small wrapper script into the job working directory and calls it with Apptainer `host-daemon` by default.
+For example, `slurm-job.vk.io/nfs-helper-command: "/opt/interlink/bin/pvc-live-helper --server {{SERVER}} --path {{PATH}} --options {{OPTIONS}}"` will generate a host-side helper wrapper and append the final mountpoint automatically.
 
 **Note**: To specify a custom User ID (UID) for SLURM jobs, use the Kubernetes standard `spec.securityContext.runAsUser` field in your pod specification (see UID Configuration section below).
 

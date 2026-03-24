@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -39,6 +40,18 @@ var (
 	timer        time.Time
 	cachedStatus []commonIL.PodStatus
 )
+
+const nfsLiveHelperScriptTemplate = `#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $(basename "$0") <mountpoint>" >&2
+    exit 2
+fi
+
+mountpoint="$1"
+exec {{COMMAND}} "$mountpoint"
+`
 
 type JidStruct struct {
 	PodUID       string    `json:"PodUID"`
@@ -602,6 +615,24 @@ func getRetrievedSecret(retrievedContainer *commonIL.RetrievedContainer, secretN
 	return nil, fmt.Errorf("could not find secret %s in container %s in pod %s", secretName, containerName, podName)
 }
 
+func getRetrievedPersistentVolumeClaim(retrievedContainer *commonIL.RetrievedContainer, claimName string, containerName string, podName string) (*v1.PersistentVolumeClaim, error) {
+	for _, pvc := range retrievedContainer.PersistentVolumeClaims {
+		if pvc.Name == claimName {
+			return &pvc, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find persistentVolumeClaim %s in container %s in pod %s", claimName, containerName, podName)
+}
+
+func getRetrievedPersistentVolume(retrievedContainer *commonIL.RetrievedContainer, volumeName string, containerName string, podName string) (*v1.PersistentVolume, error) {
+	for _, pv := range retrievedContainer.PersistentVolumes {
+		if pv.Name == volumeName {
+			return &pv, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find persistentVolume %s in container %s in pod %s", volumeName, containerName, podName)
+}
+
 func getPodVolume(pod *v1.Pod, volumeName string) (*v1.Volume, error) {
 	for _, vol := range pod.Spec.Volumes {
 		if vol.Name == volumeName {
@@ -656,6 +687,347 @@ func prepareMountsSimpleVolume(
 	return nil
 }
 
+func ensureNFSCleanupTrap() {
+	if strings.Contains(prefix, "interlink_cleanup_nfs()") {
+		return
+	}
+
+	prefix += `
+declare -a INTERLINK_NFS_MOUNTS=()
+interlink_cleanup_nfs() {
+  local idx
+  local mnt
+  for (( idx=${#INTERLINK_NFS_MOUNTS[@]}-1; idx>=0; idx-- )); do
+    mnt="${INTERLINK_NFS_MOUNTS[idx]}"
+    if mountpoint -q "$mnt"; then
+      umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true
+    fi
+    rmdir "$mnt" 2>/dev/null || true
+  done
+}
+	trap interlink_cleanup_nfs EXIT
+	`
+}
+
+func buildNFSVolumeSource(pv *v1.PersistentVolume, volumeMount v1.VolumeMount) (string, error) {
+	nfsPath := pv.Spec.NFS.Path
+	if volumeMount.SubPath != "" {
+		cleanSubPath := path.Clean(volumeMount.SubPath)
+		if cleanSubPath == "." {
+			cleanSubPath = ""
+		}
+		if cleanSubPath == ".." || strings.HasPrefix(cleanSubPath, "../") || path.IsAbs(volumeMount.SubPath) {
+			return "", fmt.Errorf("unsupported subPath %q for NFS-backed PVC", volumeMount.SubPath)
+		}
+		nfsPath = path.Join(nfsPath, cleanSubPath)
+	}
+
+	return pv.Spec.NFS.Server + ":" + nfsPath, nil
+}
+
+func buildNFSMountOptions(metadata metav1.ObjectMeta, pv *v1.PersistentVolume, readOnly bool) string {
+	var options []string
+
+	if len(pv.Spec.MountOptions) > 0 {
+		options = append(options, pv.Spec.MountOptions...)
+	}
+
+	if extraOptions, ok := metadata.Annotations["slurm-job.vk.io/nfs-mount-options"]; ok {
+		for _, option := range strings.Split(extraOptions, ",") {
+			trimmed := strings.TrimSpace(option)
+			if trimmed != "" {
+				options = append(options, trimmed)
+			}
+		}
+	}
+
+	if readOnly {
+		options = append(options, "ro")
+	} else {
+		options = append(options, "rw")
+	}
+
+	return strings.Join(options, ",")
+}
+
+func buildNFSFuseMountType(metadata metav1.ObjectMeta) string {
+	if mountType, ok := metadata.Annotations["slurm-job.vk.io/nfs-fusemount-type"]; ok && strings.TrimSpace(mountType) != "" {
+		return strings.TrimSpace(mountType)
+	}
+	return "host-daemon"
+}
+
+func buildNFSHelperMountType(metadata metav1.ObjectMeta) string {
+	if mountType, ok := metadata.Annotations["slurm-job.vk.io/nfs-helper-fusemount-type"]; ok && strings.TrimSpace(mountType) != "" {
+		return strings.TrimSpace(mountType)
+	}
+	return "host-daemon"
+}
+
+func renderNFSFuseCommandTemplate(template string, values map[string]string) string {
+	rendered := template
+	for placeholder, value := range values {
+		rendered = strings.ReplaceAll(rendered, placeholder, value)
+	}
+	return rendered
+}
+
+func buildNFSHelperScriptPath(workingPath string, volume v1.Volume) string {
+	scriptName := "interlink-nfs-live-helper-" + volume.Name + ".sh"
+	return filepath.Join(workingPath, scriptName)
+}
+
+func buildNFSHostMountPath(metadata metav1.ObjectMeta, volume v1.Volume) string {
+	podID := string(metadata.UID)
+	if podID == "" {
+		podID = metadata.Name
+	}
+	if podID == "" {
+		podID = "unknown-pod"
+	}
+
+	return filepath.Join("/tmp", "interlink-nfs", podID, volume.Name)
+}
+
+func buildNFSBridgeMountPath(metadata metav1.ObjectMeta, pvc *v1.PersistentVolumeClaim) string {
+	if bridgePath, ok := metadata.Annotations["slurm-job.vk.io/nfs-bridge-path"]; ok && strings.TrimSpace(bridgePath) != "" {
+		return strings.TrimSpace(bridgePath)
+	}
+
+	podID := string(metadata.UID)
+	if podID == "" {
+		podID = metadata.Name
+	}
+	if podID == "" {
+		podID = "unknown-pod"
+	}
+
+	claimName := "unknown-pvc"
+	if pvc != nil && pvc.Name != "" {
+		claimName = pvc.Name
+	}
+
+	return filepath.Join("/tmp", "interlink-pvc-bridge", podID, claimName)
+}
+
+func prepareMountsPersistentVolumeFUSE(
+	Ctx context.Context,
+	config SlurmConfig,
+	metadata metav1.ObjectMeta,
+	pvc *v1.PersistentVolumeClaim,
+	pv *v1.PersistentVolume,
+	volumeMount v1.VolumeMount,
+	mountedDataSB *strings.Builder,
+	readOnly bool,
+	mountOptions string,
+	nfsSource string,
+) error {
+	if config.ContainerRuntime != "singularity" {
+		return fmt.Errorf("NFS fuse mode for PVC %s requires the singularity container runtime", pvc.Name)
+	}
+
+	commandTemplate := strings.TrimSpace(metadata.Annotations["slurm-job.vk.io/nfs-fuse-command"])
+	if commandTemplate == "" {
+		return fmt.Errorf("annotation slurm-job.vk.io/nfs-fuse-command is required when slurm-job.vk.io/nfs-mode=fuse")
+	}
+
+	nfsPath := strings.TrimPrefix(nfsSource, pv.Spec.NFS.Server+":")
+	fuseCommand := renderNFSFuseCommandTemplate(commandTemplate, map[string]string{
+		"{{SERVER}}":   shellescape.Quote(pv.Spec.NFS.Server),
+		"{{PATH}}":     shellescape.Quote(nfsPath),
+		"{{SOURCE}}":   shellescape.Quote(nfsSource),
+		"{{OPTIONS}}":  shellescape.Quote(mountOptions),
+		"{{READONLY}}": strconv.FormatBool(readOnly),
+		"{{PVC_NAME}}": shellescape.Quote(pvc.Name),
+		"{{PV_NAME}}":  shellescape.Quote(pv.Name),
+	})
+
+	fuseSpec := buildNFSFuseMountType(metadata) + ":" + strings.TrimSpace(fuseCommand) + " " + volumeMount.MountPath
+	mountedDataSB.WriteString(" --fusemount ")
+	mountedDataSB.WriteString(shellescape.Quote(fuseSpec))
+
+	log.G(Ctx).Infof("Prepared FUSE-backed NFS mount for PVC %s using PV %s (%s)", pvc.Name, pv.Name, nfsSource)
+	return nil
+}
+
+func prepareMountsPersistentVolumeHelper(
+	Ctx context.Context,
+	config SlurmConfig,
+	metadata metav1.ObjectMeta,
+	workingPath string,
+	pvc *v1.PersistentVolumeClaim,
+	pv *v1.PersistentVolume,
+	volumeMount v1.VolumeMount,
+	volume v1.Volume,
+	mountedDataSB *strings.Builder,
+	readOnly bool,
+	mountOptions string,
+	nfsSource string,
+) error {
+	if config.ContainerRuntime != "singularity" {
+		return fmt.Errorf("NFS helper mode for PVC %s requires the singularity container runtime", pvc.Name)
+	}
+
+	commandTemplate := strings.TrimSpace(metadata.Annotations["slurm-job.vk.io/nfs-helper-command"])
+	if commandTemplate == "" {
+		return fmt.Errorf("annotation slurm-job.vk.io/nfs-helper-command is required when slurm-job.vk.io/nfs-mode=helper")
+	}
+
+	nfsPath := strings.TrimPrefix(nfsSource, pv.Spec.NFS.Server+":")
+	helperCommand := renderNFSFuseCommandTemplate(commandTemplate, map[string]string{
+		"{{SERVER}}":   shellescape.Quote(pv.Spec.NFS.Server),
+		"{{PATH}}":     shellescape.Quote(nfsPath),
+		"{{SOURCE}}":   shellescape.Quote(nfsSource),
+		"{{OPTIONS}}":  shellescape.Quote(mountOptions),
+		"{{READONLY}}": strconv.FormatBool(readOnly),
+		"{{PVC_NAME}}": shellescape.Quote(pvc.Name),
+		"{{PV_NAME}}":  shellescape.Quote(pv.Name),
+	})
+
+	helperScriptPath := buildNFSHelperScriptPath(workingPath, volume)
+	helperScript := strings.ReplaceAll(nfsLiveHelperScriptTemplate, "{{COMMAND}}", helperCommand)
+	if err := os.WriteFile(helperScriptPath, []byte(helperScript), 0755); err != nil {
+		return fmt.Errorf("could not write NFS helper script for PVC %s: %w", pvc.Name, err)
+	}
+
+	fuseSpec := buildNFSHelperMountType(metadata) + ":" + shellescape.Quote(helperScriptPath) + " " + volumeMount.MountPath
+	mountedDataSB.WriteString(" --fusemount ")
+	mountedDataSB.WriteString(shellescape.Quote(fuseSpec))
+
+	log.G(Ctx).Infof("Prepared helper-backed FUSE mount for PVC %s using PV %s (%s)", pvc.Name, pv.Name, nfsSource)
+	return nil
+}
+
+func prepareMountsPersistentVolumeHost(
+	Ctx context.Context,
+	config SlurmConfig,
+	metadata metav1.ObjectMeta,
+	pvc *v1.PersistentVolumeClaim,
+	pv *v1.PersistentVolume,
+	volumeMount v1.VolumeMount,
+	volume v1.Volume,
+	mountedDataSB *strings.Builder,
+	readOnly bool,
+	mountOptions string,
+	nfsSource string,
+) error {
+	hostMountPath := buildNFSHostMountPath(metadata, volume)
+	bindSource := hostMountPath
+	if volumeMount.SubPath != "" {
+		bindSource = filepath.Join(bindSource, volumeMount.SubPath)
+	}
+
+	ensureNFSCleanupTrap()
+
+	prefix += "\nmkdir -p " + shellescape.Quote(hostMountPath)
+	prefix += "\nif ! mountpoint -q " + shellescape.Quote(hostMountPath) + "; then"
+	prefix += "\n  mount -t nfs"
+	if mountOptions != "" {
+		prefix += " -o " + shellescape.Quote(mountOptions)
+	}
+	prefix += " " + shellescape.Quote(nfsSource) + " " + shellescape.Quote(hostMountPath)
+	prefix += "\nfi"
+	prefix += "\nif ! mountpoint -q " + shellescape.Quote(hostMountPath) + "; then"
+	prefix += "\n  echo " + shellescape.Quote("failed to mount NFS volume "+pv.Name+" from "+nfsSource) + " >&2"
+	prefix += "\n  exit 1"
+	prefix += "\nfi"
+	prefix += "\nINTERLINK_NFS_MOUNTS+=(" + shellescape.Quote(hostMountPath) + ")"
+
+	switch config.ContainerRuntime {
+	case "singularity":
+		mountedDataSB.WriteString(" --bind ")
+	case "enroot":
+		mountedDataSB.WriteString(" --mount ")
+	}
+	mountedDataSB.WriteString(bindSource + ":" + volumeMount.MountPath)
+	if readOnly {
+		mountedDataSB.WriteString(":ro")
+	} else {
+		mountedDataSB.WriteString(":rw")
+	}
+
+	log.G(Ctx).Infof("Prepared NFS mount for PVC %s using PV %s (%s)", pvc.Name, pv.Name, nfsSource)
+	return nil
+}
+
+func prepareMountsPersistentVolumeBridge(
+	Ctx context.Context,
+	config SlurmConfig,
+	metadata metav1.ObjectMeta,
+	pvc *v1.PersistentVolumeClaim,
+	pv *v1.PersistentVolume,
+	volumeMount v1.VolumeMount,
+	mountedDataSB *strings.Builder,
+	readOnly bool,
+) error {
+	if bridgedClaim := strings.TrimSpace(metadata.Annotations["slurm-job.vk.io/nfs-bridge-pvc"]); bridgedClaim != "" && bridgedClaim != pvc.Name {
+		return fmt.Errorf("slurm-job.vk.io/nfs-bridge-pvc expects claim %s but encountered PVC %s", bridgedClaim, pvc.Name)
+	}
+
+	bridgeMountPath := buildNFSBridgeMountPath(metadata, pvc)
+	bindSource := bridgeMountPath
+	if volumeMount.SubPath != "" {
+		bindSource = filepath.Join(bindSource, volumeMount.SubPath)
+	}
+
+	switch config.ContainerRuntime {
+	case "singularity":
+		mountedDataSB.WriteString(" --bind ")
+	case "enroot":
+		mountedDataSB.WriteString(" --mount ")
+	default:
+		return fmt.Errorf("NFS bridge mode for PVC %s requires a supported container runtime", pvc.Name)
+	}
+
+	mountedDataSB.WriteString(bindSource + ":" + volumeMount.MountPath)
+	if readOnly {
+		mountedDataSB.WriteString(":ro")
+	} else {
+		mountedDataSB.WriteString(":rw")
+	}
+
+	log.G(Ctx).Infof("Prepared bridged NFS bind for PVC %s using PV %s from %s", pvc.Name, pv.Name, bridgeMountPath)
+	return nil
+}
+
+func prepareMountsPersistentVolume(
+	Ctx context.Context,
+	config SlurmConfig,
+	metadata metav1.ObjectMeta,
+	container *v1.Container,
+	workingPath string,
+	pvc *v1.PersistentVolumeClaim,
+	pv *v1.PersistentVolume,
+	volumeMount v1.VolumeMount,
+	volume v1.Volume,
+	mountedDataSB *strings.Builder,
+) error {
+	if pv.Spec.NFS == nil {
+		return fmt.Errorf("persistent volume %s for claim %s in pod %s is not NFS-backed", pv.Name, pvc.Name, metadata.Name)
+	}
+
+	nfsSource, err := buildNFSVolumeSource(pv, volumeMount)
+	if err != nil {
+		return err
+	}
+
+	readOnly := volumeMount.ReadOnly || pv.Spec.NFS.ReadOnly
+	mountOptions := buildNFSMountOptions(metadata, pv, readOnly)
+
+	switch strings.ToLower(strings.TrimSpace(metadata.Annotations["slurm-job.vk.io/nfs-mode"])) {
+	case "", "host":
+		return prepareMountsPersistentVolumeHost(Ctx, config, metadata, pvc, pv, volumeMount, volume, mountedDataSB, readOnly, mountOptions, nfsSource)
+	case "bridge":
+		return prepareMountsPersistentVolumeBridge(Ctx, config, metadata, pvc, pv, volumeMount, mountedDataSB, readOnly)
+	case "fuse":
+		return prepareMountsPersistentVolumeFUSE(Ctx, config, metadata, pvc, pv, volumeMount, mountedDataSB, readOnly, mountOptions, nfsSource)
+	case "helper":
+		return prepareMountsPersistentVolumeHelper(Ctx, config, metadata, workingPath, pvc, pv, volumeMount, volume, mountedDataSB, readOnly, mountOptions, nfsSource)
+	default:
+		return fmt.Errorf("unsupported slurm-job.vk.io/nfs-mode %q for PVC %s", metadata.Annotations["slurm-job.vk.io/nfs-mode"], pvc.Name)
+	}
+}
+
 // prepareMounts iterates along the struct provided in the data parameter and checks for ConfigMaps, Secrets and EmptyDirs to be mounted.
 // For each element found, the mountData function is called.
 // In this context, the general case is given by host and container not sharing the file system, so data are stored within ENVS with matching names.
@@ -687,10 +1059,10 @@ func prepareMounts(
 
 	for _, volumeMount := range container.VolumeMounts {
 		volumePtr, err := getPodVolume(&podData.Pod, volumeMount.Name)
-		volume := *volumePtr
 		if err != nil {
 			return "", err
 		}
+		volume := *volumePtr
 
 		retrievedContainer, err := getRetrievedContainer(podData, container.Name)
 		if err != nil {
@@ -807,6 +1179,26 @@ func prepareMounts(
 				mountedDataSB.WriteString(":ro")
 			}
 
+		case volume.PersistentVolumeClaim != nil:
+			retrievedPVC, err := getRetrievedPersistentVolumeClaim(retrievedContainer, volume.PersistentVolumeClaim.ClaimName, container.Name, podName)
+			if err != nil {
+				return "", err
+			}
+
+			if retrievedPVC.Spec.VolumeName == "" {
+				return "", fmt.Errorf("persistentVolumeClaim %s in pod %s is not bound yet", retrievedPVC.Name, podName)
+			}
+
+			retrievedPV, err := getRetrievedPersistentVolume(retrievedContainer, retrievedPVC.Spec.VolumeName, container.Name, podName)
+			if err != nil {
+				return "", err
+			}
+
+			err = prepareMountsPersistentVolume(Ctx, config, podData.Pod.ObjectMeta, container, workingPath, retrievedPVC, retrievedPV, volumeMount, volume, &mountedDataSB)
+			if err != nil {
+				return "", err
+			}
+
 		default:
 			log.G(Ctx).Warningf("Silently ignoring unknown volume type of volume: %s in pod %s", volume.Name, podName)
 			return "", nil
@@ -854,7 +1246,6 @@ func produceSLURMScript(
 	podUID := string(pod.UID)
 
 	log.G(Ctx).Info("-- Creating file for the Slurm script")
-	prefix = ""
 	err := os.MkdirAll(path, os.ModePerm)
 	if err != nil {
 		log.G(Ctx).Error(err)
