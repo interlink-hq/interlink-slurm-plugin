@@ -30,8 +30,8 @@ import (
 const (
 	// ReasonSlurmJobTimeout is set on every container when the SLURM job was cancelled
 	// because it reached its configured time limit (state "TO").  The Virtual Kubelet
-	// propagates the reason to the pod status, allowing controllers
-	// (Deployments, ReplicaSets, …) to see the pod as Failed and reschedule it.
+	// propagates this reason to the pod status, setting the pod phase to Failed so that
+	// the pod's restart policy or owning controller (Deployment, Job, …) can act on it.
 	ReasonSlurmJobTimeout        = "SlurmJobTimeout"
 	MessageSlurmJobTimeout       = "SLURM job reached its time limit and was terminated"
 
@@ -363,8 +363,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 					case "TO":
-						// SLURM job reached its time limit; treat as a node-level disruption so that
-						// Kubernetes controllers (Deployments, ReplicaSets, etc.) can reschedule the pod.
+						// SLURM job reached its time limit. Report containers as Terminated with
+						// reason SlurmJobTimeout so the Virtual Kubelet sets the pod phase to Failed
+						// and the pod's restart/owning-controller policy handles resubmission.
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
@@ -375,7 +376,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
-						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); triggering pod rescheduling",
+						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); reporting containers as terminated",
 							sessionContextMessage, (*h.JIDs)[uid].JID, pod.Namespace, pod.Name)
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
