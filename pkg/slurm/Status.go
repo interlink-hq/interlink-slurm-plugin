@@ -404,14 +404,14 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						// SLURM job was killed due to an out-of-memory condition.
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
+						for _, ct := range pod.Spec.Containers {
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
