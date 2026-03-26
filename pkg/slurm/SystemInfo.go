@@ -23,7 +23,7 @@ type SystemInfoResponse struct {
 	Error          string `json:"error,omitempty"`
 }
 
-// SystemInfoHandler provides a health check endpoint that includes sinfo -s output
+// SystemInfoHandler provides a health check endpoint that includes sinfo resource availability output
 // This allows monitoring the SLURM cluster status and node availability
 func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
@@ -41,7 +41,7 @@ func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Reques
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Test SLURM connectivity using sinfo -s command
+	// Test SLURM connectivity and retrieve resource availability using sinfo
 	sinfoOutput, err := h.getSinfoSummary()
 	if err != nil {
 		log.G(h.Ctx).Warning("Failed to execute sinfo command: ", err)
@@ -51,7 +51,7 @@ func (h *SidecarHandler) SystemInfoHandler(w http.ResponseWriter, r *http.Reques
 	} else {
 		response.SlurmConnected = true
 		response.SinfoOutput = sinfoOutput
-		log.G(h.Ctx).Debug("sinfo -s output: ", sinfoOutput)
+		log.G(h.Ctx).Debug("sinfo resource availability output: ", sinfoOutput)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
