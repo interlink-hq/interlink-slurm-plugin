@@ -3,8 +3,7 @@ package slurm
 import (
 	"regexp"
 	"testing"
-
-	v1 "k8s.io/api/core/v1"
+	"time"
 )
 
 // TestSlurmStateRegex validates that all expected SLURM state codes, including the
@@ -88,67 +87,92 @@ func TestExitCodeRegexForTimeout(t *testing.T) {
 	}
 }
 
-// TestTimeoutContainerStatus verifies that the exported constants used in the "TO" case
-// of StatusHandler produce a well-formed ContainerStatus with the correct Reason and
-// Message values.  This ensures the constants and the actual construction code stay in sync.
-func TestTimeoutContainerStatus(t *testing.T) {
-	cs := v1.ContainerStatus{
-		Name: "test",
-		State: v1.ContainerState{
-			Terminated: &v1.ContainerStateTerminated{
-				ExitCode: 15,
-				Reason:   ReasonSlurmJobTimeout,
-				Message:  MessageSlurmJobTimeout,
-			},
-		},
-		Ready: false,
-	}
+// TestTerminatedContainerStatusTO verifies that terminatedContainerStatus, the helper
+// used in the "TO" case of StatusHandler, produces a ContainerStatus with
+// Reason=ReasonSlurmJobTimeout and Message=MessageSlurmJobTimeout.
+func TestTerminatedContainerStatusTO(t *testing.T) {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	finish := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	cs := terminatedContainerStatus("test", start, finish, 15, ReasonSlurmJobTimeout, MessageSlurmJobTimeout)
 
-	if cs.State.Terminated == nil {
-		t.Fatal("expected Terminated state, got nil")
-	}
-	if cs.State.Terminated.Reason != ReasonSlurmJobTimeout {
-		t.Errorf("Reason = %q, want %q", cs.State.Terminated.Reason, ReasonSlurmJobTimeout)
-	}
-	if cs.State.Terminated.Message != MessageSlurmJobTimeout {
-		t.Errorf("Message = %q, want %q", cs.State.Terminated.Message, MessageSlurmJobTimeout)
-	}
-	if cs.State.Terminated.ExitCode != 15 {
-		t.Errorf("ExitCode = %d, want 15 (SIGTERM)", cs.State.Terminated.ExitCode)
+	if cs.Name != "test" {
+		t.Errorf("Name = %q, want %q", cs.Name, "test")
 	}
 	if cs.Ready {
-		t.Error("Ready should be false for a timed-out container")
+		t.Error("Ready should be false")
+	}
+	term := cs.State.Terminated
+	if term == nil {
+		t.Fatal("expected Terminated state, got nil")
+	}
+	if term.Reason != ReasonSlurmJobTimeout {
+		t.Errorf("Reason = %q, want %q", term.Reason, ReasonSlurmJobTimeout)
+	}
+	if term.Message != MessageSlurmJobTimeout {
+		t.Errorf("Message = %q, want %q", term.Message, MessageSlurmJobTimeout)
+	}
+	if term.ExitCode != 15 {
+		t.Errorf("ExitCode = %d, want 15", term.ExitCode)
+	}
+	if !term.StartedAt.Time.Equal(start) {
+		t.Errorf("StartedAt = %v, want %v", term.StartedAt.Time, start)
+	}
+	if !term.FinishedAt.Time.Equal(finish) {
+		t.Errorf("FinishedAt = %v, want %v", term.FinishedAt.Time, finish)
 	}
 }
 
-// TestOOMContainerStatus verifies that the exported constants used in the "OOM" case of
-// StatusHandler produce a well-formed ContainerStatus with the Kubernetes-conventional
-// "OOMKilled" reason so existing tooling can identify OOM terminations.
-func TestOOMContainerStatus(t *testing.T) {
-	cs := v1.ContainerStatus{
-		Name: "test",
-		State: v1.ContainerState{
-			Terminated: &v1.ContainerStateTerminated{
-				ExitCode: 137,
-				Reason:   ReasonOOMKilled,
-				Message:  MessageOOMKilled,
-			},
-		},
-		Ready: false,
-	}
+// TestTerminatedContainerStatusOOM verifies that terminatedContainerStatus, the helper
+// used in the "OOM" case of StatusHandler, produces a ContainerStatus with
+// Reason=ReasonOOMKilled (the Kubernetes convention) and Message=MessageOOMKilled.
+func TestTerminatedContainerStatusOOM(t *testing.T) {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	finish := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
+	cs := terminatedContainerStatus("mycontainer", start, finish, 9, ReasonOOMKilled, MessageOOMKilled)
 
-	if cs.State.Terminated == nil {
+	if cs.Name != "mycontainer" {
+		t.Errorf("Name = %q, want %q", cs.Name, "mycontainer")
+	}
+	if cs.Ready {
+		t.Error("Ready should be false")
+	}
+	term := cs.State.Terminated
+	if term == nil {
 		t.Fatal("expected Terminated state, got nil")
 	}
 	// "OOMKilled" is the Kubernetes convention used by the kubelet itself.
-	const k8sOOMReason = "OOMKilled"
-	if cs.State.Terminated.Reason != k8sOOMReason {
-		t.Errorf("Reason = %q, want %q (Kubernetes convention)", cs.State.Terminated.Reason, k8sOOMReason)
+	if term.Reason != "OOMKilled" {
+		t.Errorf("Reason = %q, want %q (Kubernetes convention)", term.Reason, "OOMKilled")
 	}
-	if cs.State.Terminated.Message != MessageOOMKilled {
-		t.Errorf("Message = %q, want %q", cs.State.Terminated.Message, MessageOOMKilled)
+	if term.Message != MessageOOMKilled {
+		t.Errorf("Message = %q, want %q", term.Message, MessageOOMKilled)
 	}
-	if cs.Ready {
-		t.Error("Ready should be false for an OOM-killed container")
+	if term.ExitCode != 9 {
+		t.Errorf("ExitCode = %d, want 9", term.ExitCode)
+	}
+	if !term.StartedAt.Time.Equal(start) {
+		t.Errorf("StartedAt = %v, want %v", term.StartedAt.Time, start)
+	}
+	if !term.FinishedAt.Time.Equal(finish) {
+		t.Errorf("FinishedAt = %v, want %v", term.FinishedAt.Time, finish)
+	}
+}
+
+// TestTerminatedContainerStatusNoReason verifies that terminatedContainerStatus works
+// for ordinary termination cases (CD/F/ST/default) where no named reason is needed.
+func TestTerminatedContainerStatusNoReason(t *testing.T) {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	finish := time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC)
+	cs := terminatedContainerStatus("worker", start, finish, 0, "", "")
+
+	term := cs.State.Terminated
+	if term == nil {
+		t.Fatal("expected Terminated state, got nil")
+	}
+	if term.Reason != "" {
+		t.Errorf("Reason = %q, want empty string for ordinary termination", term.Reason)
+	}
+	if term.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", term.ExitCode)
 	}
 }

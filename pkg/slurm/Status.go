@@ -50,6 +50,26 @@ const (
 	SlurmExitCodePattern = `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
 )
 
+// terminatedContainerStatus builds a ContainerStatus with a Terminated state for a
+// container that has finished (successfully or otherwise).  reason and message are
+// surfaced verbatim in ContainerStateTerminated; pass empty strings when no
+// named reason is needed (e.g. for ordinary CD/F/ST/default cases).
+func terminatedContainerStatus(ctName string, startTime, finishTime time.Time, exitCode int32, reason, message string) v1.ContainerStatus {
+	return v1.ContainerStatus{
+		Name: ctName,
+		State: v1.ContainerState{
+			Terminated: &v1.ContainerStateTerminated{
+				StartedAt:  metav1.Time{Time: startTime},
+				FinishedAt: metav1.Time{Time: finishTime},
+				ExitCode:   exitCode,
+				Reason:     reason,
+				Message:    message,
+			},
+		},
+		Ready: false,
+	}
+}
+
 // StatusHandler performs a squeue --me and uses regular expressions to get the running Jobs' status
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
@@ -392,19 +412,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								log.G(h.Ctx).Error(err)
 								continue
 							}
-							containerStatus := v1.ContainerStatus{
-								Name: ct.Name,
-								State: v1.ContainerState{
-									Terminated: &v1.ContainerStateTerminated{
-										StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
-										FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime},
-										ExitCode:   exitCode,
-										Reason:     ReasonSlurmJobTimeout,
-										Message:    MessageSlurmJobTimeout,
-									},
-								},
-								Ready: false,
-							}
+							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonSlurmJobTimeout, MessageSlurmJobTimeout)
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
@@ -425,19 +433,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								log.G(h.Ctx).Error(err)
 								continue
 							}
-							containerStatus := v1.ContainerStatus{
-								Name: ct.Name,
-								State: v1.ContainerState{
-									Terminated: &v1.ContainerStateTerminated{
-										StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
-										FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime},
-										ExitCode:   exitCode,
-										Reason:     ReasonOOMKilled,
-										Message:    MessageOOMKilled,
-									},
-								},
-								Ready: false,
-							}
+							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonOOMKilled, MessageOOMKilled)
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
