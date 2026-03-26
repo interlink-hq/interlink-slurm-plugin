@@ -24,6 +24,23 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
+// Reason and message strings surfaced in ContainerStateTerminated for SLURM-specific
+// termination causes.  Defining them as constants lets tests reference the actual values
+// used at runtime rather than independently-maintained string literals.
+const (
+	// ReasonSlurmJobTimeout is set on every container when the SLURM job was cancelled
+	// because it reached its configured time limit (state "TO").  The Virtual Kubelet
+	// propagates the reason to the pod status, allowing controllers
+	// (Deployments, ReplicaSets, …) to see the pod as Failed and reschedule it.
+	ReasonSlurmJobTimeout        = "SlurmJobTimeout"
+	MessageSlurmJobTimeout       = "SLURM job reached its time limit and was terminated"
+
+	// ReasonOOMKilled matches the Kubernetes convention for out-of-memory terminations
+	// (state "OOM") so that existing tooling can identify OOM-killed containers.
+	ReasonOOMKilled        = "OOMKilled"
+	MessageOOMKilled       = "SLURM job was killed due to out-of-memory condition"
+)
+
 // StatusHandler performs a squeue --me and uses regular expressions to get the running Jobs' status
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
@@ -159,7 +176,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 					resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 				} else {
-					statePattern := `(CD|CG|F|PD|PR|R|S|ST)`
+					statePattern := `(CD|CG|F|OOM|PD|PR|R|ST|S|TO)`
 					stateRe := regexp.MustCompile(statePattern)
 					stateMatch := stateRe.FindString(execReturn.Stdout)
 
@@ -342,6 +359,77 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}, FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime}, ExitCode: exitCode}}, Ready: false}
+							containerStatuses = append(containerStatuses, containerStatus)
+						}
+						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
+					case "TO":
+						// SLURM job reached its time limit; treat as a node-level disruption so that
+						// Kubernetes controllers (Deployments, ReplicaSets, etc.) can reschedule the pod.
+						if (*h.JIDs)[uid].EndTime.IsZero() {
+							(*h.JIDs)[uid].EndTime = timeNow
+							f, err := os.Create(path + "/FinishedAt.time")
+							if err != nil {
+								statusCode = http.StatusInternalServerError
+								h.handleError(spanCtx, w, statusCode, err)
+								return
+							}
+							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
+						}
+						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); triggering pod rescheduling",
+							sessionContextMessage, (*h.JIDs)[uid].JID, pod.Namespace, pod.Name)
+						for _, ct := range pod.Spec.Containers {
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							if err != nil {
+								log.G(h.Ctx).Error(err)
+								continue
+							}
+							containerStatus := v1.ContainerStatus{
+								Name: ct.Name,
+								State: v1.ContainerState{
+									Terminated: &v1.ContainerStateTerminated{
+										StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
+										FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime},
+										ExitCode:   exitCode,
+										Reason:     ReasonSlurmJobTimeout,
+										Message:    MessageSlurmJobTimeout,
+									},
+								},
+								Ready: false,
+							}
+							containerStatuses = append(containerStatuses, containerStatus)
+						}
+						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
+					case "OOM":
+						// SLURM job was killed due to an out-of-memory condition.
+						if (*h.JIDs)[uid].EndTime.IsZero() {
+							(*h.JIDs)[uid].EndTime = timeNow
+							f, err := os.Create(path + "/FinishedAt.time")
+							if err != nil {
+								statusCode = http.StatusInternalServerError
+								h.handleError(spanCtx, w, statusCode, err)
+								return
+							}
+							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
+						}
+						for _, ct := range pod.Spec.Containers {
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							if err != nil {
+								log.G(h.Ctx).Error(err)
+								continue
+							}
+							containerStatus := v1.ContainerStatus{
+								Name: ct.Name,
+								State: v1.ContainerState{
+									Terminated: &v1.ContainerStateTerminated{
+										StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
+										FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime},
+										ExitCode:   exitCode,
+										Reason:     ReasonOOMKilled,
+										Message:    MessageOOMKilled,
+									},
+								},
+								Ready: false,
+							}
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
