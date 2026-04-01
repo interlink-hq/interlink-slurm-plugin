@@ -58,7 +58,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If no pods are requested, return sinfo resource availability output
+	// If no pods are requested, return sinfo -s output
 	if len(req) == 0 {
 		sinfoOutput, err := h.getSinfoSummary()
 		if err != nil {
@@ -72,7 +72,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(sinfoOutput))
-		log.G(h.Ctx).Info("Returned sinfo resource availability output for empty pod list")
+		log.G(h.Ctx).Info("Returned sinfo -s output for empty pod list")
 		return
 	}
 
@@ -399,14 +399,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getSinfoSummary executes 'sinfo --noheader -o "%P %C %m %G"' and returns the output.
-// The format shows per-partition resource availability:
-//   - %P: partition name
-//   - %C: CPUs by state (allocated/idle/other/total)
-//   - %m: memory in MB
-//   - %G: generic resources (e.g. GPUs)
+// getSinfoSummary executes 'sinfo -s' command and returns the output
 func (h *SidecarHandler) getSinfoSummary() (string, error) {
-	cmd := []string{"--noheader", "-o", "%P %C %m %G"}
+	cmd := []string{"-s"}
 	shell := exec.ExecTask{
 		Command: h.Config.Sinfopath,
 		Args:    cmd,
