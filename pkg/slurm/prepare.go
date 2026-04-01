@@ -1849,12 +1849,17 @@ func prepareImage(Ctx context.Context, config SlurmConfig, metadata metav1.Objec
 
 	// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
 	// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
+	// Check if the image already has a URI scheme (e.g., docker://, oras://, library://, shub://)
+	// to avoid double-prefixing (e.g., docker://oras://...).
+	hasScheme := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*://`).MatchString(image)
 	if strings.HasPrefix(image, "/") {
 		log.G(Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
-	} else if !strings.HasPrefix(image, imagePrefix) {
+	} else if hasScheme {
+		log.G(Ctx).Infof("image %s already has a URI scheme. Prefix won't be added.", image)
+	} else if imagePrefix != "" {
 		image = imagePrefix + containerImage
 	} else {
-		log.G(Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
+		log.G(Ctx).Warningf("imagePrefix is empty and image %s has no URI scheme. Image will be used as-is.", image)
 	}
 	return image
 }

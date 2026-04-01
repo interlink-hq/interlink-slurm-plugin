@@ -146,6 +146,51 @@ func TestPrepareImage(t *testing.T) {
 			containerImage:   "docker://nginx:alpine",
 			expectedContains: "docker://nginx:alpine",
 		},
+		{
+			name: "oras image not double-prefixed with docker",
+			config: SlurmConfig{
+				ImagePrefix: "docker://",
+			},
+			metadata:         metav1.ObjectMeta{},
+			containerImage:   "oras://myregistry.example.com/myimage:v1",
+			expectedContains: "oras://myregistry.example.com/myimage:v1",
+		},
+		{
+			name: "library image not double-prefixed",
+			config: SlurmConfig{
+				ImagePrefix: "docker://",
+			},
+			metadata:         metav1.ObjectMeta{},
+			containerImage:   "library://user/collection/image:tag",
+			expectedContains: "library://user/collection/image:tag",
+		},
+		{
+			name: "shub image not double-prefixed",
+			config: SlurmConfig{
+				ImagePrefix: "docker://",
+			},
+			metadata:         metav1.ObjectMeta{},
+			containerImage:   "shub://vsoch/hello-world",
+			expectedContains: "shub://vsoch/hello-world",
+		},
+		{
+			name: "empty prefix with plain image",
+			config: SlurmConfig{
+				ImagePrefix: "",
+			},
+			metadata:         metav1.ObjectMeta{},
+			containerImage:   "busybox:1.35",
+			expectedContains: "busybox:1.35",
+		},
+		{
+			name: "empty prefix with oras image",
+			config: SlurmConfig{
+				ImagePrefix: "",
+			},
+			metadata:         metav1.ObjectMeta{},
+			containerImage:   "oras://myregistry.example.com/myimage:latest",
+			expectedContains: "oras://myregistry.example.com/myimage:latest",
+		},
 	}
 
 	for _, tt := range tests {
