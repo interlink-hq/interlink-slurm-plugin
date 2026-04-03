@@ -132,22 +132,42 @@ type ContainerCommand struct {
 	startupProbes    []ProbeCommand
 }
 
-// NodeResources represents the current resource availability in the SLURM cluster.
-// It is returned by the /status endpoint when called with an empty pod list (the ping
-// path), allowing the interlink core and virtual kubelet to update the virtual node's
-// advertised capacity so that it reflects the actual cluster occupancy.
-type NodeResources struct {
-	// CPUTotalCores is the total number of CPU cores across all SLURM nodes.
-	CPUTotalCores int64 `json:"cpu_total_cores"`
-	// CPUUsedCores is the number of CPU cores currently allocated to running jobs.
-	CPUUsedCores int64 `json:"cpu_used_cores"`
-	// MemoryTotalBytes is the total installed memory across all SLURM nodes, in bytes.
-	MemoryTotalBytes int64 `json:"memory_total_bytes"`
-	// MemoryUsedBytes is the memory currently allocated to running jobs, in bytes.
-	MemoryUsedBytes int64 `json:"memory_used_bytes"`
-	// MaxPods is an upper bound on the number of concurrent pods (SLURM jobs) the
-	// cluster can accept.  When zero the consumer should use its own default.
-	MaxPods int64 `json:"max_pods,omitempty"`
+// PingResponse represents the optional structured response from the plugin ping path.
+// Aligned with interlink-hq/interLink#516: when the interlink VK parses a successful
+// ping response it tries to unmarshal the body as PingResponse; if a non-nil Resources
+// field is present it calls updateNodeResources() so that the virtual node's Capacity
+// and Allocatable fields are kept in sync with the SLURM cluster state.
+//
+// TODO: Replace these locally-defined types with the upstream commonIL.PingResponse,
+// commonIL.ResourcesResponse, and commonIL.AcceleratorResponse once
+// interlink-hq/interLink#516 is merged and the interlink dependency is updated.
+type PingResponse struct {
+	// Status is a short string indicating the plug-in health (e.g. "ok").
+	Status string `json:"status,omitempty"`
+	// Resources optionally contains the cluster resource availability that the VK
+	// should use to update the virtual node capacity.
+	Resources *ResourcesResponse `json:"resources,omitempty"`
+}
+
+// ResourcesResponse carries Kubernetes-quantity strings for each resource dimension.
+// Omitted fields leave the current node capacity unchanged (partial updates are fine).
+type ResourcesResponse struct {
+	// CPU is the total available CPU as a Kubernetes quantity string (e.g. "128", "4000m").
+	CPU string `json:"cpu,omitempty"`
+	// Memory is the total available memory as a Kubernetes quantity string (e.g. "512Gi", "256000Mi").
+	Memory string `json:"memory,omitempty"`
+	// Pods is the maximum number of concurrent pods the cluster can accept (e.g. "1000").
+	Pods string `json:"pods,omitempty"`
+	// Accelerators lists hardware accelerators (GPUs, FPGAs, …) with their available counts.
+	Accelerators []AcceleratorResponse `json:"accelerators,omitempty"`
+}
+
+// AcceleratorResponse represents one type of hardware accelerator reported by the plugin.
+type AcceleratorResponse struct {
+	// ResourceType is the Kubernetes extended-resource name (e.g. "nvidia.com/gpu").
+	ResourceType string `json:"resourceType"`
+	// Available is the count expressed as a Kubernetes quantity string (e.g. "8").
+	Available string `json:"available"`
 }
 
 // slurmNodeList is the minimal schema needed to decode the top-level `sinfo --json`
@@ -160,9 +180,9 @@ type slurmNodeList struct {
 // slurmJSONNode represents one node entry from `sinfo --json`.  Field names follow
 // SLURM's own JSON keys (snake_case).
 type slurmJSONNode struct {
-	CPUs       int64 `json:"cpus"`
-	AllocCPUs  int64 `json:"alloc_cpus"`
-	RealMemory int64 `json:"real_memory"`  // MB
-	FreeMemory int64 `json:"free_memory"`  // MB
+	CPUs        int64 `json:"cpus"`
+	AllocCPUs   int64 `json:"alloc_cpus"`
+	RealMemory  int64 `json:"real_memory"`  // MB
+	FreeMemory  int64 `json:"free_memory"`  // MB
 	AllocMemory int64 `json:"alloc_memory"` // MB
 }

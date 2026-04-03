@@ -126,7 +126,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(resourceBytes)
-		log.G(h.Ctx).Info("Returned cluster resource information for empty pod list (ping)")
+		log.G(h.Ctx).Info("Returned PingResponse with cluster resource availability (ping path)")
 		return
 	}
 
@@ -517,11 +517,12 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 }
 
 // getClusterResources queries SLURM for the current resource usage of the cluster and
-// returns a NodeResources summary.  It first attempts to use `sinfo --json` (available
-// in SLURM >= 20.11) to get accurate per-node allocation data.  When the JSON output
-// is unavailable or cannot be parsed it falls back to `sinfo --noheader --format=…`
-// text parsing, which reports totals but cannot determine per-node CPU allocation.
-func (h *SidecarHandler) getClusterResources() (NodeResources, error) {
+// returns a PingResponse aligned with interlink-hq/interLink#516.  It first attempts
+// to use `sinfo --json` (available in SLURM >= 20.11) to get accurate per-node
+// allocation data.  When the JSON output is unavailable or cannot be parsed it falls
+// back to `sinfo --noheader --format=…` text parsing, which can report totals and
+// free memory but cannot determine per-node CPU allocation.
+func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
 	resources, err := h.getClusterResourcesFromJSON()
 	if err != nil {
 		log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
@@ -531,7 +532,7 @@ func (h *SidecarHandler) getClusterResources() (NodeResources, error) {
 }
 
 // getClusterResourcesFromJSON uses `sinfo --json` to obtain per-node resource data.
-func (h *SidecarHandler) getClusterResourcesFromJSON() (NodeResources, error) {
+func (h *SidecarHandler) getClusterResourcesFromJSON() (PingResponse, error) {
 	shell := exec.ExecTask{
 		Command: h.Config.Sinfopath,
 		Args:    []string{"--json"},
@@ -539,18 +540,18 @@ func (h *SidecarHandler) getClusterResourcesFromJSON() (NodeResources, error) {
 	}
 	execReturn, err := shell.Execute()
 	if err != nil {
-		return NodeResources{}, fmt.Errorf("sinfo --json execution failed: %w", err)
+		return PingResponse{}, fmt.Errorf("sinfo --json execution failed: %w", err)
 	}
 	if execReturn.Stderr != "" {
-		return NodeResources{}, fmt.Errorf("sinfo --json stderr: %s", execReturn.Stderr)
+		return PingResponse{}, fmt.Errorf("sinfo --json stderr: %s", execReturn.Stderr)
 	}
 	return parseClusterResourcesFromJSON(execReturn.Stdout)
 }
 
 // getClusterResourcesFromText uses `sinfo --noheader --format=…` to obtain per-node
 // resource totals.  Because plain-text sinfo output does not expose per-node allocated
-// CPU counts, CPUUsedCores is left at zero.
-func (h *SidecarHandler) getClusterResourcesFromText() (NodeResources, error) {
+// CPU counts, the CPU field reflects the total installed CPUs.
+func (h *SidecarHandler) getClusterResourcesFromText() (PingResponse, error) {
 	// %c = CPUs on node, %m = real memory (MB), %e = free memory (MB).
 	// Field separator is a pipe so that values with spaces still parse correctly.
 	shell := exec.ExecTask{
@@ -560,24 +561,26 @@ func (h *SidecarHandler) getClusterResourcesFromText() (NodeResources, error) {
 	}
 	execReturn, err := shell.Execute()
 	if err != nil {
-		return NodeResources{}, fmt.Errorf("sinfo execution failed: %w", err)
+		return PingResponse{}, fmt.Errorf("sinfo execution failed: %w", err)
 	}
 	if execReturn.Stderr != "" {
-		return NodeResources{}, fmt.Errorf("sinfo stderr: %s", execReturn.Stderr)
+		return PingResponse{}, fmt.Errorf("sinfo stderr: %s", execReturn.Stderr)
 	}
 	return parseClusterResourcesFromText(execReturn.Stdout)
 }
 
 // parseClusterResourcesFromJSON parses the stdout of `sinfo --json` into a
-// NodeResources value.  It is a standalone function so it can be exercised in tests
-// without executing an actual sinfo binary.
-func parseClusterResourcesFromJSON(stdout string) (NodeResources, error) {
+// PingResponse value aligned with interlink-hq/interLink#516.  It is a standalone
+// function so it can be exercised in tests without executing an actual sinfo binary.
+// CPU and memory values are expressed as Kubernetes quantity strings so the VK can
+// call resource.ParseQuantity() on them directly.
+func parseClusterResourcesFromJSON(stdout string) (PingResponse, error) {
 	var parsed slurmNodeList
 	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		return NodeResources{}, fmt.Errorf("sinfo --json parse error: %w", err)
+		return PingResponse{}, fmt.Errorf("sinfo --json parse error: %w", err)
 	}
 	if len(parsed.Nodes) == 0 {
-		return NodeResources{}, fmt.Errorf("sinfo --json returned no nodes")
+		return PingResponse{}, fmt.Errorf("sinfo --json returned no nodes")
 	}
 
 	var totalCPU, allocCPU, totalMemMB, usedMemMB int64
@@ -593,19 +596,26 @@ func parseClusterResourcesFromJSON(stdout string) (NodeResources, error) {
 		}
 	}
 
-	return NodeResources{
-		CPUTotalCores:    totalCPU,
-		CPUUsedCores:     allocCPU,
-		MemoryTotalBytes: totalMemMB * 1024 * 1024,
-		MemoryUsedBytes:  usedMemMB * 1024 * 1024,
+	return PingResponse{
+		Status: "ok",
+		Resources: &ResourcesResponse{
+			CPU:    fmt.Sprintf("%d", clampToZero(totalCPU-allocCPU)),
+			Memory: fmt.Sprintf("%dMi", clampToZero(totalMemMB-usedMemMB)),
+		},
 	}, nil
 }
 
 // parseClusterResourcesFromText parses the stdout of
-// `sinfo --noheader --format=%c|%m|%e` into a NodeResources value.  Lines that
-// cannot be parsed are silently skipped.  It is a standalone function so it can be
-// exercised in tests without executing an actual sinfo binary.
-func parseClusterResourcesFromText(stdout string) (NodeResources, error) {
+// `sinfo --noheader --format=%c|%m|%e` into a PingResponse value aligned with
+// interlink-hq/interLink#516.  Lines that cannot be parsed are silently skipped.
+// It is a standalone function so it can be exercised in tests without executing an
+// actual sinfo binary.
+//
+// NOTE: unlike parseClusterResourcesFromJSON which reports *available* resources
+// (total minus allocated), this function reports the total installed CPU count and
+// the sum of free memory reported by sinfo.  Plain-text sinfo output does not expose
+// per-node allocated CPU counts, so total CPU is the best approximation available.
+func parseClusterResourcesFromText(stdout string) (PingResponse, error) {
 	var totalCPU, totalMemMB, freeMemMB int64
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -633,10 +643,22 @@ func parseClusterResourcesFromText(stdout string) (NodeResources, error) {
 		freeMemMB += free
 	}
 
-	return NodeResources{
-		CPUTotalCores:    totalCPU,
-		CPUUsedCores:     0, // not derivable from plain-text sinfo output (requires --json or squeue)
-		MemoryTotalBytes: totalMemMB * 1024 * 1024,
-		MemoryUsedBytes:  (totalMemMB - freeMemMB) * 1024 * 1024,
+	return PingResponse{
+		Status: "ok",
+		Resources: &ResourcesResponse{
+			// Total installed CPUs are reported; per-node allocated CPU count is
+			// not available from plain-text sinfo output (requires --json).
+			CPU:    fmt.Sprintf("%d", totalCPU),
+			Memory: fmt.Sprintf("%dMi", freeMemMB),
+		},
 	}, nil
+}
+
+// clampToZero returns val when val >= 0, and 0 otherwise.  It is used to prevent
+// negative resource values that could arise from transient sinfo accounting races.
+func clampToZero(val int64) int64 {
+	if val < 0 {
+		return 0
+	}
+	return val
 }
