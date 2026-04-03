@@ -104,21 +104,29 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If no pods are requested, return sinfo -s output
+	// If no pods are requested, return cluster resource availability as JSON.
+	// This path is triggered by the interlink-api ping call so that the virtual
+	// kubelet can update the node's advertised capacity from the SLURM cluster state.
 	if len(req) == 0 {
-		sinfoOutput, err := h.getSinfoSummary()
+		resources, err := h.getClusterResources()
 		if err != nil {
-			log.G(h.Ctx).Warning("Failed to execute sinfo command: ", err)
+			log.G(h.Ctx).Warning("Failed to query SLURM cluster resources: ", err)
 			statusCode = http.StatusInternalServerError
 			h.handleError(spanCtx, w, statusCode, err)
 			return
 		}
 
-		// Return sinfo output as plain text
-		w.Header().Set("Content-Type", "text/plain")
+		resourceBytes, err := json.Marshal(resources)
+		if err != nil {
+			statusCode = http.StatusInternalServerError
+			h.handleError(spanCtx, w, statusCode, err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(sinfoOutput))
-		log.G(h.Ctx).Info("Returned sinfo -s output for empty pod list")
+		w.Write(resourceBytes)
+		log.G(h.Ctx).Info("Returned cluster resource information for empty pod list (ping)")
 		return
 	}
 
@@ -506,4 +514,129 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 	}
 
 	return execReturn.Stdout, nil
+}
+
+// getClusterResources queries SLURM for the current resource usage of the cluster and
+// returns a NodeResources summary.  It first attempts to use `sinfo --json` (available
+// in SLURM >= 20.11) to get accurate per-node allocation data.  When the JSON output
+// is unavailable or cannot be parsed it falls back to `sinfo --noheader --format=…`
+// text parsing, which reports totals but cannot determine per-node CPU allocation.
+func (h *SidecarHandler) getClusterResources() (NodeResources, error) {
+	resources, err := h.getClusterResourcesFromJSON()
+	if err != nil {
+		log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
+		return h.getClusterResourcesFromText()
+	}
+	return resources, nil
+}
+
+// getClusterResourcesFromJSON uses `sinfo --json` to obtain per-node resource data.
+func (h *SidecarHandler) getClusterResourcesFromJSON() (NodeResources, error) {
+	shell := exec.ExecTask{
+		Command: h.Config.Sinfopath,
+		Args:    []string{"--json"},
+		Shell:   true,
+	}
+	execReturn, err := shell.Execute()
+	if err != nil {
+		return NodeResources{}, fmt.Errorf("sinfo --json execution failed: %w", err)
+	}
+	if execReturn.Stderr != "" {
+		return NodeResources{}, fmt.Errorf("sinfo --json stderr: %s", execReturn.Stderr)
+	}
+	return parseClusterResourcesFromJSON(execReturn.Stdout)
+}
+
+// getClusterResourcesFromText uses `sinfo --noheader --format=…` to obtain per-node
+// resource totals.  Because plain-text sinfo output does not expose per-node allocated
+// CPU counts, CPUUsedCores is left at zero.
+func (h *SidecarHandler) getClusterResourcesFromText() (NodeResources, error) {
+	// %c = CPUs on node, %m = real memory (MB), %e = free memory (MB).
+	// Field separator is a pipe so that values with spaces still parse correctly.
+	shell := exec.ExecTask{
+		Command: h.Config.Sinfopath,
+		Args:    []string{"--noheader", "--format=%c|%m|%e"},
+		Shell:   true,
+	}
+	execReturn, err := shell.Execute()
+	if err != nil {
+		return NodeResources{}, fmt.Errorf("sinfo execution failed: %w", err)
+	}
+	if execReturn.Stderr != "" {
+		return NodeResources{}, fmt.Errorf("sinfo stderr: %s", execReturn.Stderr)
+	}
+	return parseClusterResourcesFromText(execReturn.Stdout)
+}
+
+// parseClusterResourcesFromJSON parses the stdout of `sinfo --json` into a
+// NodeResources value.  It is a standalone function so it can be exercised in tests
+// without executing an actual sinfo binary.
+func parseClusterResourcesFromJSON(stdout string) (NodeResources, error) {
+	var parsed slurmNodeList
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		return NodeResources{}, fmt.Errorf("sinfo --json parse error: %w", err)
+	}
+	if len(parsed.Nodes) == 0 {
+		return NodeResources{}, fmt.Errorf("sinfo --json returned no nodes")
+	}
+
+	var totalCPU, allocCPU, totalMemMB, usedMemMB int64
+	for _, node := range parsed.Nodes {
+		totalCPU += node.CPUs
+		allocCPU += node.AllocCPUs
+		totalMemMB += node.RealMemory
+		// Prefer explicit alloc_memory when available; fall back to real_memory - free_memory.
+		if node.AllocMemory > 0 {
+			usedMemMB += node.AllocMemory
+		} else {
+			usedMemMB += node.RealMemory - node.FreeMemory
+		}
+	}
+
+	return NodeResources{
+		CPUTotalCores:    totalCPU,
+		CPUUsedCores:     allocCPU,
+		MemoryTotalBytes: totalMemMB * 1024 * 1024,
+		MemoryUsedBytes:  usedMemMB * 1024 * 1024,
+	}, nil
+}
+
+// parseClusterResourcesFromText parses the stdout of
+// `sinfo --noheader --format=%c|%m|%e` into a NodeResources value.  Lines that
+// cannot be parsed are silently skipped.  It is a standalone function so it can be
+// exercised in tests without executing an actual sinfo binary.
+func parseClusterResourcesFromText(stdout string) (NodeResources, error) {
+	var totalCPU, totalMemMB, freeMemMB int64
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		if err != nil {
+			continue
+		}
+		mem, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if err != nil {
+			continue
+		}
+		free, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		if err != nil {
+			continue
+		}
+		totalCPU += cpu
+		totalMemMB += mem
+		freeMemMB += free
+	}
+
+	return NodeResources{
+		CPUTotalCores:    totalCPU,
+		CPUUsedCores:     0, // not derivable from plain-text sinfo output (requires --json or squeue)
+		MemoryTotalBytes: totalMemMB * 1024 * 1024,
+		MemoryUsedBytes:  (totalMemMB - freeMemMB) * 1024 * 1024,
+	}, nil
 }

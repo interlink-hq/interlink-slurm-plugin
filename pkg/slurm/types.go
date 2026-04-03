@@ -131,3 +131,38 @@ type ContainerCommand struct {
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
 }
+
+// NodeResources represents the current resource availability in the SLURM cluster.
+// It is returned by the /status endpoint when called with an empty pod list (the ping
+// path), allowing the interlink core and virtual kubelet to update the virtual node's
+// advertised capacity so that it reflects the actual cluster occupancy.
+type NodeResources struct {
+	// CPUTotalCores is the total number of CPU cores across all SLURM nodes.
+	CPUTotalCores int64 `json:"cpu_total_cores"`
+	// CPUUsedCores is the number of CPU cores currently allocated to running jobs.
+	CPUUsedCores int64 `json:"cpu_used_cores"`
+	// MemoryTotalBytes is the total installed memory across all SLURM nodes, in bytes.
+	MemoryTotalBytes int64 `json:"memory_total_bytes"`
+	// MemoryUsedBytes is the memory currently allocated to running jobs, in bytes.
+	MemoryUsedBytes int64 `json:"memory_used_bytes"`
+	// MaxPods is an upper bound on the number of concurrent pods (SLURM jobs) the
+	// cluster can accept.  When zero the consumer should use its own default.
+	MaxPods int64 `json:"max_pods,omitempty"`
+}
+
+// slurmNodeList is the minimal schema needed to decode the top-level `sinfo --json`
+// response.  Only the fields used by getClusterResources are listed; the rest are
+// silently ignored via `json:"-"` / omission.
+type slurmNodeList struct {
+	Nodes []slurmJSONNode `json:"nodes"`
+}
+
+// slurmJSONNode represents one node entry from `sinfo --json`.  Field names follow
+// SLURM's own JSON keys (snake_case).
+type slurmJSONNode struct {
+	CPUs       int64 `json:"cpus"`
+	AllocCPUs  int64 `json:"alloc_cpus"`
+	RealMemory int64 `json:"real_memory"`  // MB
+	FreeMemory int64 `json:"free_memory"`  // MB
+	AllocMemory int64 `json:"alloc_memory"` // MB
+}
