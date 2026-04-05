@@ -141,7 +141,14 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		for _, pod := range req {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
-			path := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
+			// Resolve the job working directory: prefer in-memory cache, then
+			// fall back to the pod annotation so the path is correct even when
+			// the JIDs cache was wiped (e.g. after a sidecar restart where
+			// LoadJIDs failed or the WorkDir.path file was missing on disk).
+			path := getJobWorkDir(h.Config, pod.Annotations, pod.Namespace, uid)
+			if jid, ok := (*h.JIDs)[uid]; ok && jid.WorkDir != "" {
+				path = jid.WorkDir
+			}
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"

@@ -191,7 +191,17 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 		attribute.Bool("opts.timestamps", req.Opts.Timestamps),
 	)
 
-	path := h.Config.DataRootFolder + req.Namespace + "-" + req.PodUID
+	// Resolve the job working directory.
+	// Priority: 1) in-memory JIDs cache  2) WorkDir.path file on disk (survives sidecar restarts)
+	// The metadata directory is always at the default DataRootFolder path and is
+	// the reliable location for the WorkDir.path pointer file.
+	metadataPath := h.Config.DataRootFolder + req.Namespace + "-" + req.PodUID
+	path := metadataPath
+	if jid, ok := (*h.JIDs)[req.PodUID]; ok && jid.WorkDir != "" {
+		path = jid.WorkDir
+	} else if workDirBytes, rdErr := os.ReadFile(metadataPath + "/WorkDir.path"); rdErr == nil && len(workDirBytes) > 0 {
+		path = string(workDirBytes)
+	}
 	containerOutputPath := path + "/run-" + req.ContainerName + ".out"
 	var output []byte
 	if req.Opts.Timestamps {
