@@ -517,31 +517,90 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 }
 
 // getClusterResources queries SLURM for the current resource usage of the cluster and
-// returns a PingResponse aligned with interlink-hq/interLink#516.  It first attempts
-// to use `sinfo --json` (available in SLURM >= 20.11) to get accurate per-node
-// allocation data.  When the JSON output is unavailable or cannot be parsed it falls
-// back to `sinfo --noheader --format=…` text parsing, which can report totals and
-// free memory but cannot determine per-node CPU allocation.
+// returns a PingResponse aligned with interlink-hq/interLink#516.
 //
-// Taints configured in SlurmConfig.Taints are always included in the response so that
-// the VK (interLink#516) can apply them to the virtual node on every heartbeat.
+// Resolution order:
+//  1. If SlurmConfig.ResourceScriptPath is set, run that script and parse its JSON
+//     stdout as a PingResponse.  The script has full control over "resources" and
+//     "taints"; see ResourceScriptPath for the expected output format.
+//  2. Otherwise, try `sinfo --json` (SLURM ≥ 20.11) for accurate per-node
+//     allocation data.
+//  3. If that fails, fall back to `sinfo --noheader --format=…` text parsing.
+//
+// In all cases, taints declared in SlurmConfig.Taints are merged into the response
+// (overriding any taints returned by the custom script) so that static taints
+// configured by the operator are always applied.
 func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
-	resp, err := h.getClusterResourcesFromJSON()
-	if err != nil {
-		log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
-		resp, err = h.getClusterResourcesFromText()
+	var resp PingResponse
+	var err error
+
+	if h.Config.ResourceScriptPath != "" {
+		resp, err = h.getClusterResourcesFromScript()
 		if err != nil {
-			return resp, err
+			log.G(h.Ctx).Warnf("ResourceScriptPath %q failed (%v), falling back to sinfo", h.Config.ResourceScriptPath, err)
+			// Fall through to sinfo-based logic below.
+			resp, err = h.getClusterResourcesFromJSON()
+			if err != nil {
+				log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
+				resp, err = h.getClusterResourcesFromText()
+				if err != nil {
+					return resp, err
+				}
+			}
+		}
+	} else {
+		resp, err = h.getClusterResourcesFromJSON()
+		if err != nil {
+			log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
+			resp, err = h.getClusterResourcesFromText()
+			if err != nil {
+				return resp, err
+			}
 		}
 	}
 
-	// Attach configured taints so the VK can keep the virtual node's taint list in sync.
+	// Static taints from SlurmConfig.Taints always win — they override any taints
+	// returned by the custom script so that operator-configured taints are applied.
 	if len(h.Config.Taints) > 0 {
 		taints := make([]TaintConfig, len(h.Config.Taints))
 		copy(taints, h.Config.Taints)
 		resp.Taints = &taints
 	}
 
+	return resp, nil
+}
+
+// getClusterResourcesFromScript executes the custom script at
+// SlurmConfig.ResourceScriptPath and parses its stdout as a PingResponse JSON.
+// The script is invoked with no arguments; operators should embed all required
+// logic (squeue calls, SSH tunnels, etc.) inside the script itself.
+func (h *SidecarHandler) getClusterResourcesFromScript() (PingResponse, error) {
+	shell := exec.ExecTask{
+		Command: h.Config.ResourceScriptPath,
+		Args:    []string{},
+		Shell:   true,
+	}
+	execReturn, err := shell.Execute()
+	if err != nil {
+		return PingResponse{}, fmt.Errorf("resource script %q execution failed: %w", h.Config.ResourceScriptPath, err)
+	}
+	if execReturn.ExitCode != 0 {
+		return PingResponse{}, fmt.Errorf("resource script %q exited with code %d: %s", h.Config.ResourceScriptPath, execReturn.ExitCode, execReturn.Stderr)
+	}
+	stdout := strings.TrimSpace(execReturn.Stdout)
+	if stdout == "" {
+		return PingResponse{}, fmt.Errorf("resource script %q produced no output", h.Config.ResourceScriptPath)
+	}
+	var resp PingResponse
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		return PingResponse{}, fmt.Errorf("resource script %q output is not valid PingResponse JSON: %w", h.Config.ResourceScriptPath, err)
+	}
+	if resp.Status == "" {
+		resp.Status = "ok"
+	}
+	if resp.Resources != nil {
+		log.G(h.Ctx).Debugf("resource script %q returned: cpu=%s memory=%s", h.Config.ResourceScriptPath, resp.Resources.CPU, resp.Resources.Memory)
+	}
 	return resp, nil
 }
 

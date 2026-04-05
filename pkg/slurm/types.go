@@ -88,6 +88,17 @@ type SlurmConfig struct {
 	// on the virtual node via the ping response.  The VK (interLink#516) replaces the
 	// node's non-system taints with this list on every heartbeat.
 	Taints []TaintConfig `yaml:"Taints"`
+	// ResourceScriptPath is an optional path to a script or executable that reports
+	// cluster resource availability.  When set, the script is executed instead of the
+	// built-in sinfo-based resource gathering.  The script must write a JSON object
+	// conforming to the PingResponse schema on stdout (only the "resources" field is
+	// required; "taints" and "status" are optional and, if present, are used as-is
+	// unless overridden by the static Taints list above).  A non-zero exit code or
+	// unparseable output is treated as a transient error and logged.
+	//
+	// Example script output:
+	//   {"status":"ok","resources":{"cpu":"128","memory":"512Gi","pods":"1000"}}
+	ResourceScriptPath string `yaml:"ResourceScriptPath"`
 }
 
 type CreateStruct struct {

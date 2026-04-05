@@ -1,7 +1,9 @@
 package slurm
 
 import (
+"context"
 "encoding/json"
+"os"
 "testing"
 )
 
@@ -411,5 +413,123 @@ t.Fatalf("expected 1 taint, got %d", len(*base.Taints))
 got := (*base.Taints)[0]
 if got.Key != "slurm.interlink/maintenance" || got.Value != "scheduled" || got.Effect != "NoSchedule" {
 t.Errorf("unexpected taint: %+v", got)
+}
+}
+
+// TestGetClusterResourcesFromScript_HappyPath verifies that when ResourceScriptPath
+// is set and the script produces valid PingResponse JSON, getClusterResourcesFromScript
+// parses and returns it correctly.
+func TestGetClusterResourcesFromScript_HappyPath(t *testing.T) {
+// Write a tiny helper script to a temp file.
+scriptBody := `#!/bin/sh
+echo '{"status":"ok","resources":{"cpu":"64","memory":"256Gi","pods":"500"}}'`
+scriptFile, err := os.CreateTemp("", "resource_script_*.sh")
+if err != nil {
+t.Fatalf("failed to create temp script: %v", err)
+}
+defer os.Remove(scriptFile.Name())
+if _, err := scriptFile.WriteString(scriptBody); err != nil {
+t.Fatalf("failed to write temp script: %v", err)
+}
+scriptFile.Close()
+if err := os.Chmod(scriptFile.Name(), 0755); err != nil {
+t.Fatalf("failed to chmod temp script: %v", err)
+}
+
+h := &SidecarHandler{
+Config: SlurmConfig{ResourceScriptPath: scriptFile.Name()},
+Ctx:    context.Background(),
+}
+resp, err := h.getClusterResourcesFromScript()
+if err != nil {
+t.Fatalf("getClusterResourcesFromScript returned error: %v", err)
+}
+if resp.Status != "ok" {
+t.Errorf("Status = %q, want %q", resp.Status, "ok")
+}
+if resp.Resources == nil {
+t.Fatal("Resources is nil")
+}
+if resp.Resources.CPU != "64" {
+t.Errorf("CPU = %q, want %q", resp.Resources.CPU, "64")
+}
+if resp.Resources.Memory != "256Gi" {
+t.Errorf("Memory = %q, want %q", resp.Resources.Memory, "256Gi")
+}
+if resp.Resources.Pods != "500" {
+t.Errorf("Pods = %q, want %q", resp.Resources.Pods, "500")
+}
+}
+
+// TestGetClusterResourcesFromScript_NonZeroExit verifies that a non-zero exit code
+// from the resource script is reported as an error.
+func TestGetClusterResourcesFromScript_NonZeroExit(t *testing.T) {
+scriptBody := "#!/bin/sh\nexit 1"
+scriptFile, err := os.CreateTemp("", "resource_script_fail_*.sh")
+if err != nil {
+t.Fatalf("failed to create temp script: %v", err)
+}
+defer os.Remove(scriptFile.Name())
+scriptFile.WriteString(scriptBody)
+scriptFile.Close()
+os.Chmod(scriptFile.Name(), 0755)
+
+h := &SidecarHandler{
+Config: SlurmConfig{ResourceScriptPath: scriptFile.Name()},
+Ctx:    context.Background(),
+}
+_, err = h.getClusterResourcesFromScript()
+if err == nil {
+t.Error("expected error for non-zero exit code, got nil")
+}
+}
+
+// TestGetClusterResourcesFromScript_InvalidJSON verifies that unparseable output from
+// the resource script is reported as an error.
+func TestGetClusterResourcesFromScript_InvalidJSON(t *testing.T) {
+scriptBody := "#!/bin/sh\necho 'not valid json'"
+scriptFile, err := os.CreateTemp("", "resource_script_badjson_*.sh")
+if err != nil {
+t.Fatalf("failed to create temp script: %v", err)
+}
+defer os.Remove(scriptFile.Name())
+scriptFile.WriteString(scriptBody)
+scriptFile.Close()
+os.Chmod(scriptFile.Name(), 0755)
+
+h := &SidecarHandler{
+Config: SlurmConfig{ResourceScriptPath: scriptFile.Name()},
+Ctx:    context.Background(),
+}
+_, err = h.getClusterResourcesFromScript()
+if err == nil {
+t.Error("expected error for invalid JSON output, got nil")
+}
+}
+
+// TestGetClusterResourcesFromScript_StatusDefaultsToOk verifies that when the script
+// omits the "status" field, it is defaulted to "ok".
+func TestGetClusterResourcesFromScript_StatusDefaultsToOk(t *testing.T) {
+scriptBody := `#!/bin/sh
+echo '{"resources":{"cpu":"8","memory":"32Gi"}}'`
+scriptFile, err := os.CreateTemp("", "resource_script_nostatus_*.sh")
+if err != nil {
+t.Fatalf("failed to create temp script: %v", err)
+}
+defer os.Remove(scriptFile.Name())
+scriptFile.WriteString(scriptBody)
+scriptFile.Close()
+os.Chmod(scriptFile.Name(), 0755)
+
+h := &SidecarHandler{
+Config: SlurmConfig{ResourceScriptPath: scriptFile.Name()},
+Ctx:    context.Background(),
+}
+resp, err := h.getClusterResourcesFromScript()
+if err != nil {
+t.Fatalf("unexpected error: %v", err)
+}
+if resp.Status != "ok" {
+t.Errorf("Status = %q, want \"ok\" (default)", resp.Status)
 }
 }
