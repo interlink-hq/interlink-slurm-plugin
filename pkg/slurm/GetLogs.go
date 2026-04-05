@@ -192,6 +192,9 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	)
 
 	path := h.Config.DataRootFolder + req.Namespace + "-" + req.PodUID
+	if jid, ok := (*h.JIDs)[req.PodUID]; ok && jid.WorkDir != "" {
+		path = jid.WorkDir
+	}
 	containerOutputPath := path + "/run-" + req.ContainerName + ".out"
 	var output []byte
 	if req.Opts.Timestamps {

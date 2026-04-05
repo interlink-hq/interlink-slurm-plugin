@@ -142,6 +142,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
 			path := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
+			if jid, ok := (*h.JIDs)[uid]; ok && jid.WorkDir != "" {
+				path = jid.WorkDir
+			}
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"

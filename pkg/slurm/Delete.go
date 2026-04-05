@@ -49,8 +49,12 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
+	workDir := filesPath
+	if jid, ok := (*h.JIDs)[string(pod.UID)]; ok && jid.WorkDir != "" {
+		workDir = jid.WorkDir
+	}
 
-	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, filesPath)
+	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, workDir)
 
 	if err != nil {
 		statusCode = http.StatusInternalServerError
@@ -58,7 +62,15 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if os.Getenv("SHARED_FS") != "true" {
-		err = os.RemoveAll(filesPath)
+		if workDir != filesPath {
+			err = os.RemoveAll(filesPath)
+			if err != nil {
+				statusCode = http.StatusInternalServerError
+				h.handleError(spanCtx, w, statusCode, err)
+				return
+			}
+		}
+		err = os.RemoveAll(workDir)
 		if err != nil {
 			statusCode = http.StatusInternalServerError
 			h.handleError(spanCtx, w, statusCode, err)

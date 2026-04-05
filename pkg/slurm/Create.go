@@ -56,6 +56,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	containers = append(containers, data.Pod.Spec.Containers...)
 	metadata := data.Pod.ObjectMeta
 	filesPath := h.Config.DataRootFolder + data.Pod.Namespace + "-" + string(data.Pod.UID)
+	workDir := getJobWorkDir(h.Config, metadata.Annotations, data.Pod.Namespace, string(data.Pod.UID))
 
 	// Resolve flavor to apply default CPU and memory
 	flavor, err := resolveFlavor(spanCtx, h.Config, metadata, data.Pod.Spec.Containers)
@@ -124,7 +125,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		resourceLimits.CPU = cpuLimit
 		resourceLimits.Memory = memoryLimit
 
-		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, filesPath)
+		mounts, err := prepareMounts(spanCtx, h.Config, &data, &container, workDir)
 		log.G(h.Ctx).Debug(mounts)
 		if err != nil {
 			statusCode = http.StatusInternalServerError
@@ -134,7 +135,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// prepareEnvs creates a file in the working directory, that must exist. This is created at prepareMounts.
-		envs := prepareEnvs(spanCtx, h.Config, data, container)
+		envs := prepareEnvs(spanCtx, h.Config, data, container, workDir)
 		image = prepareImage(spanCtx, h.Config, metadata, container.Image)
 		commstr1 := prepareRuntimeCommand(h.Config, container, metadata)
 		log.G(h.Ctx).Debug("-- Appending all commands together...")
@@ -199,19 +200,33 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 
 	var path string
 
+	// If workDir differs from filesPath, ensure the working directory exists.
+	if workDir != filesPath {
+		if err = os.MkdirAll(workDir, os.ModePerm); err != nil {
+			log.G(h.Ctx).Error("Failed to create job working directory: ", err)
+			statusCode = http.StatusInternalServerError
+			h.handleError(spanCtx, w, statusCode, err)
+			os.RemoveAll(filesPath)
+			return
+		}
+	}
+
 	if data.JobScript == "" {
 		log.G(h.Ctx).Info("-- No custom job script provided, generating one...")
-		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, workDir, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
 		if err != nil {
 			log.G(h.Ctx).Error(err)
 			os.RemoveAll(filesPath)
+			if workDir != filesPath {
+				os.RemoveAll(workDir)
+			}
 			return
 		}
 	} else {
 
-		pathFile, err := os.Create(filesPath + "/jobScript.sh")
+		pathFile, err := os.Create(workDir + "/jobScript.sh")
 		if err != nil {
-			log.G(h.Ctx).Error("Unable to create file ", path, "/jobScript.sh")
+			log.G(h.Ctx).Error("Unable to create file ", workDir, "/jobScript.sh")
 			log.G(h.Ctx).Error(err)
 			span.AddEvent("Failed to submit the SLURM Job")
 			h.handleError(spanCtx, w, http.StatusInternalServerError, err)
@@ -222,13 +237,13 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		mode := os.FileMode(0770)
 
 		// Change the file mode
-		if err := os.Chmod(filesPath+"/jobScript.sh", mode); err != nil {
+		if err := os.Chmod(workDir+"/jobScript.sh", mode); err != nil {
 			panic(err)
 		}
 
 		_, err = pathFile.Write([]byte(data.JobScript))
 		if err != nil {
-			log.G(h.Ctx).Error("Unable to write to file ", path, "/jobScript.sh")
+			log.G(h.Ctx).Error("Unable to write to file ", workDir, "/jobScript.sh")
 			log.G(h.Ctx).Error(err)
 			span.AddEvent("Failed to submit the SLURM Job")
 			h.handleError(spanCtx, w, http.StatusInternalServerError, err)
@@ -247,10 +262,13 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			containerImage:   "n/a",
 		})
 
-		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, filesPath, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
+		path, err = produceSLURMScript(spanCtx, h.Config, data.Pod, workDir, metadata, runtime_command_pod, resourceLimits, isDefaultCPU, isDefaultRam, flavor)
 		if err != nil {
 			log.G(h.Ctx).Error(err)
 			os.RemoveAll(filesPath)
+			if workDir != filesPath {
+				os.RemoveAll(workDir)
+			}
 			return
 		}
 	}
@@ -261,15 +279,21 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		os.RemoveAll(filesPath)
+		if workDir != filesPath {
+			os.RemoveAll(workDir)
+		}
 		return
 	}
 	log.G(h.Ctx).Info(out)
-	jid, err := handleJidAndPodUid(h.Ctx, data.Pod, h.JIDs, out, filesPath)
+	jid, err := handleJidAndPodUid(h.Ctx, data.Pod, h.JIDs, out, filesPath, workDir)
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, http.StatusGatewayTimeout, err)
 		os.RemoveAll(filesPath)
-		err = deleteContainer(spanCtx, h.Config, string(data.Pod.UID), h.JIDs, filesPath)
+		if workDir != filesPath {
+			os.RemoveAll(workDir)
+		}
+		err = deleteContainer(spanCtx, h.Config, string(data.Pod.UID), h.JIDs, workDir)
 		if err != nil {
 			log.G(h.Ctx).Error(err)
 		}
