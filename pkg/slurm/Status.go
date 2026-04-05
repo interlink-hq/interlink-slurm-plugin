@@ -522,13 +522,27 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 // allocation data.  When the JSON output is unavailable or cannot be parsed it falls
 // back to `sinfo --noheader --format=…` text parsing, which can report totals and
 // free memory but cannot determine per-node CPU allocation.
+//
+// Taints configured in SlurmConfig.Taints are always included in the response so that
+// the VK (interLink#516) can apply them to the virtual node on every heartbeat.
 func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
-	resources, err := h.getClusterResourcesFromJSON()
+	resp, err := h.getClusterResourcesFromJSON()
 	if err != nil {
 		log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
-		return h.getClusterResourcesFromText()
+		resp, err = h.getClusterResourcesFromText()
+		if err != nil {
+			return resp, err
+		}
 	}
-	return resources, nil
+
+	// Attach configured taints so the VK can keep the virtual node's taint list in sync.
+	if len(h.Config.Taints) > 0 {
+		taints := make([]TaintConfig, len(h.Config.Taints))
+		copy(taints, h.Config.Taints)
+		resp.Taints = &taints
+	}
+
+	return resp, nil
 }
 
 // getClusterResourcesFromJSON uses `sinfo --json` to obtain per-node resource data.

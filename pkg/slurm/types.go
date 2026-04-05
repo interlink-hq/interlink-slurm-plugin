@@ -84,6 +84,10 @@ type SlurmConfig struct {
 	Flavors                   map[string]FlavorConfig `yaml:"Flavors"`
 	DefaultFlavor             string                  `yaml:"DefaultFlavor"`
 	DefaultUID                *int64                  `yaml:"DefaultUID"` // Optional default User ID for all jobs (RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58)
+	// Taints is an optional list of Kubernetes taints that this plugin will advertise
+	// on the virtual node via the ping response.  The VK (interLink#516) replaces the
+	// node's non-system taints with this list on every heartbeat.
+	Taints []TaintConfig `yaml:"Taints"`
 }
 
 type CreateStruct struct {
@@ -132,21 +136,38 @@ type ContainerCommand struct {
 	startupProbes    []ProbeCommand
 }
 
+// TaintConfig holds the configuration for a Kubernetes taint to be applied to the
+// virtual node.  It is used both in SlurmConfig (loaded from YAML) and as the JSON
+// payload carried in PingResponse, so it carries both yaml and json struct tags.
+type TaintConfig struct {
+	// Key is the taint key (e.g. "vendor.io/maintenance").
+	Key string `yaml:"Key" json:"key"`
+	// Value is the optional taint value.
+	Value string `yaml:"Value,omitempty" json:"value,omitempty"`
+	// Effect is one of "NoSchedule", "PreferNoSchedule", or "NoExecute".
+	Effect string `yaml:"Effect" json:"effect"`
+}
+
 // PingResponse represents the optional structured response from the plugin ping path.
 // Aligned with interlink-hq/interLink#516: when the interlink VK parses a successful
 // ping response it tries to unmarshal the body as PingResponse; if a non-nil Resources
-// field is present it calls updateNodeResources() so that the virtual node's Capacity
-// and Allocatable fields are kept in sync with the SLURM cluster state.
+// field is present it calls updateNodeResources() and if a non-nil Taints field is
+// present it calls updateNodeTaints() so that the virtual node stays in sync with the
+// SLURM cluster state.
 //
 // TODO: Replace these locally-defined types with the upstream commonIL.PingResponse,
-// commonIL.ResourcesResponse, and commonIL.AcceleratorResponse once
-// interlink-hq/interLink#516 is merged and the interlink dependency is updated.
+// commonIL.ResourcesResponse, commonIL.AcceleratorResponse, and commonIL.TaintResponse
+// once interlink-hq/interLink#516 is merged and the interlink dependency is updated.
 type PingResponse struct {
 	// Status is a short string indicating the plug-in health (e.g. "ok").
 	Status string `json:"status,omitempty"`
 	// Resources optionally contains the cluster resource availability that the VK
 	// should use to update the virtual node capacity.
 	Resources *ResourcesResponse `json:"resources,omitempty"`
+	// Taints optionally contains the list of taints the VK should apply to the virtual
+	// node.  When present (even as an empty slice), all non-system taints on the node
+	// are replaced with this list.  When absent, existing taints are left unchanged.
+	Taints *[]TaintConfig `json:"taints,omitempty"`
 }
 
 // ResourcesResponse carries Kubernetes-quantity strings for each resource dimension.
