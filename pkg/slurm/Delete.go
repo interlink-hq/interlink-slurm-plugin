@@ -2,7 +2,6 @@ package slurm
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -50,34 +49,43 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
-	workDir := filesPath
+
+	// Resolve the job working directory.
+	// Priority: 1) in-memory JIDs cache  2) pod annotation (handles wiped cache)
+	workDir := getJobWorkDir(h.Config, pod.Annotations, pod.Namespace, string(pod.UID))
 	if jid, ok := (*h.JIDs)[string(pod.UID)]; ok && jid.WorkDir != "" {
 		workDir = jid.WorkDir
 	}
 
-	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, workDir)
+	// When the annotation "slurm-job.vk.io/no-clean-workdir" is "true" and a
+	// custom workdir is in use, preserve the job output directory after deletion.
+	noCleanWorkDir := workDir != filesPath && pod.Annotations["slurm-job.vk.io/no-clean-workdir"] == "true"
+
+	// Pass the appropriate path to deleteContainer so it can cancel the SLURM job
+	// and clean up the job directory.  When no-clean-workdir is set, only the
+	// metadata directory (filesPath) is removed; the job workdir is kept.
+	containerDeletePath := workDir
+	if noCleanWorkDir {
+		containerDeletePath = filesPath
+	}
+
+	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, containerDeletePath)
 
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, statusCode, err)
 		return
 	}
-	if os.Getenv("SHARED_FS") != "true" {
-		var errs []error
+
+	if os.Getenv("SHARED_FS") != "true" && !noCleanWorkDir {
+		// deleteContainer already removed containerDeletePath (= workDir).
+		// When a separate metadata directory exists, remove it now.
 		if workDir != filesPath {
 			if err = os.RemoveAll(filesPath); err != nil {
-				log.G(h.Ctx).Error("Failed to remove metadata directory: ", err)
-				errs = append(errs, err)
+				statusCode = http.StatusInternalServerError
+				h.handleError(spanCtx, w, statusCode, err)
+				return
 			}
-		}
-		if err = os.RemoveAll(workDir); err != nil {
-			log.G(h.Ctx).Error("Failed to remove working directory: ", err)
-			errs = append(errs, err)
-		}
-		if combinedErr := errors.Join(errs...); combinedErr != nil {
-			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, combinedErr)
-			return
 		}
 	}
 

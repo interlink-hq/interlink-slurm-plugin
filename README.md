@@ -130,6 +130,7 @@ It is possible to specify Annotations when submitting Pods to the K8S cluster. A
 | slurm-job.vk.io/mpi-flags | Used to prepend "mpiexec -np $SLURM_NTASKS \*flags\*" to the Singularity Execution |
 | slurm-job.vk.io/flavor | Used to explicitly select a flavor configuration (e.g., "gpu-nvidia", "high-io") |
 | slurm-job.vk.io/job-workdir | Used to specify a custom base directory for the job's working directory. The full path will be `<value>/<namespace>-<podUID>`. Job scripts, output files, and status files are written there. Log, status, and delete operations also use this path. Useful in conjunction with `--gid` to run jobs in a directory accessible by a specific group. |
+| slurm-job.vk.io/no-clean-workdir | When set to `"true"` and a custom `job-workdir` is in use, the job working directory is **not** removed when the pod is deleted. The plugin metadata directory (`DataRootFolder`) is still cleaned up. Useful when the job output must be preserved after pod deletion. |
 
 **Note**: To specify a custom User ID (UID) for SLURM jobs, use the Kubernetes standard `spec.securityContext.runAsUser` field in your pod specification (see UID Configuration section below).
 
