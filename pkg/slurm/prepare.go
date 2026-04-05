@@ -53,9 +53,18 @@ type JidStruct struct {
 // If the annotation "slurm-job.vk.io/job-workdir" is set, it is used as the
 // base directory and the full path is "<annotation>/<namespace>-<podUID>".
 // Otherwise the default path "<DataRootFolder><namespace>-<podUID>" is returned.
+// The annotation value must be an absolute path without traversal components;
+// an invalid value is silently ignored and the default is used instead.
 func getJobWorkDir(config SlurmConfig, annotations map[string]string, namespace, podUID string) string {
 	if customBase, ok := annotations["slurm-job.vk.io/job-workdir"]; ok && customBase != "" {
-		return strings.TrimRight(customBase, "/") + "/" + namespace + "-" + podUID
+		// Reject paths that contain path traversal components before cleaning.
+		if strings.Contains(customBase, "..") {
+			return config.DataRootFolder + namespace + "-" + podUID
+		}
+		clean := filepath.Clean(customBase)
+		if filepath.IsAbs(clean) {
+			return clean + "/" + namespace + "-" + podUID
+		}
 	}
 	return config.DataRootFolder + namespace + "-" + podUID
 }
@@ -1427,24 +1436,24 @@ func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (str
 // Finally, it stores the namespace and podUID info in the same location, to restore
 // status at startup.
 // Return the first encountered error.
-func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, path string, workDir string) (string, error) {
+func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, filesPath string, workDir string) (string, error) {
 	r := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
 	jid := r.FindStringSubmatch(output)
-	fJID, err := os.Create(path + "/JobID.jid")
+	fJID, err := os.Create(filesPath + "/JobID.jid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create jid_file")
 		return "", err
 	}
 	defer fJID.Close()
 
-	fNS, err := os.Create(path + "/PodNamespace.ns")
+	fNS, err := os.Create(filesPath + "/PodNamespace.ns")
 	if err != nil {
 		log.G(Ctx).Error("Can't create namespace_file")
 		return "", err
 	}
 	defer fNS.Close()
 
-	fUID, err := os.Create(path + "/PodUID.uid")
+	fUID, err := os.Create(filesPath + "/PodUID.uid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create PodUID_file")
 		return "", err
@@ -1474,9 +1483,9 @@ func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidSt
 
 	// If the job uses a custom working directory, persist it so it can be
 	// recovered across sidecar restarts (see LoadJIDs).
-	if workDir != path {
+	if workDir != filesPath {
 		(*JIDs)[string(pod.UID)].WorkDir = workDir
-		if err := os.WriteFile(path+"/WorkDir.path", []byte(workDir), 0o644); err != nil {
+		if err := os.WriteFile(filesPath+"/WorkDir.path", []byte(workDir), 0o644); err != nil {
 			log.G(Ctx).Error("Can't write WorkDir.path: ", err)
 			return "", err
 		}

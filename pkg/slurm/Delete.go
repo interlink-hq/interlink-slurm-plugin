@@ -2,6 +2,7 @@ package slurm
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -62,18 +63,20 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if os.Getenv("SHARED_FS") != "true" {
+		var errs []error
 		if workDir != filesPath {
-			err = os.RemoveAll(filesPath)
-			if err != nil {
-				statusCode = http.StatusInternalServerError
-				h.handleError(spanCtx, w, statusCode, err)
-				return
+			if err = os.RemoveAll(filesPath); err != nil {
+				log.G(h.Ctx).Error("Failed to remove metadata directory: ", err)
+				errs = append(errs, err)
 			}
 		}
-		err = os.RemoveAll(workDir)
-		if err != nil {
+		if err = os.RemoveAll(workDir); err != nil {
+			log.G(h.Ctx).Error("Failed to remove working directory: ", err)
+			errs = append(errs, err)
+		}
+		if combinedErr := errors.Join(errs...); combinedErr != nil {
 			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, err)
+			h.handleError(spanCtx, w, statusCode, combinedErr)
 			return
 		}
 	}
