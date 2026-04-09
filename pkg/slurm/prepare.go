@@ -1245,7 +1245,7 @@ highestExitCode=0
 	}
 
 	// Inject SIGTERM trap for preStop lifecycle hooks if any container defines one.
-	if trapScript := generatePreStopTrap(commands); trapScript != "" {
+	if trapScript := generatePreStopTrap(config, commands); trapScript != "" {
 		stringToBeWritten.WriteString(trapScript)
 	}
 
@@ -1297,26 +1297,7 @@ highestExitCode=0
 
 		// Generate probe scripts if enabled and not an init container
 		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
-			// Extract the image name from the singularity command
-			var imageName string
-			for i, arg := range containerCommand.runtimeCommand {
-				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
-					imageName = arg
-					break
-				}
-				// Look for image after singularity run/exec command
-				if (arg == "run" || arg == "exec") && i+1 < len(containerCommand.runtimeCommand) {
-					// Skip any options and find the image
-					for j := i + 1; j < len(containerCommand.runtimeCommand); j++ {
-						nextArg := containerCommand.runtimeCommand[j]
-						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
-							imageName = nextArg
-							break
-						}
-					}
-					break
-				}
-			}
+			imageName := extractImageNameFromRuntimeCommand(containerCommand.runtimeCommand, config.ImagePrefix)
 
 			if imageName != "" {
 				// Store probe metadata for status checking

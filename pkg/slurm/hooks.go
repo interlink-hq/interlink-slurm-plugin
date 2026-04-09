@@ -63,19 +63,28 @@ func translatePreStopHook(handler *v1.LifecycleHandler) *PreStopHookSpec {
 // each container's preStop lifecycle hook before forwarding the signal to the
 // running container processes.
 //
+// Exec-type hooks are dispatched via the container runtime (singularity exec)
+// with a 30-second timeout, consistent with executeExecProbe in probes.go.
+// If no container runtime is configured, they fall back to host-side execution.
+//
 // The returned string is empty when no container has a preStop hook.
-func generatePreStopTrap(commands []ContainerCommand) string {
+func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string {
 	// Collect only non-init containers that carry a hook.
 	type entry struct {
-		name string
-		hook *PreStopHookSpec
+		name      string
+		hook      *PreStopHookSpec
+		imageName string // fully-qualified image path extracted from runtimeCommand
 	}
 	var entries []entry
 	for _, cmd := range commands {
 		if cmd.isInitContainer || cmd.preStopHook == nil {
 			continue
 		}
-		entries = append(entries, entry{name: cmd.containerName, hook: cmd.preStopHook})
+		entries = append(entries, entry{
+			name:      cmd.containerName,
+			hook:      cmd.preStopHook,
+			imageName: extractImageNameFromRuntimeCommand(cmd.runtimeCommand, config.ImagePrefix),
+		})
 	}
 	if len(entries) == 0 {
 		return ""
@@ -101,8 +110,21 @@ func generatePreStopTrap(commands []ContainerCommand) string {
 			for i, arg := range e.hook.ExecCommand {
 				quotedArgs[i] = shellescape.Quote(arg)
 			}
-			sb.WriteString(fmt.Sprintf("  %s >> %s 2>&1 || true\n",
-				strings.Join(quotedArgs, " "), outFile))
+			if e.imageName != "" && config.SingularityPath != "" {
+				// Run inside the container via singularity exec — consistent with executeExecProbe
+				parts := []string{shellescape.Quote(config.SingularityPath), "exec"}
+				for _, opt := range config.SingularityDefaultOptions {
+					parts = append(parts, shellescape.Quote(opt))
+				}
+				parts = append(parts, shellescape.Quote(e.imageName), "timeout", "30")
+				parts = append(parts, quotedArgs...)
+				sb.WriteString(fmt.Sprintf("  %s >> %s 2>&1 || true\n",
+					strings.Join(parts, " "), outFile))
+			} else {
+				// Fallback: run on the host when singularity is not configured
+				sb.WriteString(fmt.Sprintf("  timeout 30 %s >> %s 2>&1 || true\n",
+					strings.Join(quotedArgs, " "), outFile))
+			}
 
 		case PreStopHookTypeHTTPGet:
 			url := fmt.Sprintf("%s://%s:%d%s",
@@ -129,4 +151,29 @@ func generatePreStopTrap(commands []ContainerCommand) string {
 	sb.WriteString("trap preStopTrap SIGTERM\n")
 
 	return sb.String()
+}
+
+// extractImageNameFromRuntimeCommand returns the fully-qualified container image path
+// from a runtime command slice (e.g. ["singularity", "exec", "--nv", "docker://img"]).
+// It uses the same heuristic as the probe script generation in prepare.go:
+// an argument is considered the image if it starts with imagePrefix or "/".
+// For commands where the image follows a "run" or "exec" subcommand, the first
+// non-option argument after the subcommand is returned.
+// Returns an empty string when no image argument is found.
+func extractImageNameFromRuntimeCommand(runtimeCommand []string, imagePrefix string) string {
+	for i, arg := range runtimeCommand {
+		if strings.HasPrefix(arg, imagePrefix) || strings.HasPrefix(arg, "/") {
+			return arg
+		}
+		if (arg == "run" || arg == "exec") && i+1 < len(runtimeCommand) {
+			for j := i + 1; j < len(runtimeCommand); j++ {
+				nextArg := runtimeCommand[j]
+				if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, imagePrefix) || strings.HasPrefix(nextArg, "/")) {
+					return nextArg
+				}
+			}
+			break
+		}
+	}
+	return ""
 }

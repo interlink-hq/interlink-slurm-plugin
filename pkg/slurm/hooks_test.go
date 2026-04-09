@@ -128,11 +128,22 @@ func TestTranslatePreStopHook_NoExecNoHTTPGet(t *testing.T) {
 // generatePreStopTrap
 // ---------------------------------------------------------------------------
 
+// testSlurmConfig returns a minimal SlurmConfig suitable for unit-testing
+// generatePreStopTrap.  It uses a recognisable singularity path so tests can
+// assert that exec hooks are dispatched via the container runtime.
+func testSlurmConfig() SlurmConfig {
+	return SlurmConfig{
+		SingularityPath:           "/usr/bin/singularity",
+		SingularityDefaultOptions: []string{"--nv"},
+		ImagePrefix:               "docker://",
+	}
+}
+
 func TestGeneratePreStopTrap_NoHooks(t *testing.T) {
 	commands := []ContainerCommand{
 		{containerName: "app", isInitContainer: false, preStopHook: nil},
 	}
-	if got := generatePreStopTrap(commands); got != "" {
+	if got := generatePreStopTrap(testSlurmConfig(), commands); got != "" {
 		t.Errorf("generatePreStopTrap with no hooks = %q, want empty string", got)
 	}
 }
@@ -148,23 +159,25 @@ func TestGeneratePreStopTrap_InitContainerIgnored(t *testing.T) {
 			},
 		},
 	}
-	if got := generatePreStopTrap(commands); got != "" {
+	if got := generatePreStopTrap(testSlurmConfig(), commands); got != "" {
 		t.Errorf("generatePreStopTrap should ignore init containers, got %q", got)
 	}
 }
 
-func TestGeneratePreStopTrap_ExecHook(t *testing.T) {
+func TestGeneratePreStopTrap_ExecHook_WithRuntime(t *testing.T) {
 	commands := []ContainerCommand{
 		{
 			containerName:   "app",
 			isInitContainer: false,
+			// Simulate the runtimeCommand produced by prepareRuntimeCommand for singularity
+			runtimeCommand: []string{"/usr/bin/singularity", "exec", "--nv", "docker://ubuntu:latest"},
 			preStopHook: &PreStopHookSpec{
 				Type:        PreStopHookTypeExec,
 				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
 			},
 		},
 	}
-	got := generatePreStopTrap(commands)
+	got := generatePreStopTrap(testSlurmConfig(), commands)
 	if got == "" {
 		t.Fatal("generatePreStopTrap returned empty string, expected script fragment")
 	}
@@ -174,6 +187,17 @@ func TestGeneratePreStopTrap_ExecHook(t *testing.T) {
 	}
 	if !strings.Contains(got, "trap preStopTrap SIGTERM") {
 		t.Error("expected 'trap preStopTrap SIGTERM' in output")
+	}
+	// Exec hook must be dispatched via singularity exec (coherent with executeExecProbe)
+	if !strings.Contains(got, "/usr/bin/singularity") {
+		t.Error("expected singularity path in exec hook invocation")
+	}
+	if !strings.Contains(got, "exec") {
+		t.Error("expected 'exec' subcommand in singularity invocation")
+	}
+	// Exec hook must include a timeout
+	if !strings.Contains(got, "timeout") {
+		t.Error("expected 'timeout' in exec hook invocation")
 	}
 	// The exec command arguments should be present (shell-escaped)
 	if !strings.Contains(got, "/bin/sh") {
@@ -186,6 +210,35 @@ func TestGeneratePreStopTrap_ExecHook(t *testing.T) {
 	// Must forward SIGTERM to running containers
 	if !strings.Contains(got, `kill "${pid}"`) {
 		t.Error("expected kill command for running containers in output")
+	}
+}
+
+func TestGeneratePreStopTrap_ExecHook_NoRuntime(t *testing.T) {
+	// When singularity is not configured the exec hook falls back to host execution.
+	cfg := SlurmConfig{} // SingularityPath is empty
+	commands := []ContainerCommand{
+		{
+			containerName:   "app",
+			isInitContainer: false,
+			preStopHook: &PreStopHookSpec{
+				Type:        PreStopHookTypeExec,
+				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
+			},
+		},
+	}
+	got := generatePreStopTrap(cfg, commands)
+	if got == "" {
+		t.Fatal("generatePreStopTrap returned empty string, expected script fragment")
+	}
+	if !strings.Contains(got, "timeout 30") {
+		t.Error("expected host-side 'timeout 30' in fallback exec hook invocation")
+	}
+	if !strings.Contains(got, "/bin/sh") {
+		t.Error("expected exec command '/bin/sh' in output")
+	}
+	// Must NOT contain a singularity invocation in the fallback path
+	if strings.Contains(got, "singularity") {
+		t.Error("fallback exec hook should not contain 'singularity'")
 	}
 }
 
@@ -205,7 +258,7 @@ func TestGeneratePreStopTrap_HTTPGetHook(t *testing.T) {
 			},
 		},
 	}
-	got := generatePreStopTrap(commands)
+	got := generatePreStopTrap(testSlurmConfig(), commands)
 	if got == "" {
 		t.Fatal("generatePreStopTrap returned empty string, expected script fragment")
 	}
@@ -225,6 +278,7 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 		{
 			containerName:   "app",
 			isInitContainer: false,
+			runtimeCommand:  []string{"/usr/bin/singularity", "exec", "--nv", "docker://ubuntu:latest"},
 			preStopHook: &PreStopHookSpec{
 				Type:        PreStopHookTypeExec,
 				ExecCommand: []string{"echo", "bye-app"},
@@ -249,7 +303,7 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 			preStopHook:     nil,
 		},
 	}
-	got := generatePreStopTrap(commands)
+	got := generatePreStopTrap(testSlurmConfig(), commands)
 	if !strings.Contains(got, "prestop-app.out") {
 		t.Error("expected hook output for 'app' container")
 	}
