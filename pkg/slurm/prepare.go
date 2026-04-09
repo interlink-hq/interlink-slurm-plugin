@@ -1244,6 +1244,11 @@ highestExitCode=0
 		}
 	}
 
+	// Inject SIGTERM trap for preStop lifecycle hooks if any container defines one.
+	if trapScript := generatePreStopTrap(commands); trapScript != "" {
+		stringToBeWritten.WriteString(trapScript)
+	}
+
 	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")

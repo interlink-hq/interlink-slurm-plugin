@@ -5,13 +5,262 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// TestExecuteExecHook_Success verifies that a valid exec hook command runs without error.
+// ---------------------------------------------------------------------------
+// translatePreStopHook
+// ---------------------------------------------------------------------------
+
+func TestTranslatePreStopHook_Nil(t *testing.T) {
+	if got := translatePreStopHook(nil); got != nil {
+		t.Errorf("translatePreStopHook(nil) = %v, want nil", got)
+	}
+}
+
+func TestTranslatePreStopHook_ExecEmpty(t *testing.T) {
+	handler := &v1.LifecycleHandler{
+		Exec: &v1.ExecAction{Command: []string{}},
+	}
+	// Empty command slice should fall through and return nil (unsupported)
+	if got := translatePreStopHook(handler); got != nil {
+		t.Errorf("translatePreStopHook(exec with empty command) = %v, want nil", got)
+	}
+}
+
+func TestTranslatePreStopHook_Exec(t *testing.T) {
+	cmd := []string{"/bin/sh", "-c", "echo prestop"}
+	handler := &v1.LifecycleHandler{
+		Exec: &v1.ExecAction{Command: cmd},
+	}
+	got := translatePreStopHook(handler)
+	if got == nil {
+		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+	}
+	if got.Type != PreStopHookTypeExec {
+		t.Errorf("Type = %q, want %q", got.Type, PreStopHookTypeExec)
+	}
+	if len(got.ExecCommand) != len(cmd) {
+		t.Errorf("ExecCommand len = %d, want %d", len(got.ExecCommand), len(cmd))
+	}
+	for i, v := range cmd {
+		if got.ExecCommand[i] != v {
+			t.Errorf("ExecCommand[%d] = %q, want %q", i, got.ExecCommand[i], v)
+		}
+	}
+}
+
+func TestTranslatePreStopHook_HTTPGet_Defaults(t *testing.T) {
+	handler := &v1.LifecycleHandler{
+		HTTPGet: &v1.HTTPGetAction{
+			Port: intstr.FromInt(8080),
+			// Scheme, Host, Path intentionally empty → should be filled with defaults
+		},
+	}
+	got := translatePreStopHook(handler)
+	if got == nil {
+		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+	}
+	if got.Type != PreStopHookTypeHTTPGet {
+		t.Errorf("Type = %q, want %q", got.Type, PreStopHookTypeHTTPGet)
+	}
+	if got.HTTPGet.Scheme != "http" {
+		t.Errorf("Scheme = %q, want %q", got.HTTPGet.Scheme, "http")
+	}
+	if got.HTTPGet.Host != "localhost" {
+		t.Errorf("Host = %q, want %q", got.HTTPGet.Host, "localhost")
+	}
+	if got.HTTPGet.Path != "/" {
+		t.Errorf("Path = %q, want %q", got.HTTPGet.Path, "/")
+	}
+	if got.HTTPGet.Port != 8080 {
+		t.Errorf("Port = %d, want 8080", got.HTTPGet.Port)
+	}
+}
+
+func TestTranslatePreStopHook_HTTPGet_Explicit(t *testing.T) {
+	handler := &v1.LifecycleHandler{
+		HTTPGet: &v1.HTTPGetAction{
+			Scheme: "HTTPS",
+			Host:   "myhost",
+			Port:   intstr.FromInt(9090),
+			Path:   "/shutdown",
+		},
+	}
+	got := translatePreStopHook(handler)
+	if got == nil {
+		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+	}
+	if got.HTTPGet.Scheme != "https" {
+		t.Errorf("Scheme = %q, want %q", got.HTTPGet.Scheme, "https")
+	}
+	if got.HTTPGet.Host != "myhost" {
+		t.Errorf("Host = %q, want myhost", got.HTTPGet.Host)
+	}
+	if got.HTTPGet.Port != 9090 {
+		t.Errorf("Port = %d, want 9090", got.HTTPGet.Port)
+	}
+	if got.HTTPGet.Path != "/shutdown" {
+		t.Errorf("Path = %q, want /shutdown", got.HTTPGet.Path)
+	}
+}
+
+func TestTranslatePreStopHook_NoExecNoHTTPGet(t *testing.T) {
+	handler := &v1.LifecycleHandler{} // neither exec nor httpGet
+	if got := translatePreStopHook(handler); got != nil {
+		t.Errorf("translatePreStopHook(empty handler) = %v, want nil", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// generatePreStopTrap
+// ---------------------------------------------------------------------------
+
+func TestGeneratePreStopTrap_NoHooks(t *testing.T) {
+	commands := []ContainerCommand{
+		{containerName: "app", isInitContainer: false, preStopHook: nil},
+	}
+	if got := generatePreStopTrap(commands); got != "" {
+		t.Errorf("generatePreStopTrap with no hooks = %q, want empty string", got)
+	}
+}
+
+func TestGeneratePreStopTrap_InitContainerIgnored(t *testing.T) {
+	commands := []ContainerCommand{
+		{
+			containerName:   "init",
+			isInitContainer: true,
+			preStopHook: &PreStopHookSpec{
+				Type:        PreStopHookTypeExec,
+				ExecCommand: []string{"echo", "init"},
+			},
+		},
+	}
+	if got := generatePreStopTrap(commands); got != "" {
+		t.Errorf("generatePreStopTrap should ignore init containers, got %q", got)
+	}
+}
+
+func TestGeneratePreStopTrap_ExecHook(t *testing.T) {
+	commands := []ContainerCommand{
+		{
+			containerName:   "app",
+			isInitContainer: false,
+			preStopHook: &PreStopHookSpec{
+				Type:        PreStopHookTypeExec,
+				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
+			},
+		},
+	}
+	got := generatePreStopTrap(commands)
+	if got == "" {
+		t.Fatal("generatePreStopTrap returned empty string, expected script fragment")
+	}
+	// Must define the trap function and install it
+	if !strings.Contains(got, "preStopTrap()") {
+		t.Error("expected 'preStopTrap()' function definition in output")
+	}
+	if !strings.Contains(got, "trap preStopTrap SIGTERM") {
+		t.Error("expected 'trap preStopTrap SIGTERM' in output")
+	}
+	// The exec command arguments should be present (shell-escaped)
+	if !strings.Contains(got, "/bin/sh") {
+		t.Error("expected exec command '/bin/sh' in output")
+	}
+	// Output should be redirected to the container-specific log file
+	if !strings.Contains(got, "prestop-app.out") {
+		t.Error("expected 'prestop-app.out' in output")
+	}
+	// Must forward SIGTERM to running containers
+	if !strings.Contains(got, `kill "${pid}"`) {
+		t.Error("expected kill command for running containers in output")
+	}
+}
+
+func TestGeneratePreStopTrap_HTTPGetHook(t *testing.T) {
+	commands := []ContainerCommand{
+		{
+			containerName:   "sidecar",
+			isInitContainer: false,
+			preStopHook: &PreStopHookSpec{
+				Type: PreStopHookTypeHTTPGet,
+				HTTPGet: &PreStopHTTPGetSpec{
+					Scheme: "http",
+					Host:   "localhost",
+					Port:   8080,
+					Path:   "/stop",
+				},
+			},
+		},
+	}
+	got := generatePreStopTrap(commands)
+	if got == "" {
+		t.Fatal("generatePreStopTrap returned empty string, expected script fragment")
+	}
+	if !strings.Contains(got, "curl") {
+		t.Error("expected curl invocation for httpGet hook")
+	}
+	if !strings.Contains(got, "http://localhost:8080/stop") {
+		t.Error("expected URL 'http://localhost:8080/stop' in output")
+	}
+	if !strings.Contains(got, "prestop-sidecar.out") {
+		t.Error("expected 'prestop-sidecar.out' in output")
+	}
+}
+
+func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
+	commands := []ContainerCommand{
+		{
+			containerName:   "app",
+			isInitContainer: false,
+			preStopHook: &PreStopHookSpec{
+				Type:        PreStopHookTypeExec,
+				ExecCommand: []string{"echo", "bye-app"},
+			},
+		},
+		{
+			containerName:   "sidecar",
+			isInitContainer: false,
+			preStopHook: &PreStopHookSpec{
+				Type: PreStopHookTypeHTTPGet,
+				HTTPGet: &PreStopHTTPGetSpec{
+					Scheme: "http",
+					Host:   "localhost",
+					Port:   9000,
+					Path:   "/",
+				},
+			},
+		},
+		{
+			containerName:   "no-hook",
+			isInitContainer: false,
+			preStopHook:     nil,
+		},
+	}
+	got := generatePreStopTrap(commands)
+	if !strings.Contains(got, "prestop-app.out") {
+		t.Error("expected hook output for 'app' container")
+	}
+	if !strings.Contains(got, "prestop-sidecar.out") {
+		t.Error("expected hook output for 'sidecar' container")
+	}
+	if strings.Contains(got, "no-hook") {
+		t.Error("container with no hook should not appear in trap script")
+	}
+	// Only one trap installation
+	if strings.Count(got, "trap preStopTrap SIGTERM") != 1 {
+		t.Error("expected exactly one 'trap preStopTrap SIGTERM' statement")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// executeExecHook
+// ---------------------------------------------------------------------------
+
 func TestExecuteExecHook_Success(t *testing.T) {
 	ctx := context.Background()
 	err := executeExecHook(ctx, []string{"echo", "hello"})
@@ -20,7 +269,6 @@ func TestExecuteExecHook_Success(t *testing.T) {
 	}
 }
 
-// TestExecuteExecHook_Failure verifies that a failing command returns an error.
 func TestExecuteExecHook_Failure(t *testing.T) {
 	ctx := context.Background()
 	err := executeExecHook(ctx, []string{"false"})
@@ -29,7 +277,6 @@ func TestExecuteExecHook_Failure(t *testing.T) {
 	}
 }
 
-// TestExecuteExecHook_EmptyCommand verifies that an empty command slice returns an error.
 func TestExecuteExecHook_EmptyCommand(t *testing.T) {
 	ctx := context.Background()
 	err := executeExecHook(ctx, []string{})
@@ -38,7 +285,6 @@ func TestExecuteExecHook_EmptyCommand(t *testing.T) {
 	}
 }
 
-// TestExecuteExecHook_NotFound verifies that a non-existent binary returns an error.
 func TestExecuteExecHook_NotFound(t *testing.T) {
 	ctx := context.Background()
 	err := executeExecHook(ctx, []string{"/nonexistent/binary"})
@@ -47,7 +293,10 @@ func TestExecuteExecHook_NotFound(t *testing.T) {
 	}
 }
 
-// TestExecuteHTTPGetHook_Success verifies that a successful HTTP response (2xx) is handled correctly.
+// ---------------------------------------------------------------------------
+// executeHTTPGetHook
+// ---------------------------------------------------------------------------
+
 func TestExecuteHTTPGetHook_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -67,7 +316,6 @@ func TestExecuteHTTPGetHook_Success(t *testing.T) {
 	}
 }
 
-// TestExecuteHTTPGetHook_404 verifies that a 4xx response is treated as an error.
 func TestExecuteHTTPGetHook_404(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -87,7 +335,6 @@ func TestExecuteHTTPGetHook_404(t *testing.T) {
 	}
 }
 
-// TestExecuteHTTPGetHook_ConnectionRefused verifies that an unreachable server returns an error.
 func TestExecuteHTTPGetHook_ConnectionRefused(t *testing.T) {
 	ctx := context.Background()
 	httpGet := &v1.HTTPGetAction{
@@ -102,9 +349,7 @@ func TestExecuteHTTPGetHook_ConnectionRefused(t *testing.T) {
 	}
 }
 
-// TestExecuteHTTPGetHook_DefaultsApplied verifies that empty scheme, host, and path use defaults.
 func TestExecuteHTTPGetHook_DefaultsApplied(t *testing.T) {
-	// A server that checks the request path
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -126,7 +371,10 @@ func TestExecuteHTTPGetHook_DefaultsApplied(t *testing.T) {
 	}
 }
 
-// TestExecuteLifecycleHook_Exec verifies exec dispatch through executeLifecycleHook.
+// ---------------------------------------------------------------------------
+// executeLifecycleHook
+// ---------------------------------------------------------------------------
+
 func TestExecuteLifecycleHook_Exec(t *testing.T) {
 	ctx := context.Background()
 	handler := &v1.LifecycleHandler{
@@ -137,7 +385,6 @@ func TestExecuteLifecycleHook_Exec(t *testing.T) {
 	}
 }
 
-// TestExecuteLifecycleHook_HTTPGet verifies httpGet dispatch through executeLifecycleHook.
 func TestExecuteLifecycleHook_HTTPGet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -158,7 +405,6 @@ func TestExecuteLifecycleHook_HTTPGet(t *testing.T) {
 	}
 }
 
-// TestExecuteLifecycleHook_Nil verifies that a nil handler returns an error.
 func TestExecuteLifecycleHook_Nil(t *testing.T) {
 	ctx := context.Background()
 	if err := executeLifecycleHook(ctx, nil); err == nil {
@@ -166,7 +412,6 @@ func TestExecuteLifecycleHook_Nil(t *testing.T) {
 	}
 }
 
-// TestExecuteLifecycleHook_Unsupported verifies that an empty handler (no exec/httpGet) returns an error.
 func TestExecuteLifecycleHook_Unsupported(t *testing.T) {
 	ctx := context.Background()
 	handler := &v1.LifecycleHandler{} // no exec, no httpGet
@@ -175,7 +420,10 @@ func TestExecuteLifecycleHook_Unsupported(t *testing.T) {
 	}
 }
 
-// TestExecutePreStopHooks_NoHooks verifies that a pod with no lifecycle hooks is a no-op.
+// ---------------------------------------------------------------------------
+// executePreStopHooks
+// ---------------------------------------------------------------------------
+
 func TestExecutePreStopHooks_NoHooks(t *testing.T) {
 	ctx := context.Background()
 	pod := &v1.Pod{
@@ -185,11 +433,9 @@ func TestExecutePreStopHooks_NoHooks(t *testing.T) {
 			},
 		},
 	}
-	// Should not panic or return an error
 	executePreStopHooks(ctx, pod)
 }
 
-// TestExecutePreStopHooks_WithExecHook verifies that a preStop exec hook is executed.
 func TestExecutePreStopHooks_WithExecHook(t *testing.T) {
 	ctx := context.Background()
 	pod := &v1.Pod{
@@ -209,12 +455,9 @@ func TestExecutePreStopHooks_WithExecHook(t *testing.T) {
 			},
 		},
 	}
-	// Should complete without panic; errors are only logged, not returned
 	executePreStopHooks(ctx, pod)
 }
 
-// TestExecutePreStopHooks_FailingHookDoesNotBlock verifies that a failing preStop hook
-// does not block execution (errors are logged but non-fatal).
 func TestExecutePreStopHooks_FailingHookDoesNotBlock(t *testing.T) {
 	ctx := context.Background()
 	pod := &v1.Pod{
@@ -234,7 +477,6 @@ func TestExecutePreStopHooks_FailingHookDoesNotBlock(t *testing.T) {
 				{
 					Name:  "sidecar",
 					Image: "busybox",
-					// No lifecycle hooks
 				},
 			},
 		},
@@ -243,10 +485,13 @@ func TestExecutePreStopHooks_FailingHookDoesNotBlock(t *testing.T) {
 	executePreStopHooks(ctx, pod)
 }
 
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
 // extractPort parses the port number from a test server URL (e.g. "http://127.0.0.1:12345").
 func extractPort(t *testing.T, rawURL string) int {
 	t.Helper()
-	// rawURL is like "http://127.0.0.1:PORT"
 	var port int
 	if _, err := fmt.Sscanf(rawURL, "http://127.0.0.1:%d", &port); err != nil {
 		t.Fatalf("failed to extract port from URL %q: %v", rawURL, err)

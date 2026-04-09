@@ -50,9 +50,6 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
-	// Run preStop lifecycle hooks for all containers before cancelling the SLURM job.
-	executePreStopHooks(spanCtx, pod)
-
 	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, filesPath)
 
 	if err != nil {

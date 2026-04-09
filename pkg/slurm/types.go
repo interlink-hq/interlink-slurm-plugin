@@ -120,6 +120,29 @@ type ExecAction struct {
 	Command []string
 }
 
+// PreStopHookType indicates whether a preStop lifecycle hook is an exec or httpGet hook.
+type PreStopHookType string
+
+const (
+	PreStopHookTypeExec    PreStopHookType = "exec"
+	PreStopHookTypeHTTPGet PreStopHookType = "httpGet"
+)
+
+// PreStopHTTPGetSpec holds the parameters for an httpGet-type preStop lifecycle hook.
+type PreStopHTTPGetSpec struct {
+	Scheme string
+	Host   string
+	Port   int32
+	Path   string
+}
+
+// PreStopHookSpec describes a container's preStop lifecycle hook in a runtime-agnostic form.
+type PreStopHookSpec struct {
+	Type        PreStopHookType
+	ExecCommand []string           // populated when Type == PreStopHookTypeExec
+	HTTPGet     *PreStopHTTPGetSpec // populated when Type == PreStopHookTypeHTTPGet
+}
+
 type ContainerCommand struct {
 	containerName    string
 	isInitContainer  bool
@@ -130,4 +153,5 @@ type ContainerCommand struct {
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
+	preStopHook      *PreStopHookSpec // optional preStop lifecycle hook
 }
