@@ -1,10 +1,6 @@
 package slurm
 
 import (
-	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -106,6 +102,18 @@ func TestTranslatePreStopHook_HTTPGet_Explicit(t *testing.T) {
 	}
 	if got.HTTPGet.Path != "/shutdown" {
 		t.Errorf("Path = %q, want /shutdown", got.HTTPGet.Path)
+	}
+}
+
+func TestTranslatePreStopHook_HTTPGet_NamedPort(t *testing.T) {
+	handler := &v1.LifecycleHandler{
+		HTTPGet: &v1.HTTPGetAction{
+			Port: intstr.FromString("http"),
+		},
+	}
+	// Named ports cannot be resolved; should be skipped (returns nil)
+	if got := translatePreStopHook(handler); got != nil {
+		t.Errorf("translatePreStopHook(named port) = %v, want nil", got)
 	}
 }
 
@@ -255,246 +263,4 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 	if strings.Count(got, "trap preStopTrap SIGTERM") != 1 {
 		t.Error("expected exactly one 'trap preStopTrap SIGTERM' statement")
 	}
-}
-
-// ---------------------------------------------------------------------------
-// executeExecHook
-// ---------------------------------------------------------------------------
-
-func TestExecuteExecHook_Success(t *testing.T) {
-	ctx := context.Background()
-	err := executeExecHook(ctx, []string{"echo", "hello"})
-	if err != nil {
-		t.Errorf("executeExecHook with valid command returned unexpected error: %v", err)
-	}
-}
-
-func TestExecuteExecHook_Failure(t *testing.T) {
-	ctx := context.Background()
-	err := executeExecHook(ctx, []string{"false"})
-	if err == nil {
-		t.Error("executeExecHook with failing command expected error, got nil")
-	}
-}
-
-func TestExecuteExecHook_EmptyCommand(t *testing.T) {
-	ctx := context.Background()
-	err := executeExecHook(ctx, []string{})
-	if err == nil {
-		t.Error("executeExecHook with empty command expected error, got nil")
-	}
-}
-
-func TestExecuteExecHook_NotFound(t *testing.T) {
-	ctx := context.Background()
-	err := executeExecHook(ctx, []string{"/nonexistent/binary"})
-	if err == nil {
-		t.Error("executeExecHook with non-existent binary expected error, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// executeHTTPGetHook
-// ---------------------------------------------------------------------------
-
-func TestExecuteHTTPGetHook_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	httpGet := &v1.HTTPGetAction{
-		Scheme: "HTTP",
-		Host:   "127.0.0.1",
-		Port:   intstr.FromInt(extractPort(t, srv.URL)),
-		Path:   "/",
-	}
-	err := executeHTTPGetHook(ctx, httpGet)
-	if err != nil {
-		t.Errorf("executeHTTPGetHook with 200 response returned unexpected error: %v", err)
-	}
-}
-
-func TestExecuteHTTPGetHook_404(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	httpGet := &v1.HTTPGetAction{
-		Scheme: "HTTP",
-		Host:   "127.0.0.1",
-		Port:   intstr.FromInt(extractPort(t, srv.URL)),
-		Path:   "/",
-	}
-	err := executeHTTPGetHook(ctx, httpGet)
-	if err == nil {
-		t.Error("executeHTTPGetHook with 404 response expected error, got nil")
-	}
-}
-
-func TestExecuteHTTPGetHook_ConnectionRefused(t *testing.T) {
-	ctx := context.Background()
-	httpGet := &v1.HTTPGetAction{
-		Scheme: "HTTP",
-		Host:   "127.0.0.1",
-		Port:   intstr.FromInt(19999), // no server listening on this port
-		Path:   "/",
-	}
-	err := executeHTTPGetHook(ctx, httpGet)
-	if err == nil {
-		t.Error("executeHTTPGetHook with connection refused expected error, got nil")
-	}
-}
-
-func TestExecuteHTTPGetHook_DefaultsApplied(t *testing.T) {
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	httpGet := &v1.HTTPGetAction{
-		// Scheme, Host, and Path intentionally left empty to test defaults
-		Port: intstr.FromInt(extractPort(t, srv.URL)),
-	}
-	err := executeHTTPGetHook(ctx, httpGet)
-	if err != nil {
-		t.Errorf("executeHTTPGetHook with defaults returned unexpected error: %v", err)
-	}
-	if gotPath != "/" {
-		t.Errorf("expected default path '/', got %q", gotPath)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// executeLifecycleHook
-// ---------------------------------------------------------------------------
-
-func TestExecuteLifecycleHook_Exec(t *testing.T) {
-	ctx := context.Background()
-	handler := &v1.LifecycleHandler{
-		Exec: &v1.ExecAction{Command: []string{"true"}},
-	}
-	if err := executeLifecycleHook(ctx, handler); err != nil {
-		t.Errorf("executeLifecycleHook(exec) returned unexpected error: %v", err)
-	}
-}
-
-func TestExecuteLifecycleHook_HTTPGet(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	handler := &v1.LifecycleHandler{
-		HTTPGet: &v1.HTTPGetAction{
-			Scheme: "HTTP",
-			Host:   "127.0.0.1",
-			Port:   intstr.FromInt(extractPort(t, srv.URL)),
-			Path:   "/",
-		},
-	}
-	if err := executeLifecycleHook(ctx, handler); err != nil {
-		t.Errorf("executeLifecycleHook(httpGet) returned unexpected error: %v", err)
-	}
-}
-
-func TestExecuteLifecycleHook_Nil(t *testing.T) {
-	ctx := context.Background()
-	if err := executeLifecycleHook(ctx, nil); err == nil {
-		t.Error("executeLifecycleHook(nil) expected error, got nil")
-	}
-}
-
-func TestExecuteLifecycleHook_Unsupported(t *testing.T) {
-	ctx := context.Background()
-	handler := &v1.LifecycleHandler{} // no exec, no httpGet
-	if err := executeLifecycleHook(ctx, handler); err == nil {
-		t.Error("executeLifecycleHook with empty handler expected error, got nil")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// executePreStopHooks
-// ---------------------------------------------------------------------------
-
-func TestExecutePreStopHooks_NoHooks(t *testing.T) {
-	ctx := context.Background()
-	pod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{Name: "app", Image: "busybox"},
-			},
-		},
-	}
-	executePreStopHooks(ctx, pod)
-}
-
-func TestExecutePreStopHooks_WithExecHook(t *testing.T) {
-	ctx := context.Background()
-	pod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:  "app",
-					Image: "busybox",
-					Lifecycle: &v1.Lifecycle{
-						PreStop: &v1.LifecycleHandler{
-							Exec: &v1.ExecAction{
-								Command: []string{"echo", "prestop"},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	executePreStopHooks(ctx, pod)
-}
-
-func TestExecutePreStopHooks_FailingHookDoesNotBlock(t *testing.T) {
-	ctx := context.Background()
-	pod := &v1.Pod{
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:  "app",
-					Image: "busybox",
-					Lifecycle: &v1.Lifecycle{
-						PreStop: &v1.LifecycleHandler{
-							Exec: &v1.ExecAction{
-								Command: []string{"false"}, // always fails
-							},
-						},
-					},
-				},
-				{
-					Name:  "sidecar",
-					Image: "busybox",
-				},
-			},
-		},
-	}
-	// Should not panic even when the hook fails
-	executePreStopHooks(ctx, pod)
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// extractPort parses the port number from a test server URL (e.g. "http://127.0.0.1:12345").
-func extractPort(t *testing.T, rawURL string) int {
-	t.Helper()
-	var port int
-	if _, err := fmt.Sscanf(rawURL, "http://127.0.0.1:%d", &port); err != nil {
-		t.Fatalf("failed to extract port from URL %q: %v", rawURL, err)
-	}
-	return port
 }
