@@ -24,6 +24,52 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
+// Reason and message strings surfaced in ContainerStateTerminated for SLURM-specific
+// termination causes.  Defining them as constants lets tests reference the actual values
+// used at runtime rather than independently-maintained string literals.
+const (
+	// ReasonSlurmJobTimeout is set on every container when the SLURM job was cancelled
+	// because it reached its configured time limit (state "TO").  The Virtual Kubelet
+	// propagates this reason to the pod status, setting the pod phase to Failed so that
+	// the pod's restart policy or owning controller (Deployment, Job, …) can act on it.
+	ReasonSlurmJobTimeout  = "SlurmJobTimeout"
+	MessageSlurmJobTimeout = "SLURM job reached its time limit and was terminated"
+
+	// ReasonOOMKilled matches the Kubernetes convention for out-of-memory terminations
+	// (state "OOM") so that existing tooling can identify OOM-killed containers.
+	ReasonOOMKilled  = "OOMKilled"
+	MessageOOMKilled = "SLURM job was killed due to out-of-memory condition"
+
+	// SlurmStatePattern is the regex alternation used to extract the SLURM job state
+	// from a squeue output line.  Longer alternatives (e.g. ST, OOM) are listed before
+	// shorter prefixes (S) so the regex engine picks the correct token.
+	SlurmStatePattern = `(CD|CG|F|OOM|PD|PR|R|ST|S|TO)`
+
+	// SlurmExitCodePattern is the regex used to extract the numeric exit/signal code
+	// from a squeue output line (format "<exit>:<signal>  <state>").
+	SlurmExitCodePattern = `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
+)
+
+// terminatedContainerStatus builds a ContainerStatus with a Terminated state for a
+// container that has finished (successfully or otherwise).  reason and message are
+// surfaced verbatim in ContainerStateTerminated; pass empty strings when no
+// named reason is needed (e.g. for ordinary CD/F/ST/default cases).
+func terminatedContainerStatus(ctName string, startTime, finishTime time.Time, exitCode int32, reason, message string) v1.ContainerStatus {
+	return v1.ContainerStatus{
+		Name: ctName,
+		State: v1.ContainerState{
+			Terminated: &v1.ContainerStateTerminated{
+				StartedAt:  metav1.Time{Time: startTime},
+				FinishedAt: metav1.Time{Time: finishTime},
+				ExitCode:   exitCode,
+				Reason:     reason,
+				Message:    message,
+			},
+		},
+		Ready: false,
+	}
+}
+
 // StatusHandler performs a squeue --me and uses regular expressions to get the running Jobs' status
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
@@ -159,7 +205,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 					resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 				} else {
-					statePattern := `(CD|CG|F|PD|PR|R|S|ST)`
+					statePattern := SlurmStatePattern
 					stateRe := regexp.MustCompile(statePattern)
 					stateMatch := stateRe.FindString(execReturn.Stdout)
 
@@ -167,7 +213,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					// Magic REGEX that matches any number from 0 to 255 included. Eg: match 2, 255, does not match 256, 02, -1.
 					// Adds whitespace because otherwise it will take too few letter. Eg: for "123", it will take only "1". With \s, it will take "123 ".
 					// Then we only keep the number part, not the last space.
-					exitCodePattern := `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
+					exitCodePattern := SlurmExitCodePattern
 					exitCodeRe := regexp.MustCompile(exitCodePattern)
 					// Eg: exitCodeMatchSlice = "123 "
 					exitCodeMatchSlice := exitCodeRe.FindStringSubmatch(execReturn.Stdout)
@@ -342,6 +388,52 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}, FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime}, ExitCode: exitCode}}, Ready: false}
+							containerStatuses = append(containerStatuses, containerStatus)
+						}
+						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
+					case "TO":
+						// SLURM job reached its time limit. Report containers as Terminated with
+						// reason SlurmJobTimeout so the Virtual Kubelet sets the pod phase to Failed
+						// and the pod's restart/owning-controller policy handles resubmission.
+						if (*h.JIDs)[uid].EndTime.IsZero() {
+							(*h.JIDs)[uid].EndTime = timeNow
+							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
+								statusCode = http.StatusInternalServerError
+								h.handleError(spanCtx, w, statusCode, err)
+								return
+							}
+						}
+						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); reporting containers as terminated",
+							sessionContextMessage, (*h.JIDs)[uid].JID, pod.Namespace, pod.Name)
+						for _, ct := range pod.Spec.Containers {
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							if err != nil {
+								log.G(h.Ctx).Error(err)
+								continue
+							}
+							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonSlurmJobTimeout, MessageSlurmJobTimeout)
+							containerStatuses = append(containerStatuses, containerStatus)
+						}
+						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
+					case "OOM":
+						// SLURM job was killed due to an out-of-memory condition.
+						if (*h.JIDs)[uid].EndTime.IsZero() {
+							(*h.JIDs)[uid].EndTime = timeNow
+							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
+								statusCode = http.StatusInternalServerError
+								h.handleError(spanCtx, w, statusCode, err)
+								return
+							}
+						}
+						for _, ct := range pod.Spec.Containers {
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							if err != nil {
+								log.G(h.Ctx).Error(err)
+								continue
+							}
+							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonOOMKilled, MessageOOMKilled)
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})

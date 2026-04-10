@@ -1,10 +1,9 @@
-FROM golang:1.24 as build-stage
+FROM golang:1.24 AS build-stage
 
 WORKDIR /app
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o bin/slurm-sidecar cmd/main.go
-
 
 # Deploy the application binary into a lean image
 #FROM ubuntu:latest AS build-release-stage
@@ -13,14 +12,28 @@ FROM almalinux:9
 # Settings for all images
 ENV TIMEZONE=America/New_York
 
-# Install system packages
+# Install system packages (without Slurm -- built from source below)
 RUN DEBIAN_FRONTEND=noninteractive \
   dnf install -y epel-release \
-  && dnf install -y --allowerasing slurm-slurmd rpm-build slurm-slurmctld apptainer sshpass slirp4netns iproute curl tar xz make gcc ca-certificates \
+  && /usr/bin/crb enable \
+  && dnf install -y --allowerasing rpm-build apptainer sshpass slirp4netns iproute curl tar xz make gcc ca-certificates \
+  wget bzip2 python3 munge-devel pam-devel readline-devel perl-ExtUtils-MakeMaker \
+  autoconf automake mariadb-devel libjwt-devel json-c-devel http-parser-devel \
   && update-ca-trust \
   && dnf clean all
 
-RUN slurm-setuser -y
+# Build and install Slurm 25.11 from source (AlmaLinux 9 ships 22.05 which is
+# incompatible with Slinky's slurmctld 25.11 wire protocol)
+RUN wget https://download.schedmd.com/slurm/slurm-25.11.4.tar.bz2 \
+  && rpmbuild -ta --with jwt --with slurmrestd slurm-25.11.4.tar.bz2 \
+  && dnf install -y ~/rpmbuild/RPMS/x86_64/slurm-25.11.4*.rpm \
+  ~/rpmbuild/RPMS/x86_64/slurm-slurmd-25.11.4*.rpm \
+  ~/rpmbuild/RPMS/x86_64/slurm-slurmctld-25.11.4*.rpm \
+  ~/rpmbuild/RPMS/x86_64/slurm-sackd-25.11.4*.rpm \
+  && rm -rf ~/rpmbuild slurm-25.11.4.tar.bz2
+
+# Ensure slurm user exists (slurm-setuser is not available in 25.11 RPMs)
+RUN id slurm &>/dev/null || useradd -r -s /sbin/nologin slurm
 
 # Slurm configuration
 COPY docker/slurm.conf /etc/slurm/slurm.conf

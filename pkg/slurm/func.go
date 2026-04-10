@@ -176,7 +176,7 @@ func (h *SidecarHandler) handleError(ctx context.Context, w http.ResponseWriter,
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("An error occurred:" + err.Error())
 	w.WriteHeader(statusCode)
-	w.Write([]byte("Some errors occurred while creating container. Check Slurm Sidecar's logs"))
+	w.Write([]byte(err.Error()))
 	log.G(h.Ctx).Error(err)
 }
 
