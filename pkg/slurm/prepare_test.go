@@ -163,6 +163,69 @@ func TestPrepareImage(t *testing.T) {
 	}
 }
 
+func TestProduceSLURMScriptSupportsShortAnnotationFlags(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "helloworld-bubble-pod",
+			Namespace: "default",
+			UID:       "bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+			Annotations: map[string]string{
+				"slurm-job.vk.io/flags": "--job-name=helloworld-pod -A geant4 -p geant4",
+			},
+		},
+	}
+
+	config := SlurmConfig{
+		BashPath: "/bin/bash",
+	}
+
+	resourceLimits := ResourceLimits{
+		CPU:    12,
+		Memory: 12 * 1024 * 1024 * 1024,
+	}
+
+	_, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, nil)
+	if err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	jobSlurm, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("failed to read generated job.slurm: %v", err)
+	}
+
+	content := string(jobSlurm)
+	expectedLines := []string{
+		"#SBATCH --job-name=bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+		"#SBATCH --job-name=helloworld-pod",
+		"#SBATCH -A geant4",
+		"#SBATCH -p geant4",
+		"#SBATCH --cpus-per-task=12",
+		"#SBATCH --mem=12288",
+	}
+
+	for _, expectedLine := range expectedLines {
+		if !strings.Contains(content, expectedLine) {
+			t.Errorf("generated job.slurm missing line %q\ncontent:\n%s", expectedLine, content)
+		}
+	}
+
+	unexpectedLines := []string{
+		"#SBATCH -A\n",
+		"#SBATCH -p\n",
+		"\n#SBATCH geant4\n",
+	}
+
+	for _, unexpectedLine := range unexpectedLines {
+		if strings.Contains(content, unexpectedLine) {
+			t.Errorf("generated job.slurm contains malformed directive %q\ncontent:\n%s", unexpectedLine, content)
+		}
+	}
+}
+
 func TestCheckIfJidExists(t *testing.T) {
 	ctx := context.Background()
 	jids := make(map[string]*JidStruct)

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"al.essio.dev/pkg/shellescape"
 	exec2 "github.com/alexellis/go-execute/pkg/v1"
@@ -267,6 +268,115 @@ func hasGPUInFlags(flags []string) bool {
 	return false
 }
 
+var slurmFlagAliases = map[string]string{
+	"-A": "--account",
+	"-C": "--constraint",
+	"-D": "--chdir",
+	"-G": "--gpus",
+	"-J": "--job-name",
+	"-N": "--nodes",
+	"-c": "--cpus-per-task",
+	"-n": "--ntasks",
+	"-o": "--output",
+	"-p": "--partition",
+	"-t": "--time",
+	"-w": "--nodelist",
+}
+
+func splitShellWords(input string) []string {
+	var (
+		tokens       []string
+		currentToken strings.Builder
+		inSingle     bool
+		inDouble     bool
+		escaping     bool
+		tokenStarted bool
+	)
+
+	flushToken := func() {
+		if tokenStarted {
+			tokens = append(tokens, currentToken.String())
+			currentToken.Reset()
+			tokenStarted = false
+		}
+	}
+
+	for _, r := range input {
+		switch {
+		case escaping:
+			currentToken.WriteRune(r)
+			escaping = false
+			tokenStarted = true
+		case r == '\\' && !inSingle:
+			escaping = true
+			tokenStarted = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+			tokenStarted = true
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+			tokenStarted = true
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
+			flushToken()
+		default:
+			currentToken.WriteRune(r)
+			tokenStarted = true
+		}
+	}
+
+	if escaping {
+		currentToken.WriteRune('\\')
+	}
+	flushToken()
+
+	return tokens
+}
+
+func splitSlurmFlags(input string) []string {
+	tokens := splitShellWords(input)
+	flags := make([]string, 0, len(tokens))
+
+	for i := 0; i < len(tokens); i++ {
+		token := strings.TrimSpace(tokens[i])
+		if token == "" {
+			continue
+		}
+
+		if !strings.HasPrefix(token, "-") {
+			flags = append(flags, token)
+			continue
+		}
+
+		flagParts := []string{token}
+		for i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") {
+			flagParts = append(flagParts, tokens[i+1])
+			i++
+		}
+
+		flags = append(flags, strings.Join(flagParts, " "))
+	}
+
+	return flags
+}
+
+func slurmFlagKey(flag string) string {
+	parts := splitShellWords(strings.TrimSpace(flag))
+	if len(parts) == 0 {
+		return ""
+	}
+
+	key := parts[0]
+	if strings.Contains(key, "=") {
+		key = strings.SplitN(key, "=", 2)[0]
+	}
+
+	if alias, ok := slurmFlagAliases[key]; ok {
+		return alias
+	}
+
+	return key
+}
+
 // deduplicateSlurmFlags removes duplicate SLURM flags, keeping the last occurrence
 // This implements proper priority: later flags override earlier ones
 func deduplicateSlurmFlags(flags []string) []string {
@@ -280,17 +390,9 @@ func deduplicateSlurmFlags(flags []string) []string {
 			continue
 		}
 
-		// Extract the flag key (e.g., "--partition" from "--partition=cpu")
-		key := flag
-		if strings.Contains(flag, "=") {
-			parts := strings.SplitN(flag, "=", 2)
-			key = parts[0]
-		} else if strings.HasPrefix(flag, "--") {
-			// Handle flags like "--flag value" (split on space)
-			parts := strings.Fields(flag)
-			if len(parts) > 0 {
-				key = parts[0]
-			}
+		key := slurmFlagKey(flag)
+		if key == "" {
+			continue
 		}
 
 		// If we haven't seen this key before, track its order
@@ -1318,35 +1420,25 @@ func produceSLURMScript(
 
 	// Then process annotation flags (higher priority)
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-
-		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
-		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
-
-		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
-		if !isDefaultCPU {
-			if reCpu.MatchString(slurmFlags) {
-				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
-				slurmFlags = reCpu.ReplaceAllString(slurmFlags, "")
-			}
-		} else {
-			if reCpu.MatchString(slurmFlags) {
+		annotationFlags := splitSlurmFlags(slurmFlags)
+		for _, annotationFlag := range annotationFlags {
+			switch slurmFlagKey(annotationFlag) {
+			case "--cpus-per-task":
+				if !isDefaultCPU {
+					log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+					continue
+				}
 				cpuLimitSetFromFlags = true
-			}
-		}
-
-		if !isDefaultRam {
-			if reRam.MatchString(slurmFlags) {
-				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
-				slurmFlags = reRam.ReplaceAllString(slurmFlags, "")
-			}
-		} else {
-			if reRam.MatchString(slurmFlags) {
+			case "--mem":
+				if !isDefaultRam {
+					log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+					continue
+				}
 				memoryLimitSetFromFlags = true
 			}
-		}
 
-		annotationFlags := strings.Split(slurmFlags, " ")
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlags...)
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlag)
+		}
 	}
 
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
