@@ -120,27 +120,28 @@ type ExecAction struct {
 	Command []string
 }
 
-// PreStopHookType indicates whether a preStop lifecycle hook is an exec or httpGet hook.
-type PreStopHookType string
+// LifecycleHookType indicates whether a lifecycle hook is an exec or httpGet hook.
+type LifecycleHookType string
 
 const (
-	PreStopHookTypeExec    PreStopHookType = "exec"
-	PreStopHookTypeHTTPGet PreStopHookType = "httpGet"
+	LifecycleHookTypeExec    LifecycleHookType = "exec"
+	LifecycleHookTypeHTTPGet LifecycleHookType = "httpGet"
 )
 
-// PreStopHTTPGetSpec holds the parameters for an httpGet-type preStop lifecycle hook.
-type PreStopHTTPGetSpec struct {
+// LifecycleHTTPGetSpec holds the parameters for an httpGet-type lifecycle hook.
+type LifecycleHTTPGetSpec struct {
 	Scheme string
 	Host   string
 	Port   int32
 	Path   string
 }
 
-// PreStopHookSpec describes a container's preStop lifecycle hook in a runtime-agnostic form.
-type PreStopHookSpec struct {
-	Type        PreStopHookType
-	ExecCommand []string           // populated when Type == PreStopHookTypeExec
-	HTTPGet     *PreStopHTTPGetSpec // populated when Type == PreStopHookTypeHTTPGet
+// LifecycleHookSpec describes a container lifecycle hook (postStart or preStop)
+// in a runtime-agnostic form.
+type LifecycleHookSpec struct {
+	Type        LifecycleHookType
+	ExecCommand []string           // populated when Type == LifecycleHookTypeExec
+	HTTPGet     *LifecycleHTTPGetSpec // populated when Type == LifecycleHookTypeHTTPGet
 }
 
 type ContainerCommand struct {
@@ -153,6 +154,6 @@ type ContainerCommand struct {
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
-	preStopHook      *PreStopHookSpec // optional preStop lifecycle hook
-	postStartHook    *PreStopHookSpec // optional postStart lifecycle hook
+	preStopHook      *LifecycleHookSpec // optional preStop lifecycle hook
+	postStartHook    *LifecycleHookSpec // optional postStart lifecycle hook
 }

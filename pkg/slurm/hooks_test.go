@@ -9,12 +9,12 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// translatePreStopHook
+// translateLifecycleHook
 // ---------------------------------------------------------------------------
 
 func TestTranslatePreStopHook_Nil(t *testing.T) {
-	if got := translatePreStopHook(nil); got != nil {
-		t.Errorf("translatePreStopHook(nil) = %v, want nil", got)
+	if got := translateLifecycleHook(nil); got != nil {
+		t.Errorf("translateLifecycleHook(nil) = %v, want nil", got)
 	}
 }
 
@@ -23,8 +23,8 @@ func TestTranslatePreStopHook_ExecEmpty(t *testing.T) {
 		Exec: &v1.ExecAction{Command: []string{}},
 	}
 	// Empty command slice should fall through and return nil (unsupported)
-	if got := translatePreStopHook(handler); got != nil {
-		t.Errorf("translatePreStopHook(exec with empty command) = %v, want nil", got)
+	if got := translateLifecycleHook(handler); got != nil {
+		t.Errorf("translateLifecycleHook(exec with empty command) = %v, want nil", got)
 	}
 }
 
@@ -33,12 +33,12 @@ func TestTranslatePreStopHook_Exec(t *testing.T) {
 	handler := &v1.LifecycleHandler{
 		Exec: &v1.ExecAction{Command: cmd},
 	}
-	got := translatePreStopHook(handler)
+	got := translateLifecycleHook(handler)
 	if got == nil {
-		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+		t.Fatal("translateLifecycleHook returned nil, expected LifecycleHookSpec")
 	}
-	if got.Type != PreStopHookTypeExec {
-		t.Errorf("Type = %q, want %q", got.Type, PreStopHookTypeExec)
+	if got.Type != LifecycleHookTypeExec {
+		t.Errorf("Type = %q, want %q", got.Type, LifecycleHookTypeExec)
 	}
 	if len(got.ExecCommand) != len(cmd) {
 		t.Errorf("ExecCommand len = %d, want %d", len(got.ExecCommand), len(cmd))
@@ -57,12 +57,12 @@ func TestTranslatePreStopHook_HTTPGet_Defaults(t *testing.T) {
 			// Scheme, Host, Path intentionally empty → should be filled with defaults
 		},
 	}
-	got := translatePreStopHook(handler)
+	got := translateLifecycleHook(handler)
 	if got == nil {
-		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+		t.Fatal("translateLifecycleHook returned nil, expected LifecycleHookSpec")
 	}
-	if got.Type != PreStopHookTypeHTTPGet {
-		t.Errorf("Type = %q, want %q", got.Type, PreStopHookTypeHTTPGet)
+	if got.Type != LifecycleHookTypeHTTPGet {
+		t.Errorf("Type = %q, want %q", got.Type, LifecycleHookTypeHTTPGet)
 	}
 	if got.HTTPGet.Scheme != "http" {
 		t.Errorf("Scheme = %q, want %q", got.HTTPGet.Scheme, "http")
@@ -87,9 +87,9 @@ func TestTranslatePreStopHook_HTTPGet_Explicit(t *testing.T) {
 			Path:   "/shutdown",
 		},
 	}
-	got := translatePreStopHook(handler)
+	got := translateLifecycleHook(handler)
 	if got == nil {
-		t.Fatal("translatePreStopHook returned nil, expected PreStopHookSpec")
+		t.Fatal("translateLifecycleHook returned nil, expected LifecycleHookSpec")
 	}
 	if got.HTTPGet.Scheme != "https" {
 		t.Errorf("Scheme = %q, want %q", got.HTTPGet.Scheme, "https")
@@ -112,15 +112,15 @@ func TestTranslatePreStopHook_HTTPGet_NamedPort(t *testing.T) {
 		},
 	}
 	// Named ports cannot be resolved; should be skipped (returns nil)
-	if got := translatePreStopHook(handler); got != nil {
-		t.Errorf("translatePreStopHook(named port) = %v, want nil", got)
+	if got := translateLifecycleHook(handler); got != nil {
+		t.Errorf("translateLifecycleHook(named port) = %v, want nil", got)
 	}
 }
 
 func TestTranslatePreStopHook_NoExecNoHTTPGet(t *testing.T) {
 	handler := &v1.LifecycleHandler{} // neither exec nor httpGet
-	if got := translatePreStopHook(handler); got != nil {
-		t.Errorf("translatePreStopHook(empty handler) = %v, want nil", got)
+	if got := translateLifecycleHook(handler); got != nil {
+		t.Errorf("translateLifecycleHook(empty handler) = %v, want nil", got)
 	}
 }
 
@@ -153,8 +153,8 @@ func TestGeneratePreStopTrap_InitContainerIgnored(t *testing.T) {
 		{
 			containerName:   "init",
 			isInitContainer: true,
-			preStopHook: &PreStopHookSpec{
-				Type:        PreStopHookTypeExec,
+			preStopHook: &LifecycleHookSpec{
+				Type:        LifecycleHookTypeExec,
 				ExecCommand: []string{"echo", "init"},
 			},
 		},
@@ -170,8 +170,8 @@ func TestGeneratePreStopTrap_ExecHook_WithRuntime(t *testing.T) {
 			containerName:   "app",
 			isInitContainer: false,
 			containerImage:  "docker://ubuntu:latest",
-			preStopHook: &PreStopHookSpec{
-				Type:        PreStopHookTypeExec,
+			preStopHook: &LifecycleHookSpec{
+				Type:        LifecycleHookTypeExec,
 				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
 			},
 		},
@@ -219,8 +219,8 @@ func TestGeneratePreStopTrap_ExecHook_NoRuntime(t *testing.T) {
 		{
 			containerName:   "app",
 			isInitContainer: false,
-			preStopHook: &PreStopHookSpec{
-				Type:        PreStopHookTypeExec,
+			preStopHook: &LifecycleHookSpec{
+				Type:        LifecycleHookTypeExec,
 				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
 			},
 		},
@@ -246,9 +246,9 @@ func TestGeneratePreStopTrap_HTTPGetHook(t *testing.T) {
 		{
 			containerName:   "sidecar",
 			isInitContainer: false,
-			preStopHook: &PreStopHookSpec{
-				Type: PreStopHookTypeHTTPGet,
-				HTTPGet: &PreStopHTTPGetSpec{
+			preStopHook: &LifecycleHookSpec{
+				Type: LifecycleHookTypeHTTPGet,
+				HTTPGet: &LifecycleHTTPGetSpec{
 					Scheme: "http",
 					Host:   "localhost",
 					Port:   8080,
@@ -278,17 +278,17 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 			containerName:   "app",
 			isInitContainer: false,
 			containerImage:  "docker://ubuntu:latest",
-			preStopHook: &PreStopHookSpec{
-				Type:        PreStopHookTypeExec,
+			preStopHook: &LifecycleHookSpec{
+				Type:        LifecycleHookTypeExec,
 				ExecCommand: []string{"echo", "bye-app"},
 			},
 		},
 		{
 			containerName:   "sidecar",
 			isInitContainer: false,
-			preStopHook: &PreStopHookSpec{
-				Type: PreStopHookTypeHTTPGet,
-				HTTPGet: &PreStopHTTPGetSpec{
+			preStopHook: &LifecycleHookSpec{
+				Type: LifecycleHookTypeHTTPGet,
+				HTTPGet: &LifecycleHTTPGetSpec{
 					Scheme: "http",
 					Host:   "localhost",
 					Port:   9000,
@@ -333,8 +333,8 @@ func TestGeneratePostStartScript_InitContainerIgnored(t *testing.T) {
 	cmd := ContainerCommand{
 		containerName:   "init",
 		isInitContainer: true,
-		postStartHook: &PreStopHookSpec{
-			Type:        PreStopHookTypeExec,
+		postStartHook: &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
 			ExecCommand: []string{"echo", "init"},
 		},
 	}
@@ -348,8 +348,8 @@ func TestGeneratePostStartScript_ExecHook_WithRuntime(t *testing.T) {
 		containerName:   "app",
 		isInitContainer: false,
 		containerImage:  "docker://python:3.11-alpine",
-		postStartHook: &PreStopHookSpec{
-			Type:        PreStopHookTypeExec,
+		postStartHook: &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
 			ExecCommand: []string{"/bin/sh", "-c", "echo hello > /tmp/marker"},
 		},
 	}
@@ -378,8 +378,8 @@ func TestGeneratePostStartScript_ExecHook_NoRuntime(t *testing.T) {
 	cmd := ContainerCommand{
 		containerName:   "app",
 		isInitContainer: false,
-		postStartHook: &PreStopHookSpec{
-			Type:        PreStopHookTypeExec,
+		postStartHook: &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
 			ExecCommand: []string{"/bin/sh", "-c", "echo hello"},
 		},
 	}
@@ -399,9 +399,9 @@ func TestGeneratePostStartScript_HTTPGetHook(t *testing.T) {
 	cmd := ContainerCommand{
 		containerName:   "sidecar",
 		isInitContainer: false,
-		postStartHook: &PreStopHookSpec{
-			Type: PreStopHookTypeHTTPGet,
-			HTTPGet: &PreStopHTTPGetSpec{
+		postStartHook: &LifecycleHookSpec{
+			Type: LifecycleHookTypeHTTPGet,
+			HTTPGet: &LifecycleHTTPGetSpec{
 				Scheme: "http",
 				Host:   "localhost",
 				Port:   8080,

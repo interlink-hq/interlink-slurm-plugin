@@ -11,16 +11,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// translatePreStopHook converts a Kubernetes LifecycleHandler into an internal
-// PreStopHookSpec.  Returns nil when the handler is nil or unsupported.
-func translatePreStopHook(handler *v1.LifecycleHandler) *PreStopHookSpec {
+// translateLifecycleHook converts a Kubernetes LifecycleHandler into an internal
+// LifecycleHookSpec.  Returns nil when the handler is nil or unsupported.
+func translateLifecycleHook(handler *v1.LifecycleHandler) *LifecycleHookSpec {
 	if handler == nil {
 		return nil
 	}
 
 	if handler.Exec != nil && len(handler.Exec.Command) > 0 {
-		return &PreStopHookSpec{
-			Type:        PreStopHookTypeExec,
+		return &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
 			ExecCommand: handler.Exec.Command,
 		}
 	}
@@ -44,9 +44,9 @@ func translatePreStopHook(handler *v1.LifecycleHandler) *PreStopHookSpec {
 		if path == "" {
 			path = "/"
 		}
-		return &PreStopHookSpec{
-			Type: PreStopHookTypeHTTPGet,
-			HTTPGet: &PreStopHTTPGetSpec{
+		return &LifecycleHookSpec{
+			Type: LifecycleHookTypeHTTPGet,
+			HTTPGet: &LifecycleHTTPGetSpec{
 				Scheme: scheme,
 				Host:   host,
 				Port:   handler.HTTPGet.Port.IntVal,
@@ -72,7 +72,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	// Collect only non-init containers that carry a hook.
 	type entry struct {
 		name      string
-		hook      *PreStopHookSpec
+		hook      *LifecycleHookSpec
 		imageName string // fully-qualified image for container-runtime dispatch
 	}
 	var entries []entry
@@ -105,7 +105,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 		outFile := fmt.Sprintf(`"${workingPath}/prestop-%s.out"`, e.name)
 
 		switch e.hook.Type {
-		case PreStopHookTypeExec:
+		case LifecycleHookTypeExec:
 			quotedArgs := make([]string, len(e.hook.ExecCommand))
 			for i, arg := range e.hook.ExecCommand {
 				quotedArgs[i] = shellescape.Quote(arg)
@@ -126,7 +126,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 					strings.Join(quotedArgs, " "), outFile))
 			}
 
-		case PreStopHookTypeHTTPGet:
+		case LifecycleHookTypeHTTPGet:
 			url := fmt.Sprintf("%s://%s:%d%s",
 				e.hook.HTTPGet.Scheme,
 				e.hook.HTTPGet.Host,
@@ -181,7 +181,7 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	))
 
 	switch cmd.postStartHook.Type {
-	case PreStopHookTypeExec:
+	case LifecycleHookTypeExec:
 		quotedArgs := make([]string, len(cmd.postStartHook.ExecCommand))
 		for i, arg := range cmd.postStartHook.ExecCommand {
 			quotedArgs[i] = shellescape.Quote(arg)
@@ -202,7 +202,7 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 				strings.Join(quotedArgs, " "), outFile))
 		}
 
-	case PreStopHookTypeHTTPGet:
+	case LifecycleHookTypeHTTPGet:
 		url := fmt.Sprintf("%s://%s:%d%s",
 			cmd.postStartHook.HTTPGet.Scheme,
 			cmd.postStartHook.HTTPGet.Host,
