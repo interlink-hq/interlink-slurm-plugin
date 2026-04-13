@@ -423,3 +423,147 @@ func TestGeneratePostStartScript_HTTPGetHook(t *testing.T) {
 		t.Error("expected 'run-sidecar.out' as output destination")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// findTmpBindHostPath
+// ---------------------------------------------------------------------------
+
+func TestFindTmpBindHostPath_Empty(t *testing.T) {
+	if got := findTmpBindHostPath(nil); got != "" {
+		t.Errorf("findTmpBindHostPath(nil) = %q, want empty", got)
+	}
+	if got := findTmpBindHostPath([]string{}); got != "" {
+		t.Errorf("findTmpBindHostPath([]) = %q, want empty", got)
+	}
+}
+
+func TestFindTmpBindHostPath_NoTmpMount(t *testing.T) {
+	runtimeCmd := []string{
+		"singularity", "exec", "--containall",
+		"--bind /host/path1:/var/run/secrets:ro --bind /host/path2:/data",
+		"docker://python:3.11-alpine",
+	}
+	if got := findTmpBindHostPath(runtimeCmd); got != "" {
+		t.Errorf("findTmpBindHostPath = %q, want empty when /tmp not bound", got)
+	}
+}
+
+func TestFindTmpBindHostPath_WithTmpMount(t *testing.T) {
+	runtimeCmd := []string{
+		"singularity", "exec", "--containall",
+		"--bind /host/data:/data:ro --bind /host/emptydir:/tmp",
+		"docker://python:3.11-alpine",
+	}
+	got := findTmpBindHostPath(runtimeCmd)
+	if got != "/host/emptydir" {
+		t.Errorf("findTmpBindHostPath = %q, want %q", got, "/host/emptydir")
+	}
+}
+
+func TestFindTmpBindHostPath_TmpWithOptions(t *testing.T) {
+	runtimeCmd := []string{
+		"singularity", "exec", "--containall",
+		"--bind /host/emptydir:/tmp:rw",
+		"docker://python:3.11-alpine",
+	}
+	got := findTmpBindHostPath(runtimeCmd)
+	if got != "/host/emptydir" {
+		t.Errorf("findTmpBindHostPath = %q, want %q", got, "/host/emptydir")
+	}
+}
+
+func TestFindTmpBindHostPath_TmpSubpathNotMatched(t *testing.T) {
+	// /tmp-data and /tmp/sub should NOT match — only exact /tmp
+	runtimeCmd := []string{
+		"singularity", "exec",
+		"--bind /host/path:/tmp-data --bind /host/path2:/tmp/sub",
+		"docker://python:3.11-alpine",
+	}
+	if got := findTmpBindHostPath(runtimeCmd); got != "" {
+		t.Errorf("findTmpBindHostPath = %q; sub-paths and suffixed names should not match", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// injectTmpBindMount — /tmp already bound
+// ---------------------------------------------------------------------------
+
+func TestInjectTmpBindMount_SkipsWhenTmpAlreadyBound(t *testing.T) {
+	runtimeCmd := []string{
+		"singularity", "exec", "--containall",
+		"--bind /host/emptydir:/tmp",
+		"docker://python:3.11-alpine",
+	}
+	got := injectTmpBindMount(runtimeCmd)
+	// Should return the original slice unchanged
+	if len(got) != len(runtimeCmd) {
+		t.Errorf("injectTmpBindMount should not inject when /tmp already bound: got len %d, want %d", len(got), len(runtimeCmd))
+	}
+	joined := strings.Join(got, " ")
+	if strings.Count(joined, ":/tmp") != 1 {
+		t.Errorf("expected exactly one :/tmp bind spec, got: %s", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// generatePostStartScript — /tmp already bound
+// ---------------------------------------------------------------------------
+
+func TestGeneratePostStartScript_UseExistingTmpMount(t *testing.T) {
+	// Simulate a container whose runtimeCommand already has /tmp bound to a volume.
+	cmd := ContainerCommand{
+		containerName:  "app",
+		containerImage: "docker://python:3.11-alpine",
+		runtimeCommand: []string{
+			"singularity", "exec", "--containall",
+			"--bind /host/emptydir:/tmp",
+			"docker://python:3.11-alpine",
+		},
+		postStartHook: &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
+			ExecCommand: []string{"/bin/sh", "-c", "echo hook > /tmp/marker"},
+		},
+	}
+	got := generatePostStartScript(testSlurmConfig(), cmd)
+	if got == "" {
+		t.Fatal("generatePostStartScript returned empty string")
+	}
+	// Should use the existing host path, not hook-tmp
+	if !strings.Contains(got, "/host/emptydir:/tmp") {
+		t.Errorf("expected existing host path /host/emptydir in bind arg, got:\n%s", got)
+	}
+	if strings.Contains(got, "hook-tmp") {
+		t.Errorf("should not create hook-tmp when /tmp is already bound, got:\n%s", got)
+	}
+	// Should NOT emit mkdir -p hook-tmp
+	if strings.Contains(got, "mkdir") {
+		t.Errorf("should not emit mkdir when /tmp already bound, got:\n%s", got)
+	}
+}
+
+func TestGeneratePostStartScript_CreatesHookTmpWhenNoTmpMount(t *testing.T) {
+	// No /tmp volume mount → should create hook-tmp and use hookTmpBindMountArg
+	cmd := ContainerCommand{
+		containerName:  "app",
+		containerImage: "docker://python:3.11-alpine",
+		runtimeCommand: []string{
+			"singularity", "exec", "--containall",
+			"--bind /host/data:/data",
+			"docker://python:3.11-alpine",
+		},
+		postStartHook: &LifecycleHookSpec{
+			Type:        LifecycleHookTypeExec,
+			ExecCommand: []string{"/bin/sh", "-c", "echo hook > /tmp/marker"},
+		},
+	}
+	got := generatePostStartScript(testSlurmConfig(), cmd)
+	if got == "" {
+		t.Fatal("generatePostStartScript returned empty string")
+	}
+	if !strings.Contains(got, "mkdir") {
+		t.Errorf("expected mkdir -p hook-tmp, got:\n%s", got)
+	}
+	if !strings.Contains(got, "hook-tmp") {
+		t.Errorf("expected hook-tmp bind mount, got:\n%s", got)
+	}
+}

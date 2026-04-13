@@ -3,6 +3,7 @@ package slurm
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"al.essio.dev/pkg/shellescape"
@@ -171,6 +172,35 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 // private /tmp and the marker file would never be found by the container.
 const hookTmpBindMountArg = `"${workingPath}/hook-tmp:/tmp"`
 
+// reTmpMount matches a singularity bind-spec whose container destination is
+// exactly /tmp (not a sub-path like /tmp-data or /tmp/sub).
+// Capture group 1 is the host-side path.
+// Examples that match:
+//
+//	" --bind /a/b:/tmp"        → m[1] = "/a/b"
+//	" --bind /a/b:/tmp:ro"     → m[1] = "/a/b"
+//	" --bind /a/b:/tmp "       → m[1] = "/a/b"
+var reTmpMount = regexp.MustCompile(`([^:\s]+):/tmp(?::|[\s]|$)`)
+
+// findTmpBindHostPath scans a runtime-command slice (as assembled by
+// Create.go / prepareRuntimeCommand) for an existing singularity --bind
+// spec whose container destination is /tmp.
+//
+// The runtime command stores all volume bind-mounts as a single
+// space-separated string element, so the regex is applied to every element
+// of the slice.
+//
+// Returns the host path (left-hand side of the colon) when found, or an
+// empty string when /tmp is not explicitly bound in the command.
+func findTmpBindHostPath(runtimeCmd []string) string {
+	for _, elem := range runtimeCmd {
+		if m := reTmpMount.FindStringSubmatch(elem); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
 // generatePostStartScript generates a shell-script fragment that runs a container's
 // postStart lifecycle hook synchronously before the container is launched.
 //
@@ -180,9 +210,15 @@ const hookTmpBindMountArg = `"${workingPath}/hook-tmp:/tmp"`
 // Output is appended to the container's run-<name>.out log so it appears in
 // kubectl logs.
 //
-// When singularity is used the hook and the container both receive a shared
-// /tmp via --bind "${workingPath}/hook-tmp:/tmp" so that hook-created files
-// (e.g. marker files) are visible to the container's entrypoint.
+// Shared /tmp handling:
+// When --containall is in effect (the default) singularity isolates /tmp.
+// To ensure hook-created files are visible to the container's entrypoint:
+//   - If the container already has a volume mount at /tmp (detected by
+//     scanning cmd.runtimeCommand), the hook reuses that same host path so
+//     both the hook and the container share the user-provided directory.
+//   - Otherwise a dedicated "${workingPath}/hook-tmp" sub-directory is
+//     created and bound as /tmp in both the hook and the main container
+//     (the main-container injection happens in injectTmpBindMount).
 //
 // Returns an empty string when the container has no postStart hook or is an
 // init container.
@@ -197,8 +233,21 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("\n# postStart lifecycle hook for container %s\n", cmd.containerName))
-	// Create the shared /tmp directory used by both the hook and the container.
-	sb.WriteString(`mkdir -p "${workingPath}/hook-tmp"` + "\n")
+
+	// Determine the bind-mount arg for /tmp shared between the hook and the
+	// main container.  If the container already mounts /tmp via a volume,
+	// reuse that same host path; otherwise create a dedicated hook-tmp dir.
+	tmpBindArg := hookTmpBindMountArg
+	if existingHostPath := findTmpBindHostPath(cmd.runtimeCommand); existingHostPath != "" {
+		// The container has an explicit /tmp volume mount.  Use the same host
+		// path in the hook so both see the same directory.  shellescape.Quote
+		// is safe here because this is a resolved absolute path (no shell vars).
+		tmpBindArg = shellescape.Quote(existingHostPath) + ":/tmp"
+	} else {
+		// No existing /tmp mount: create the shared directory now.
+		sb.WriteString(`mkdir -p "${workingPath}/hook-tmp"` + "\n")
+	}
+
 	sb.WriteString(fmt.Sprintf(
 		`printf "%%s\n" "$(date -Is --utc) Running postStart hook for container %s..." >> %s 2>&1`+"\n",
 		cmd.containerName, outFile,
@@ -212,13 +261,12 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 		}
 		if imageName != "" && config.SingularityPath != "" {
 			// Run inside the container via singularity exec — consistent with executeExecProbe.
-			// Add --bind "${workingPath}/hook-tmp:/tmp" so the hook writes to the shared /tmp
-			// that is also mounted in the main container launch (see prepare.go).
+			// Add --bind so the hook writes to the same /tmp the container will use.
 			parts := []string{shellescape.Quote(config.SingularityPath), "exec"}
 			for _, opt := range config.SingularityDefaultOptions {
 				parts = append(parts, shellescape.Quote(opt))
 			}
-			parts = append(parts, "--bind", hookTmpBindMountArg)
+			parts = append(parts, "--bind", tmpBindArg)
 			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
 			parts = append(parts, quotedArgs...)
 			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
@@ -254,12 +302,23 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 // This is used to ensure the main container sees the same /tmp as the postStart
 // hook when singularity's --containall flag is in effect.
 //
+// If /tmp is already explicitly bound in runtimeCmd (detected via
+// findTmpBindHostPath), injection is skipped: the existing mount already
+// covers /tmp for both the hook and the container, and adding a second
+// --bind for the same destination would conflict.
+//
 // If runtimeCmd is empty (which indicates a misconfiguration since the runtime
 // command should always contain at least the image), a warning is logged and
 // the original slice is returned unchanged.
 func injectTmpBindMount(runtimeCmd []string) []string {
 	if len(runtimeCmd) == 0 {
 		log.G(context.Background()).Warning("injectTmpBindMount: runtimeCmd is empty; skipping /tmp bind mount injection")
+		return runtimeCmd
+	}
+	// If /tmp is already explicitly bound (from a user volume mount), skip
+	// injecting hook-tmp: the existing bind covers both hook and container,
+	// and a second --bind targeting /tmp would conflict.
+	if findTmpBindHostPath(runtimeCmd) != "" {
 		return runtimeCmd
 	}
 	result := make([]string, 0, len(runtimeCmd)+2)
