@@ -1277,6 +1277,11 @@ highestExitCode=0
 			// marker files) are visible to the container's entrypoint.
 			if postStartScript := generatePostStartScript(config, containerCommand); postStartScript != "" {
 				stringToBeWritten.WriteString(postStartScript)
+				// When a postStart hook is present, add a shared /tmp bind mount to
+				// the runtime command so the container sees files written by the hook.
+				// Both the hook exec (in generatePostStartScript) and the container
+				// use --bind "${workingPath}/hook-tmp:/tmp".
+				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
 			}
 			stringToBeWritten.WriteString("runCtn ")
 		}

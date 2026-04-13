@@ -153,6 +153,15 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	return sb.String()
 }
 
+// hookTmpBindMount is the shell fragment inserted as a --bind argument to both
+// the postStart hook invocation and the main container launch so that writes to
+// /tmp inside the postStart hook are visible to the container's entrypoint.
+//
+// When --containall is used (the default), singularity isolates /tmp, so
+// without an explicit bind both the hook and the container would see their own
+// private /tmp and the marker file would never be found by the container.
+const hookTmpBindMount = `"${workingPath}/hook-tmp:/tmp"`
+
 // generatePostStartScript generates a shell-script fragment that runs a container's
 // postStart lifecycle hook synchronously before the container is launched.
 //
@@ -161,6 +170,10 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 // runtime is configured, it falls back to host-side execution.
 // Output is appended to the container's run-<name>.out log so it appears in
 // kubectl logs.
+//
+// When singularity is used the hook and the container both receive a shared
+// /tmp via --bind "${workingPath}/hook-tmp:/tmp" so that hook-created files
+// (e.g. marker files) are visible to the container's entrypoint.
 //
 // Returns an empty string when the container has no postStart hook or is an
 // init container.
@@ -175,6 +188,8 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("\n# postStart lifecycle hook for container %s\n", cmd.containerName))
+	// Create the shared /tmp directory used by both the hook and the container.
+	sb.WriteString(`mkdir -p "${workingPath}/hook-tmp"` + "\n")
 	sb.WriteString(fmt.Sprintf(
 		`printf "%%s\n" "$(date -Is --utc) Running postStart hook for container %s..." >> %s 2>&1`+"\n",
 		cmd.containerName, outFile,
@@ -187,11 +202,14 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 			quotedArgs[i] = shellescape.Quote(arg)
 		}
 		if imageName != "" && config.SingularityPath != "" {
-			// Run inside the container via singularity exec — consistent with executeExecProbe
+			// Run inside the container via singularity exec — consistent with executeExecProbe.
+			// Add --bind "${workingPath}/hook-tmp:/tmp" so the hook writes to the shared /tmp
+			// that is also mounted in the main container launch (see prepare.go).
 			parts := []string{shellescape.Quote(config.SingularityPath), "exec"}
 			for _, opt := range config.SingularityDefaultOptions {
 				parts = append(parts, shellescape.Quote(opt))
 			}
+			parts = append(parts, "--bind", hookTmpBindMount)
 			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
 			parts = append(parts, quotedArgs...)
 			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
@@ -219,4 +237,20 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	))
 
 	return sb.String()
+}
+
+// injectTmpBindMount inserts "--bind" hookTmpBindMount before the last element
+// (the container image) in a runtime command slice.
+//
+// This is used to ensure the main container sees the same /tmp as the postStart
+// hook when singularity's --containall flag is in effect.
+func injectTmpBindMount(runtimeCmd []string) []string {
+	if len(runtimeCmd) == 0 {
+		return runtimeCmd
+	}
+	result := make([]string, 0, len(runtimeCmd)+2)
+	result = append(result, runtimeCmd[:len(runtimeCmd)-1]...)
+	result = append(result, "--bind", hookTmpBindMount)
+	result = append(result, runtimeCmd[len(runtimeCmd)-1])
+	return result
 }
