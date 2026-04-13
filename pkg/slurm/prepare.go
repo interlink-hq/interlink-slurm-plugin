@@ -1163,7 +1163,7 @@ runCtn() {
   ctn="$1"
   shift
   # This subshell below is NOT POSIX shell compatible, it needs for example bash.
-  time ( "$@" ) &> ${workingPath}/run-${ctn}.out &
+  time ( "$@" ) >> ${workingPath}/run-${ctn}.out 2>&1 &
   pid="$!"
   printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
   pidCtns="${pidCtns} ${pid}:${ctn}"
@@ -1272,6 +1272,12 @@ highestExitCode=0
 		if containerCommand.isInitContainer {
 			stringToBeWritten.WriteString("runInitCtn ")
 		} else {
+			// Inject postStart lifecycle hook before launching the container.
+			// The hook runs synchronously so that side-effects (e.g. creating
+			// marker files) are visible to the container's entrypoint.
+			if postStartScript := generatePostStartScript(config, containerCommand); postStartScript != "" {
+				stringToBeWritten.WriteString(postStartScript)
+			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
 		stringToBeWritten.WriteString(containerCommand.containerName)
@@ -1297,7 +1303,7 @@ highestExitCode=0
 
 		// Generate probe scripts if enabled and not an init container
 		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
-			imageName := extractImageNameFromRuntimeCommand(containerCommand.runtimeCommand, config.ImagePrefix)
+			imageName := containerCommand.containerImage
 
 			if imageName != "" {
 				// Store probe metadata for status checking

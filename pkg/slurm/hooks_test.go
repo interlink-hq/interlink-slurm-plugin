@@ -169,8 +169,7 @@ func TestGeneratePreStopTrap_ExecHook_WithRuntime(t *testing.T) {
 		{
 			containerName:   "app",
 			isInitContainer: false,
-			// Simulate the runtimeCommand produced by prepareRuntimeCommand for singularity
-			runtimeCommand: []string{"/usr/bin/singularity", "exec", "--nv", "docker://ubuntu:latest"},
+			containerImage:  "docker://ubuntu:latest",
 			preStopHook: &PreStopHookSpec{
 				Type:        PreStopHookTypeExec,
 				ExecCommand: []string{"/bin/sh", "-c", "echo 'goodbye'"},
@@ -278,7 +277,7 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 		{
 			containerName:   "app",
 			isInitContainer: false,
-			runtimeCommand:  []string{"/usr/bin/singularity", "exec", "--nv", "docker://ubuntu:latest"},
+			containerImage:  "docker://ubuntu:latest",
 			preStopHook: &PreStopHookSpec{
 				Type:        PreStopHookTypeExec,
 				ExecCommand: []string{"echo", "bye-app"},
@@ -316,5 +315,111 @@ func TestGeneratePreStopTrap_MultipleContainers(t *testing.T) {
 	// Only one trap installation
 	if strings.Count(got, "trap preStopTrap SIGTERM") != 1 {
 		t.Error("expected exactly one 'trap preStopTrap SIGTERM' statement")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// generatePostStartScript
+// ---------------------------------------------------------------------------
+
+func TestGeneratePostStartScript_NoHook(t *testing.T) {
+	cmd := ContainerCommand{containerName: "app", isInitContainer: false, postStartHook: nil}
+	if got := generatePostStartScript(testSlurmConfig(), cmd); got != "" {
+		t.Errorf("generatePostStartScript with no hook = %q, want empty string", got)
+	}
+}
+
+func TestGeneratePostStartScript_InitContainerIgnored(t *testing.T) {
+	cmd := ContainerCommand{
+		containerName:   "init",
+		isInitContainer: true,
+		postStartHook: &PreStopHookSpec{
+			Type:        PreStopHookTypeExec,
+			ExecCommand: []string{"echo", "init"},
+		},
+	}
+	if got := generatePostStartScript(testSlurmConfig(), cmd); got != "" {
+		t.Errorf("generatePostStartScript should ignore init containers, got %q", got)
+	}
+}
+
+func TestGeneratePostStartScript_ExecHook_WithRuntime(t *testing.T) {
+	cmd := ContainerCommand{
+		containerName:   "app",
+		isInitContainer: false,
+		containerImage:  "docker://python:3.11-alpine",
+		postStartHook: &PreStopHookSpec{
+			Type:        PreStopHookTypeExec,
+			ExecCommand: []string{"/bin/sh", "-c", "echo hello > /tmp/marker"},
+		},
+	}
+	got := generatePostStartScript(testSlurmConfig(), cmd)
+	if got == "" {
+		t.Fatal("generatePostStartScript returned empty string, expected script fragment")
+	}
+	// Must use singularity exec (coherent with executeExecProbe)
+	if !strings.Contains(got, "/usr/bin/singularity") {
+		t.Error("expected singularity path in exec hook invocation")
+	}
+	if !strings.Contains(got, "timeout") {
+		t.Error("expected 'timeout' in exec hook invocation")
+	}
+	if !strings.Contains(got, "/bin/sh") {
+		t.Error("expected exec command '/bin/sh' in output")
+	}
+	// Output appended to container's run log, not a separate prestop file
+	if !strings.Contains(got, "run-app.out") {
+		t.Error("expected 'run-app.out' as output destination")
+	}
+}
+
+func TestGeneratePostStartScript_ExecHook_NoRuntime(t *testing.T) {
+	cfg := SlurmConfig{} // SingularityPath is empty
+	cmd := ContainerCommand{
+		containerName:   "app",
+		isInitContainer: false,
+		postStartHook: &PreStopHookSpec{
+			Type:        PreStopHookTypeExec,
+			ExecCommand: []string{"/bin/sh", "-c", "echo hello"},
+		},
+	}
+	got := generatePostStartScript(cfg, cmd)
+	if got == "" {
+		t.Fatal("generatePostStartScript returned empty string")
+	}
+	if !strings.Contains(got, "timeout 30") {
+		t.Error("expected host-side 'timeout 30' in fallback exec hook")
+	}
+	if strings.Contains(got, "singularity") {
+		t.Error("fallback should not contain 'singularity'")
+	}
+}
+
+func TestGeneratePostStartScript_HTTPGetHook(t *testing.T) {
+	cmd := ContainerCommand{
+		containerName:   "sidecar",
+		isInitContainer: false,
+		postStartHook: &PreStopHookSpec{
+			Type: PreStopHookTypeHTTPGet,
+			HTTPGet: &PreStopHTTPGetSpec{
+				Scheme: "http",
+				Host:   "localhost",
+				Port:   8080,
+				Path:   "/init",
+			},
+		},
+	}
+	got := generatePostStartScript(testSlurmConfig(), cmd)
+	if got == "" {
+		t.Fatal("generatePostStartScript returned empty string")
+	}
+	if !strings.Contains(got, "curl") {
+		t.Error("expected curl for httpGet hook")
+	}
+	if !strings.Contains(got, "http://localhost:8080/init") {
+		t.Error("expected URL in output")
+	}
+	if !strings.Contains(got, "run-sidecar.out") {
+		t.Error("expected 'run-sidecar.out' as output destination")
 	}
 }

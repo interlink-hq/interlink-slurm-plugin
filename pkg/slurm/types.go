@@ -154,4 +154,5 @@ type ContainerCommand struct {
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
 	preStopHook      *PreStopHookSpec // optional preStop lifecycle hook
+	postStartHook    *PreStopHookSpec // optional postStart lifecycle hook
 }

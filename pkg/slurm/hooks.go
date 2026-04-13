@@ -73,7 +73,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	type entry struct {
 		name      string
 		hook      *PreStopHookSpec
-		imageName string // fully-qualified image path extracted from runtimeCommand
+		imageName string // fully-qualified image for container-runtime dispatch
 	}
 	var entries []entry
 	for _, cmd := range commands {
@@ -83,7 +83,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 		entries = append(entries, entry{
 			name:      cmd.containerName,
 			hook:      cmd.preStopHook,
-			imageName: extractImageNameFromRuntimeCommand(cmd.runtimeCommand, config.ImagePrefix),
+			imageName: cmd.containerImage,
 		})
 	}
 	if len(entries) == 0 {
@@ -153,27 +153,70 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	return sb.String()
 }
 
-// extractImageNameFromRuntimeCommand returns the fully-qualified container image path
-// from a runtime command slice (e.g. ["singularity", "exec", "--nv", "docker://img"]).
-// It uses the same heuristic as the probe script generation in prepare.go:
-// an argument is considered the image if it starts with imagePrefix or "/".
-// For commands where the image follows a "run" or "exec" subcommand, the first
-// non-option argument after the subcommand is returned.
-// Returns an empty string when no image argument is found.
-func extractImageNameFromRuntimeCommand(runtimeCommand []string, imagePrefix string) string {
-	for i, arg := range runtimeCommand {
-		if strings.HasPrefix(arg, imagePrefix) || strings.HasPrefix(arg, "/") {
-			return arg
-		}
-		if (arg == "run" || arg == "exec") && i+1 < len(runtimeCommand) {
-			for j := i + 1; j < len(runtimeCommand); j++ {
-				nextArg := runtimeCommand[j]
-				if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, imagePrefix) || strings.HasPrefix(nextArg, "/")) {
-					return nextArg
-				}
-			}
-			break
-		}
+// generatePostStartScript generates a shell-script fragment that runs a container's
+// postStart lifecycle hook synchronously before the container is launched.
+//
+// The hook runs inside the container via singularity exec (consistent with
+// executeExecProbe in probes.go) with a 30-second timeout.  If no container
+// runtime is configured, it falls back to host-side execution.
+// Output is appended to the container's run-<name>.out log so it appears in
+// kubectl logs.
+//
+// Returns an empty string when the container has no postStart hook or is an
+// init container.
+func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
+	if cmd.isInitContainer || cmd.postStartHook == nil {
+		return ""
 	}
-	return ""
+
+	imageName := cmd.containerImage
+	outFile := fmt.Sprintf(`"${workingPath}/run-%s.out"`, cmd.containerName)
+
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("\n# postStart lifecycle hook for container %s\n", cmd.containerName))
+	sb.WriteString(fmt.Sprintf(
+		`printf "%%s\n" "$(date -Is --utc) Running postStart hook for container %s..." >> %s 2>&1`+"\n",
+		cmd.containerName, outFile,
+	))
+
+	switch cmd.postStartHook.Type {
+	case PreStopHookTypeExec:
+		quotedArgs := make([]string, len(cmd.postStartHook.ExecCommand))
+		for i, arg := range cmd.postStartHook.ExecCommand {
+			quotedArgs[i] = shellescape.Quote(arg)
+		}
+		if imageName != "" && config.SingularityPath != "" {
+			// Run inside the container via singularity exec — consistent with executeExecProbe
+			parts := []string{shellescape.Quote(config.SingularityPath), "exec"}
+			for _, opt := range config.SingularityDefaultOptions {
+				parts = append(parts, shellescape.Quote(opt))
+			}
+			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
+			parts = append(parts, quotedArgs...)
+			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
+				strings.Join(parts, " "), outFile))
+		} else {
+			// Fallback: run on the host when singularity is not configured
+			sb.WriteString(fmt.Sprintf("timeout 30 %s >> %s 2>&1 || true\n",
+				strings.Join(quotedArgs, " "), outFile))
+		}
+
+	case PreStopHookTypeHTTPGet:
+		url := fmt.Sprintf("%s://%s:%d%s",
+			cmd.postStartHook.HTTPGet.Scheme,
+			cmd.postStartHook.HTTPGet.Host,
+			cmd.postStartHook.HTTPGet.Port,
+			cmd.postStartHook.HTTPGet.Path,
+		)
+		sb.WriteString(fmt.Sprintf("curl -f -s --max-time 10 %s >> %s 2>&1 || true\n",
+			shellescape.Quote(url), outFile))
+	}
+
+	sb.WriteString(fmt.Sprintf(
+		`printf "%%s\n" "$(date -Is --utc) postStart hook for container %s completed." >> %s 2>&1`+"\n",
+		cmd.containerName, outFile,
+	))
+
+	return sb.String()
 }
