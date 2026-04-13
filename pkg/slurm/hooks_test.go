@@ -438,6 +438,9 @@ func TestFindTmpBindHostPath_Empty(t *testing.T) {
 }
 
 func TestFindTmpBindHostPath_NoTmpMount(t *testing.T) {
+	// In the real runtime command the volume bind-mounts are combined into a
+	// single string element by prepareMounts (see Create.go).  We test that
+	// layout here.
 	runtimeCmd := []string{
 		"singularity", "exec", "--containall",
 		"--bind /host/path1:/var/run/secrets:ro --bind /host/path2:/data",
@@ -449,6 +452,7 @@ func TestFindTmpBindHostPath_NoTmpMount(t *testing.T) {
 }
 
 func TestFindTmpBindHostPath_WithTmpMount(t *testing.T) {
+	// Single combined mounts element — the real layout from prepareMounts.
 	runtimeCmd := []string{
 		"singularity", "exec", "--containall",
 		"--bind /host/data:/data:ro --bind /host/emptydir:/tmp",
@@ -457,6 +461,20 @@ func TestFindTmpBindHostPath_WithTmpMount(t *testing.T) {
 	got := findTmpBindHostPath(runtimeCmd)
 	if got != "/host/emptydir" {
 		t.Errorf("findTmpBindHostPath = %q, want %q", got, "/host/emptydir")
+	}
+}
+
+func TestFindTmpBindHostPath_WithTmpMount_SeparateElements(t *testing.T) {
+	// Also verify the function works when bind arguments are separate slice
+	// elements (future-proofing / defence in depth).
+	runtimeCmd := []string{
+		"singularity", "exec", "--containall",
+		"--bind", "/host/emptydir:/tmp",
+		"docker://python:3.11-alpine",
+	}
+	got := findTmpBindHostPath(runtimeCmd)
+	if got != "/host/emptydir" {
+		t.Errorf("findTmpBindHostPath (separate elements) = %q, want %q", got, "/host/emptydir")
 	}
 }
 

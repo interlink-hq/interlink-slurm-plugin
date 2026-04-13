@@ -180,6 +180,11 @@ const hookTmpBindMountArg = `"${workingPath}/hook-tmp:/tmp"`
 //	" --bind /a/b:/tmp"        → m[1] = "/a/b"
 //	" --bind /a/b:/tmp:ro"     → m[1] = "/a/b"
 //	" --bind /a/b:/tmp "       → m[1] = "/a/b"
+//
+// Limitation: host paths containing spaces are not supported because
+// prepareMounts does not quote them in the bind-spec string, and the
+// `[^:\s]+` capture group stops at the first whitespace character.
+// This matches the same constraint as the rest of the volume-mount code.
 var reTmpMount = regexp.MustCompile(`([^:\s]+):/tmp(?::|[\s]|$)`)
 
 // findTmpBindHostPath scans a runtime-command slice (as assembled by
@@ -187,8 +192,10 @@ var reTmpMount = regexp.MustCompile(`([^:\s]+):/tmp(?::|[\s]|$)`)
 // spec whose container destination is /tmp.
 //
 // The runtime command stores all volume bind-mounts as a single
-// space-separated string element, so the regex is applied to every element
-// of the slice.
+// space-separated string element (see Create.go lines that append `mounts`),
+// so the regex is applied to every element of the slice to handle both
+// that layout and hypothetical future layouts where bind arguments are
+// stored as separate slice elements.
 //
 // Returns the host path (left-hand side of the colon) when found, or an
 // empty string when /tmp is not explicitly bound in the command.
@@ -237,12 +244,17 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	// Determine the bind-mount arg for /tmp shared between the hook and the
 	// main container.  If the container already mounts /tmp via a volume,
 	// reuse that same host path; otherwise create a dedicated hook-tmp dir.
+	//
+	// Note on quoting: hookTmpBindMountArg wraps the entire spec in double
+	// quotes so the shell expands ${workingPath} at runtime.  For an existing
+	// resolved host path we quote only the path component with shellescape so
+	// that special characters are handled, and append the literal `:/tmp`.
+	// Both forms produce a valid single argument for `singularity --bind`.
 	tmpBindArg := hookTmpBindMountArg
 	if existingHostPath := findTmpBindHostPath(cmd.runtimeCommand); existingHostPath != "" {
 		// The container has an explicit /tmp volume mount.  Use the same host
-		// path in the hook so both see the same directory.  shellescape.Quote
-		// is safe here because this is a resolved absolute path (no shell vars).
-		tmpBindArg = shellescape.Quote(existingHostPath) + ":/tmp"
+		// path in the hook so both see the same directory.
+		tmpBindArg = fmt.Sprintf("%s:/tmp", shellescape.Quote(existingHostPath))
 	} else {
 		// No existing /tmp mount: create the shared directory now.
 		sb.WriteString(`mkdir -p "${workingPath}/hook-tmp"` + "\n")
