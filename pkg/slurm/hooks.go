@@ -153,14 +153,23 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	return sb.String()
 }
 
-// hookTmpBindMount is the shell fragment inserted as a --bind argument to both
-// the postStart hook invocation and the main container launch so that writes to
-// /tmp inside the postStart hook are visible to the container's entrypoint.
+// hookTmpBindMountArg is the shell token for the --bind argument that shares
+// a dedicated working-directory sub-folder as /tmp between the postStart hook
+// invocation and the main container launch.
+//
+// The outer double-quotes are intentional: they allow ${workingPath} to be
+// expanded by the shell at job-script runtime while preserving the bind-spec
+// as a single argument even when workingPath contains spaces.
+//
+// This token must only be appended to a []string that will be joined into a
+// POSIX shell command line (i.e. with strings.Join(..., " ")).  It must not
+// be passed through shellescape.Quote because that would escape the $ and
+// break variable expansion.
 //
 // When --containall is used (the default), singularity isolates /tmp, so
 // without an explicit bind both the hook and the container would see their own
 // private /tmp and the marker file would never be found by the container.
-const hookTmpBindMount = `"${workingPath}/hook-tmp:/tmp"`
+const hookTmpBindMountArg = `"${workingPath}/hook-tmp:/tmp"`
 
 // generatePostStartScript generates a shell-script fragment that runs a container's
 // postStart lifecycle hook synchronously before the container is launched.
@@ -209,7 +218,7 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 			for _, opt := range config.SingularityDefaultOptions {
 				parts = append(parts, shellescape.Quote(opt))
 			}
-			parts = append(parts, "--bind", hookTmpBindMount)
+			parts = append(parts, "--bind", hookTmpBindMountArg)
 			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
 			parts = append(parts, quotedArgs...)
 			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
@@ -239,18 +248,23 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	return sb.String()
 }
 
-// injectTmpBindMount inserts "--bind" hookTmpBindMount before the last element
-// (the container image) in a runtime command slice.
+// injectTmpBindMount inserts "--bind" hookTmpBindMountArg before the last
+// element (the container image) in a runtime command slice.
 //
 // This is used to ensure the main container sees the same /tmp as the postStart
 // hook when singularity's --containall flag is in effect.
+//
+// If runtimeCmd is empty (which indicates a misconfiguration since the runtime
+// command should always contain at least the image), a warning is logged and
+// the original slice is returned unchanged.
 func injectTmpBindMount(runtimeCmd []string) []string {
 	if len(runtimeCmd) == 0 {
+		log.G(context.Background()).Warning("injectTmpBindMount: runtimeCmd is empty; skipping /tmp bind mount injection")
 		return runtimeCmd
 	}
 	result := make([]string, 0, len(runtimeCmd)+2)
 	result = append(result, runtimeCmd[:len(runtimeCmd)-1]...)
-	result = append(result, "--bind", hookTmpBindMount)
+	result = append(result, "--bind", hookTmpBindMountArg)
 	result = append(result, runtimeCmd[len(runtimeCmd)-1])
 	return result
 }
