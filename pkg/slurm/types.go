@@ -120,6 +120,30 @@ type ExecAction struct {
 	Command []string
 }
 
+// LifecycleHookType indicates whether a lifecycle hook is an exec or httpGet hook.
+type LifecycleHookType string
+
+const (
+	LifecycleHookTypeExec    LifecycleHookType = "exec"
+	LifecycleHookTypeHTTPGet LifecycleHookType = "httpGet"
+)
+
+// LifecycleHTTPGetSpec holds the parameters for an httpGet-type lifecycle hook.
+type LifecycleHTTPGetSpec struct {
+	Scheme string
+	Host   string
+	Port   int32
+	Path   string
+}
+
+// LifecycleHookSpec describes a container lifecycle hook (postStart or preStop)
+// in a runtime-agnostic form.
+type LifecycleHookSpec struct {
+	Type        LifecycleHookType
+	ExecCommand []string           // populated when Type == LifecycleHookTypeExec
+	HTTPGet     *LifecycleHTTPGetSpec // populated when Type == LifecycleHookTypeHTTPGet
+}
+
 type ContainerCommand struct {
 	containerName    string
 	isInitContainer  bool
@@ -130,4 +154,6 @@ type ContainerCommand struct {
 	readinessProbes  []ProbeCommand
 	livenessProbes   []ProbeCommand
 	startupProbes    []ProbeCommand
+	preStopHook      *LifecycleHookSpec // optional preStop lifecycle hook
+	postStartHook    *LifecycleHookSpec // optional postStart lifecycle hook
 }

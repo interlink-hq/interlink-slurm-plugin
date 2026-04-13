@@ -179,6 +179,20 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Translate preStop and postStart lifecycle hooks (init containers do not support lifecycle hooks)
+		var preStopHook *LifecycleHookSpec
+		var postStartHook *LifecycleHookSpec
+		if !isInit && container.Lifecycle != nil {
+			preStopHook = translateLifecycleHook(container.Lifecycle.PreStop)
+			if preStopHook != nil {
+				log.G(h.Ctx).Info("-- Container " + container.Name + " has a preStop lifecycle hook configured")
+			}
+			postStartHook = translateLifecycleHook(container.Lifecycle.PostStart)
+			if postStartHook != nil {
+				log.G(h.Ctx).Info("-- Container " + container.Name + " has a postStart lifecycle hook configured")
+			}
+		}
+
 		runtime_command_pod = append(runtime_command_pod, ContainerCommand{
 			runtimeCommand:   runtime_command,
 			containerName:    container.Name,
@@ -189,6 +203,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			livenessProbes:   livenessProbes,
 			startupProbes:    startupProbes,
 			containerImage:   image,
+			preStopHook:      preStopHook,
+			postStartHook:    postStartHook,
 		})
 	}
 

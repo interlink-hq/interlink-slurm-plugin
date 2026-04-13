@@ -1255,7 +1255,7 @@ runCtn() {
   ctn="$1"
   shift
   # This subshell below is NOT POSIX shell compatible, it needs for example bash.
-  time ( "$@" ) &> ${workingPath}/run-${ctn}.out &
+  time ( "$@" ) >> ${workingPath}/run-${ctn}.out 2>&1 &
   pid="$!"
   printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
   pidCtns="${pidCtns} ${pid}:${ctn}"
@@ -1336,6 +1336,11 @@ highestExitCode=0
 		}
 	}
 
+	// Inject SIGTERM trap for preStop lifecycle hooks if any container defines one.
+	if trapScript := generatePreStopTrap(config, commands); trapScript != "" {
+		stringToBeWritten.WriteString(trapScript)
+	}
+
 	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
@@ -1359,6 +1364,17 @@ highestExitCode=0
 		if containerCommand.isInitContainer {
 			stringToBeWritten.WriteString("runInitCtn ")
 		} else {
+			// Inject postStart lifecycle hook before launching the container.
+			// The hook runs synchronously so that side-effects (e.g. creating
+			// marker files) are visible to the container's entrypoint.
+			if postStartScript := generatePostStartScript(config, containerCommand); postStartScript != "" {
+				stringToBeWritten.WriteString(postStartScript)
+				// When a postStart hook is present, add a shared /tmp bind mount to
+				// the runtime command so the container sees files written by the hook.
+				// Both the hook exec (in generatePostStartScript) and the container
+				// use --bind "${workingPath}/hook-tmp:/tmp".
+				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
+			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
 		stringToBeWritten.WriteString(containerCommand.containerName)
@@ -1384,26 +1400,7 @@ highestExitCode=0
 
 		// Generate probe scripts if enabled and not an init container
 		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
-			// Extract the image name from the singularity command
-			var imageName string
-			for i, arg := range containerCommand.runtimeCommand {
-				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
-					imageName = arg
-					break
-				}
-				// Look for image after singularity run/exec command
-				if (arg == "run" || arg == "exec") && i+1 < len(containerCommand.runtimeCommand) {
-					// Skip any options and find the image
-					for j := i + 1; j < len(containerCommand.runtimeCommand); j++ {
-						nextArg := containerCommand.runtimeCommand[j]
-						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
-							imageName = nextArg
-							break
-						}
-					}
-					break
-				}
-			}
+			imageName := containerCommand.containerImage
 
 			if imageName != "" {
 				// Store probe metadata for status checking
