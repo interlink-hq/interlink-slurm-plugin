@@ -22,12 +22,19 @@ slurmctld
 SCRIPT
 
 # Wait for slurmctld to be ready before starting sidecar
+slurm_ready=0
 for i in $(seq 1 30); do
   if scontrol ping 2>/dev/null | grep -q "is UP"; then
+    slurm_ready=1
     break
   fi
   sleep 1
 done
+
+if [ "${slurm_ready}" -ne 1 ]; then
+  echo "WARNING: slurmctld did not become ready within 30 seconds" >&2
+  scontrol ping 2>&1 || true
+fi
 
 # Revoke sudo permissions
 if [[ ${sudo_cmd} ]]; then
