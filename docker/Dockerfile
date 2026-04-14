@@ -11,6 +11,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o bin/slurm-sidecar cmd/main.go
 # Copy sackd from the Slinky sackd image (not included in slurmd)
 FROM ghcr.io/slinkyproject/sackd:${SLURM_TAG} AS sackd-source
 
+# Copy slurmctld from the Slinky slurmctld image (not included in slurmd)
+FROM ghcr.io/slinkyproject/slurmctld:${SLURM_TAG} AS slurmctld-source
+
 # Base on official Slinky slurmd image
 FROM ghcr.io/slinkyproject/slurmd:${SLURM_TAG}
 
@@ -29,8 +32,11 @@ RUN apt-get update \
 # Copy sackd binary (auth daemon for auth/slurm)
 COPY --from=sackd-source /usr/sbin/sackd /usr/sbin/sackd
 
+# Copy slurmctld binary (controller daemon, not included in slurmd image)
+COPY --from=slurmctld-source /usr/sbin/slurmctld /usr/sbin/slurmctld
+
 # Slurm directories
-RUN mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /etc/slurm
+RUN mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /etc/slurm /var/lib/slurm/slurmctld
 
 # Slurm configuration
 COPY docker/slurm.conf /etc/slurm/slurm.conf
