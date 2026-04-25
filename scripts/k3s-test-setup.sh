@@ -110,14 +110,16 @@ echo "VK build dir: ${VK_BUILD_DIR}"
 
 git clone --depth=1 --branch "${INTERLINK_VERSION}" \
     https://github.com/interlink-hq/interLink.git "${VK_BUILD_DIR}" \
-    2>&1 | tee "${TEST_DIR}/vk-clone.log"
+    2>&1 | tee "${TEST_DIR}/vk-clone.log" \
+  || { echo "ERROR: Failed to clone interlink repo at ${INTERLINK_VERSION}"; exit 1; }
 
 python3 "${SCRIPT_DIR}/patch-vk-projected-configmap.py" \
     "${VK_BUILD_DIR}/pkg/virtualkubelet/execute.go"
 
 # Build the VK binary (Go is pre-installed on GitHub-hosted ubuntu runners)
 (cd "${VK_BUILD_DIR}" && go build -o "${TEST_DIR}/vk" ./cmd/virtual-kubelet/) \
-    2>&1 | tee "${TEST_DIR}/vk-build.log"
+    2>&1 | tee "${TEST_DIR}/vk-build.log" \
+  || { echo "ERROR: Failed to build VK binary"; cat "${TEST_DIR}/vk-build.log"; exit 1; }
 chmod +x "${TEST_DIR}/vk"
 echo "✓ Virtual Kubelet binary built and patched"
 

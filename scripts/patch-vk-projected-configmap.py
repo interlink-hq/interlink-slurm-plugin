@@ -16,7 +16,7 @@ import sys
 import os
 
 if len(sys.argv) != 2:
-    print(f"Usage: {sys.argv[0]} <path/to/execute.go>", file=sys.stderr)
+    print(f"ERROR: Usage: {sys.argv[0]} <path/to/execute.go>", file=sys.stderr)
     sys.exit(1)
 
 target_file = sys.argv[1]
