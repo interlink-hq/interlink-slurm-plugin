@@ -448,3 +448,90 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 		t.Errorf("decoded content = %q, want %q", string(decoded), multilineCert)
 	}
 }
+
+// TestPrepareMountsSimpleVolumeProjectedSharedFS verifies that when SHARED_FS=true,
+// multiline projected volume data (e.g. a PEM certificate from kube-root-ca.crt) is
+// written directly to the shared filesystem via os.WriteFile, preserving newlines
+// exactly, and that no heredoc is added to the SLURM script prefix.
+func TestPrepareMountsSimpleVolumeProjectedSharedFS(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	t.Setenv("SHARED_FS", "true")
+
+	multilineCert := "-----BEGIN CERTIFICATE-----\n" +
+		"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n" +
+		"test\n" +
+		"-----END CERTIFICATE-----\n"
+
+	defaultMode := int32(0644)
+	projectedVolume := v1.Volume{
+		Name: "kube-api-access",
+		VolumeSource: v1.VolumeSource{
+			Projected: &v1.ProjectedVolumeSource{
+				DefaultMode: &defaultMode,
+				Sources:     []v1.VolumeProjection{},
+			},
+		},
+	}
+
+	volumeMount := v1.VolumeMount{
+		Name:      "kube-api-access",
+		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+	}
+
+	container := &v1.Container{
+		Name: "mycontainer",
+		VolumeMounts: []v1.VolumeMount{
+			volumeMount,
+		},
+	}
+
+	configMap := v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "kube-api-access",
+		},
+		Data: map[string]string{
+			"ca.crt": multilineCert,
+		},
+	}
+
+	config := SlurmConfig{
+		ExportPodData: true,
+	}
+
+	// Reset the global prefix before the test.
+	prefix = ""
+
+	var mountedDataSB strings.Builder
+	err := prepareMountsSimpleVolume(ctx, config, container, workingDir, configMap, volumeMount, projectedVolume, &mountedDataSB)
+	if err != nil {
+		t.Fatalf("prepareMountsSimpleVolume() unexpected error: %v", err)
+	}
+
+	// With SHARED_FS=true the plugin writes files directly; no heredoc should be
+	// added to the SLURM script prefix.
+	if strings.Contains(prefix, "base64 -d <<'") {
+		t.Errorf("prefix must not contain base64 heredoc with SHARED_FS=true: prefix = %q", prefix)
+	}
+
+	// The file must exist on the shared filesystem with byte-for-byte correct content.
+	expectedFilePath := filepath.Join(workingDir, "projectedVolumeMaps", volumeMount.Name, "ca.crt")
+	gotBytes, err := os.ReadFile(expectedFilePath)
+	if err != nil {
+		t.Fatalf("os.WriteFile did not create file %s: %v", expectedFilePath, err)
+	}
+	if string(gotBytes) != multilineCert {
+		t.Errorf("file content = %q, want %q", string(gotBytes), multilineCert)
+	}
+
+	// The bind mount path must be included in the mounts string.
+	mounts := mountedDataSB.String()
+	if !strings.Contains(mounts, expectedFilePath) {
+		t.Errorf("mountedDataSB does not contain expected host path %q: got %q", expectedFilePath, mounts)
+	}
+	containerMountPath := filepath.Join(volumeMount.MountPath, "ca.crt")
+	if !strings.Contains(mounts, containerMountPath) {
+		t.Errorf("mountedDataSB does not contain expected container path %q: got %q", containerMountPath, mounts)
+	}
+}
