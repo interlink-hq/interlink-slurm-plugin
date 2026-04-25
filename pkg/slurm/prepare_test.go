@@ -13,16 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// isBase64Line returns true if the string consists only of base64 characters.
-func isBase64Line(s string) bool {
-	for _, c := range s {
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
-			return false
-		}
-	}
-	return len(s) > 0
-}
-
 func TestStringToHex(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -420,26 +410,39 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 		t.Errorf("prefix must not use echo to write file content: prefix = %q", prefix)
 	}
 
-	// The base64-encoded certificate content must be embedded in the prefix.
-	// Decode the base64 content from the prefix and verify the original multiline string is preserved.
-	lines := strings.Split(prefix, "\n")
-	var b64Line string
-	for _, line := range lines {
-		// base64 lines use A-Za-z0-9+/= only; skip empty lines and shell commands
-		if len(line) > 0 && !strings.HasPrefix(line, "base64") && !strings.HasPrefix(line, "mkdir") &&
-			!strings.HasPrefix(line, "touch") && !strings.HasPrefix(line, "VKDATA") {
-			if isBase64Line(line) {
-				b64Line = line
-				break
-			}
-		}
+	// Extract the base64 content from between "base64 -d <<'MARKER'\n" and "\nMARKER".
+	// This is more robust than scanning for lines that look like base64.
+	const heredocCmdPrefix = "base64 -d <<'"
+	cmdIdx := strings.Index(prefix, heredocCmdPrefix)
+	if cmdIdx == -1 {
+		t.Fatalf("could not find heredoc command in prefix: %q", prefix)
 	}
-	if b64Line == "" {
-		t.Fatalf("could not find base64 content line in prefix: %q", prefix)
+	// Find end of the "base64 -d <<'MARKER'" line to get the marker name.
+	markerStart := cmdIdx + len(heredocCmdPrefix)
+	markerEnd := strings.Index(prefix[markerStart:], "'")
+	if markerEnd == -1 {
+		t.Fatalf("could not find closing quote for heredoc marker in prefix: %q", prefix)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(b64Line)
+	marker := prefix[markerStart : markerStart+markerEnd]
+
+	// The heredoc content is between the first newline after the command line and the
+	// closing marker on its own line.
+	contentStart := markerStart + markerEnd + 1 // skip closing quote
+	newlineAfterCmd := strings.Index(prefix[contentStart:], "\n")
+	if newlineAfterCmd == -1 {
+		t.Fatalf("could not find newline after heredoc command in prefix: %q", prefix)
+	}
+	contentStart += newlineAfterCmd + 1
+	markerLine := "\n" + marker
+	contentEnd := strings.Index(prefix[contentStart:], markerLine)
+	if contentEnd == -1 {
+		t.Fatalf("could not find closing heredoc marker %q in prefix: %q", marker, prefix)
+	}
+	b64Content := prefix[contentStart : contentStart+contentEnd]
+
+	decoded, err := base64.StdEncoding.DecodeString(b64Content)
 	if err != nil {
-		t.Fatalf("failed to decode base64 content %q: %v", b64Line, err)
+		t.Fatalf("failed to decode base64 content %q: %v", b64Content, err)
 	}
 	if string(decoded) != multilineCert {
 		t.Errorf("decoded content = %q, want %q", string(decoded), multilineCert)

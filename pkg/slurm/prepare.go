@@ -753,11 +753,11 @@ func prepareMountsSimpleVolume(
 			//      completely eliminating the risk of premature heredoc termination.
 			envVarName := envVarNames[filePathIndex]
 			splittedEnvName := strings.Split(envVarName, "_")
-			hexPart := splittedEnvName[len(splittedEnvName)-1]
-			log.G(Ctx).Info(hexPart)
+			uniqueVolumeID := splittedEnvName[len(splittedEnvName)-1]
+			log.G(Ctx).Info(uniqueVolumeID)
 			content := os.Getenv(envVarName)
 			b64Content := base64.StdEncoding.EncodeToString([]byte(content))
-			heredocMarker := "VKDATA_" + hexPart
+			heredocMarker := "VKDATA_" + uniqueVolumeID
 			prefix += "\nbase64 -d <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + b64Content + "\n" + heredocMarker
 		}
 		switch config.ContainerRuntime {
