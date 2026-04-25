@@ -96,24 +96,30 @@ docker pull "${INTERLINK_IMAGE}" 2>&1 | tee "${TEST_DIR}/pull-interlink.log"
 echo "✓ interLink API image pulled"
 
 # ---------------------------------------------------------------------------
-# Download Virtual Kubelet binary
+# Build Virtual Kubelet binary from patched source
+#
+# The upstream VK does not project all keys from a ConfigMap when no `items`
+# are specified in a projected volume source (see issue #144).  We clone the
+# exact release tag, apply a minimal patch, and build the binary so that the
+# e2e test for projected-volume newlines works end-to-end.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Downloading Virtual Kubelet binary ==="
-VK_ARCH="$(uname -m)"
-case "${VK_ARCH}" in
-  x86_64)  VK_ARCH="x86_64" ;;
-  aarch64) VK_ARCH="arm64" ;;
-  *)
-    echo "ERROR: Unsupported architecture: ${VK_ARCH}"
-    exit 1
-    ;;
-esac
-VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_Linux_${VK_ARCH}"
-echo "Downloading VK from: ${VK_URL}"
-curl -fsSL "${VK_URL}" -o "${TEST_DIR}/vk"
+echo "=== Building Virtual Kubelet binary from patched source (${INTERLINK_VERSION}) ==="
+VK_BUILD_DIR=$(mktemp -d /tmp/interlink-vk-build-XXXXXX)
+echo "VK build dir: ${VK_BUILD_DIR}"
+
+git clone --depth=1 --branch "${INTERLINK_VERSION}" \
+    https://github.com/interlink-hq/interLink.git "${VK_BUILD_DIR}" \
+    2>&1 | tee "${TEST_DIR}/vk-clone.log"
+
+python3 "${SCRIPT_DIR}/patch-vk-projected-configmap.py" \
+    "${VK_BUILD_DIR}/pkg/virtualkubelet/execute.go"
+
+# Build the VK binary (Go is pre-installed on GitHub-hosted ubuntu runners)
+(cd "${VK_BUILD_DIR}" && go build -o "${TEST_DIR}/vk" ./cmd/virtual-kubelet/) \
+    2>&1 | tee "${TEST_DIR}/vk-build.log"
 chmod +x "${TEST_DIR}/vk"
-echo "✓ Virtual Kubelet binary downloaded"
+echo "✓ Virtual Kubelet binary built and patched"
 
 # ---------------------------------------------------------------------------
 # Create Docker network for inter-container communication
