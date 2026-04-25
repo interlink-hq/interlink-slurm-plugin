@@ -3,6 +3,7 @@ package slurm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -741,16 +742,23 @@ func prepareMountsSimpleVolume(
 			// Creates parent dir of the file, then create empty file.
 			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
 
-			// Puts content of the file using a heredoc. Note: the envVarNames has the same number and order that volumesHostToContainerPaths.
-			// Using a heredoc instead of echo "${VAR}" correctly preserves multiline content (e.g. PEM certificates).
-			// Relying on env var expansion loses newlines when SLURM exports environment variables to compute nodes.
+			// Puts content of the file using a base64-encoded heredoc.
+			// Note: the envVarNames has the same number and order as volumesHostToContainerPaths.
+			// Using a heredoc with base64-encoded content preserves multiline strings (e.g. PEM
+			// certificates) because:
+			//   1. SLURM may strip newlines when exporting environment variables to compute nodes,
+			//      making echo "${VAR}" unreliable for multiline content.
+			//   2. Base64 output only uses [A-Za-z0-9+/=] characters, so the heredoc marker
+			//      (which contains an underscore) can never appear in the base64 payload,
+			//      completely eliminating the risk of premature heredoc termination.
 			envVarName := envVarNames[filePathIndex]
 			splittedEnvName := strings.Split(envVarName, "_")
 			hexPart := splittedEnvName[len(splittedEnvName)-1]
 			log.G(Ctx).Info(hexPart)
 			content := os.Getenv(envVarName)
+			b64Content := base64.StdEncoding.EncodeToString([]byte(content))
 			heredocMarker := "VKDATA_" + hexPart
-			prefix += "\ncat <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + content + "\n" + heredocMarker
+			prefix += "\nbase64 -d <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + b64Content + "\n" + heredocMarker
 		}
 		switch config.ContainerRuntime {
 		case "singularity":

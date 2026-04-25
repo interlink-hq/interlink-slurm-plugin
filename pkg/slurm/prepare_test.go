@@ -2,6 +2,7 @@ package slurm
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,16 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// isBase64Line returns true if the string consists only of base64 characters.
+func isBase64Line(s string) bool {
+	for _, c := range s {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
 
 func TestStringToHex(t *testing.T) {
 	tests := []struct {
@@ -340,9 +351,9 @@ func TestRemoveJID(t *testing.T) {
 
 // TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
 // not set (non-shared filesystem mode), multiline projected volume data (e.g. a
-// PEM certificate from kube-root-ca.crt) is written using a heredoc in the
-// generated SLURM script prefix, so that newlines are preserved when SLURM
-// exports environment variables to compute nodes.
+// PEM certificate from kube-root-ca.crt) is written using a base64-encoded
+// heredoc in the generated SLURM script prefix, so that newlines are preserved
+// when SLURM exports environment variables to compute nodes.
 func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 	ctx := context.Background()
 	workingDir := t.TempDir()
@@ -350,7 +361,10 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 	// Ensure SHARED_FS is unset so the non-shared-fs code path is exercised.
 	t.Setenv("SHARED_FS", "false")
 
-	multilineCert := "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\ntest\n-----END CERTIFICATE-----\n"
+	multilineCert := "-----BEGIN CERTIFICATE-----\n" +
+		"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n" +
+		"test\n" +
+		"-----END CERTIFICATE-----\n"
 
 	defaultMode := int32(0644)
 	projectedVolume := v1.Volume{
@@ -397,20 +411,37 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 		t.Fatalf("prepareMountsSimpleVolume() unexpected error: %v", err)
 	}
 
-	// The generated prefix must use a heredoc (cat <<'MARKER') rather than
-	// echo "${VAR}", so that newlines inside the certificate are preserved.
-	if !strings.Contains(prefix, "cat <<'") {
-		t.Errorf("prefix does not contain heredoc (cat <<'): prefix = %q", prefix)
+	// The generated prefix must use a base64-decoded heredoc (base64 -d <<'MARKER')
+	// rather than echo "${VAR}", so that newlines inside the certificate are preserved.
+	if !strings.Contains(prefix, "base64 -d <<'") {
+		t.Errorf("prefix does not contain base64 heredoc (base64 -d <<'): prefix = %q", prefix)
 	}
 	if strings.Contains(prefix, "echo \"${") {
 		t.Errorf("prefix must not use echo to write file content: prefix = %q", prefix)
 	}
 
-	// The actual certificate content with newlines must be embedded in the prefix.
-	if !strings.Contains(prefix, "-----BEGIN CERTIFICATE-----\n") {
-		t.Errorf("prefix does not contain certificate with preserved newline: prefix = %q", prefix)
+	// The base64-encoded certificate content must be embedded in the prefix.
+	// Decode the base64 content from the prefix and verify the original multiline string is preserved.
+	lines := strings.Split(prefix, "\n")
+	var b64Line string
+	for _, line := range lines {
+		// base64 lines use A-Za-z0-9+/= only; skip empty lines and shell commands
+		if len(line) > 0 && !strings.HasPrefix(line, "base64") && !strings.HasPrefix(line, "mkdir") &&
+			!strings.HasPrefix(line, "touch") && !strings.HasPrefix(line, "VKDATA") {
+			if isBase64Line(line) {
+				b64Line = line
+				break
+			}
+		}
 	}
-	if !strings.Contains(prefix, "-----END CERTIFICATE-----") {
-		t.Errorf("prefix does not contain end of certificate: prefix = %q", prefix)
+	if b64Line == "" {
+		t.Fatalf("could not find base64 content line in prefix: %q", prefix)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(b64Line)
+	if err != nil {
+		t.Fatalf("failed to decode base64 content %q: %v", b64Line, err)
+	}
+	if string(decoded) != multilineCert {
+		t.Errorf("decoded content = %q, want %q", string(decoded), multilineCert)
 	}
 }
