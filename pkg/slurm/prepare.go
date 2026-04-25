@@ -741,11 +741,16 @@ func prepareMountsSimpleVolume(
 			// Creates parent dir of the file, then create empty file.
 			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
 
-			// Puts content of the file thanks to env var. Note: the envVarNames has the same number and order that volumesHostToContainerPaths.
+			// Puts content of the file using a heredoc. Note: the envVarNames has the same number and order that volumesHostToContainerPaths.
+			// Using a heredoc instead of echo "${VAR}" correctly preserves multiline content (e.g. PEM certificates).
+			// Relying on env var expansion loses newlines when SLURM exports environment variables to compute nodes.
 			envVarName := envVarNames[filePathIndex]
 			splittedEnvName := strings.Split(envVarName, "_")
-			log.G(Ctx).Info(splittedEnvName[len(splittedEnvName)-1])
-			prefix += "\necho \"${" + envVarName + "}\" > \"" + hostFilePath + "\""
+			hexPart := splittedEnvName[len(splittedEnvName)-1]
+			log.G(Ctx).Info(hexPart)
+			content := os.Getenv(envVarName)
+			heredocMarker := "VKDATA_" + hexPart
+			prefix += "\ncat <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + content + "\n" + heredocMarker
 		}
 		switch config.ContainerRuntime {
 		case "singularity":

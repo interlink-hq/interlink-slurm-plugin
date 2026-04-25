@@ -337,3 +337,80 @@ func TestRemoveJID(t *testing.T) {
 		t.Error("removeJID() incorrectly removed uid-2")
 	}
 }
+
+// TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
+// not set (non-shared filesystem mode), multiline projected volume data (e.g. a
+// PEM certificate from kube-root-ca.crt) is written using a heredoc in the
+// generated SLURM script prefix, so that newlines are preserved when SLURM
+// exports environment variables to compute nodes.
+func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	// Ensure SHARED_FS is unset so the non-shared-fs code path is exercised.
+	t.Setenv("SHARED_FS", "false")
+
+	multilineCert := "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\ntest\n-----END CERTIFICATE-----\n"
+
+	defaultMode := int32(0644)
+	projectedVolume := v1.Volume{
+		Name: "kube-api-access",
+		VolumeSource: v1.VolumeSource{
+			Projected: &v1.ProjectedVolumeSource{
+				DefaultMode: &defaultMode,
+				Sources:     []v1.VolumeProjection{},
+			},
+		},
+	}
+
+	volumeMount := v1.VolumeMount{
+		Name:      "kube-api-access",
+		MountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+	}
+
+	container := &v1.Container{
+		Name: "mycontainer",
+		VolumeMounts: []v1.VolumeMount{
+			volumeMount,
+		},
+	}
+
+	configMap := v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "kube-api-access",
+		},
+		Data: map[string]string{
+			"ca.crt": multilineCert,
+		},
+	}
+
+	config := SlurmConfig{
+		ExportPodData: true,
+	}
+
+	// Reset the global prefix before the test.
+	prefix = ""
+
+	var mountedDataSB strings.Builder
+	err := prepareMountsSimpleVolume(ctx, config, container, workingDir, configMap, volumeMount, projectedVolume, &mountedDataSB)
+	if err != nil {
+		t.Fatalf("prepareMountsSimpleVolume() unexpected error: %v", err)
+	}
+
+	// The generated prefix must use a heredoc (cat <<'MARKER') rather than
+	// echo "${VAR}", so that newlines inside the certificate are preserved.
+	if !strings.Contains(prefix, "cat <<'") {
+		t.Errorf("prefix does not contain heredoc (cat <<'): prefix = %q", prefix)
+	}
+	if strings.Contains(prefix, "echo \"${") {
+		t.Errorf("prefix must not use echo to write file content: prefix = %q", prefix)
+	}
+
+	// The actual certificate content with newlines must be embedded in the prefix.
+	if !strings.Contains(prefix, "-----BEGIN CERTIFICATE-----\n") {
+		t.Errorf("prefix does not contain certificate with preserved newline: prefix = %q", prefix)
+	}
+	if !strings.Contains(prefix, "-----END CERTIFICATE-----") {
+		t.Errorf("prefix does not contain end of certificate: prefix = %q", prefix)
+	}
+}
