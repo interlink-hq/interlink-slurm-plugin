@@ -100,7 +100,14 @@ echo "✓ interLink API image pulled"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Downloading Virtual Kubelet binary (${INTERLINK_VERSION}) ==="
-VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_Linux_x86_64"
+_OS="$(uname -s)"
+_ARCH="$(uname -m)"
+case "${_ARCH}" in
+  x86_64)  _ARCH="x86_64" ;;
+  aarch64|arm64) _ARCH="arm64" ;;
+  *) echo "ERROR: Unsupported architecture: ${_ARCH}"; exit 1 ;;
+esac
+VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_${_OS}_${_ARCH}"
 curl -fsSL "${VK_URL}" -o "${TEST_DIR}/vk" \
   || { echo "ERROR: Failed to download VK binary from ${VK_URL}"; exit 1; }
 chmod +x "${TEST_DIR}/vk"
