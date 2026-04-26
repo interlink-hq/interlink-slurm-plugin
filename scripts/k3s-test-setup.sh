@@ -96,22 +96,20 @@ docker pull "${INTERLINK_IMAGE}" 2>&1 | tee "${TEST_DIR}/pull-interlink.log"
 echo "✓ interLink API image pulled"
 
 # ---------------------------------------------------------------------------
-# Download Virtual Kubelet binary
+# Download Virtual Kubelet binary from the interLink release
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Downloading Virtual Kubelet binary ==="
-VK_ARCH="$(uname -m)"
-case "${VK_ARCH}" in
-  x86_64)  VK_ARCH="x86_64" ;;
-  aarch64) VK_ARCH="arm64" ;;
-  *)
-    echo "ERROR: Unsupported architecture: ${VK_ARCH}"
-    exit 1
-    ;;
+echo "=== Downloading Virtual Kubelet binary (${INTERLINK_VERSION}) ==="
+_OS="$(uname -s)"
+_ARCH="$(uname -m)"
+case "${_ARCH}" in
+  x86_64)  _ARCH="x86_64" ;;
+  aarch64|arm64) _ARCH="arm64" ;;
+  *) echo "ERROR: Unsupported architecture: ${_ARCH}"; exit 1 ;;
 esac
-VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_Linux_${VK_ARCH}"
-echo "Downloading VK from: ${VK_URL}"
-curl -fsSL "${VK_URL}" -o "${TEST_DIR}/vk"
+VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_${_OS}_${_ARCH}"
+curl -fsSL "${VK_URL}" -o "${TEST_DIR}/vk" \
+  || { echo "ERROR: Failed to download VK binary from ${VK_URL}"; exit 1; }
 chmod +x "${TEST_DIR}/vk"
 echo "✓ Virtual Kubelet binary downloaded"
 
