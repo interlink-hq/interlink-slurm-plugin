@@ -96,32 +96,15 @@ docker pull "${INTERLINK_IMAGE}" 2>&1 | tee "${TEST_DIR}/pull-interlink.log"
 echo "✓ interLink API image pulled"
 
 # ---------------------------------------------------------------------------
-# Build Virtual Kubelet binary from patched source
-#
-# The upstream VK does not project all keys from a ConfigMap when no `items`
-# are specified in a projected volume source (see issue #144).  We clone the
-# exact release tag, apply a minimal patch, and build the binary so that the
-# e2e test for projected-volume newlines works end-to-end.
+# Download Virtual Kubelet binary from the interLink release
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Building Virtual Kubelet binary from patched source (${INTERLINK_VERSION}) ==="
-VK_BUILD_DIR=$(mktemp -d /tmp/interlink-vk-build-XXXXXX)
-echo "VK build dir: ${VK_BUILD_DIR}"
-
-git clone --depth=1 --branch "${INTERLINK_VERSION}" \
-    https://github.com/interlink-hq/interLink.git "${VK_BUILD_DIR}" \
-    2>&1 | tee "${TEST_DIR}/vk-clone.log" \
-  || { echo "ERROR: Failed to clone interlink repo at ${INTERLINK_VERSION}"; exit 1; }
-
-python3 "${SCRIPT_DIR}/patch-vk-projected-configmap.py" \
-    "${VK_BUILD_DIR}/pkg/virtualkubelet/execute.go"
-
-# Build the VK binary (Go is pre-installed on GitHub-hosted ubuntu runners)
-(cd "${VK_BUILD_DIR}" && go build -o "${TEST_DIR}/vk" ./cmd/virtual-kubelet/) \
-    2>&1 | tee "${TEST_DIR}/vk-build.log" \
-  || { echo "ERROR: Failed to build VK binary"; cat "${TEST_DIR}/vk-build.log"; exit 1; }
+echo "=== Downloading Virtual Kubelet binary (${INTERLINK_VERSION}) ==="
+VK_URL="https://github.com/interlink-hq/interLink/releases/download/${INTERLINK_VERSION}/virtual-kubelet_Linux_x86_64"
+curl -fsSL "${VK_URL}" -o "${TEST_DIR}/vk" \
+  || { echo "ERROR: Failed to download VK binary from ${VK_URL}"; exit 1; }
 chmod +x "${TEST_DIR}/vk"
-echo "✓ Virtual Kubelet binary built and patched"
+echo "✓ Virtual Kubelet binary downloaded"
 
 # ---------------------------------------------------------------------------
 # Create Docker network for inter-container communication
