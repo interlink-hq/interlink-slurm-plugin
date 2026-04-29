@@ -89,7 +89,7 @@ echo "✓ SLURM plugin image built"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Pulling interLink API image ==="
-INTERLINK_VERSION="${INTERLINK_VERSION:-0.6.0}"
+INTERLINK_VERSION="${INTERLINK_VERSION:-0.6.2-pre4}"
 INTERLINK_IMAGE="ghcr.io/interlink-hq/interlink/interlink:${INTERLINK_VERSION}"
 echo "interLink version: ${INTERLINK_VERSION}"
 docker pull "${INTERLINK_IMAGE}" 2>&1 | tee "${TEST_DIR}/pull-interlink.log"
