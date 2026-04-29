@@ -410,6 +410,14 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 		t.Errorf("prefix must not use echo to write file content: prefix = %q", prefix)
 	}
 
+	// The mkdir -p command must use an absolute path (starting with "/") so that
+	// the parent directory is created at the correct location on the SLURM compute
+	// node. A relative path would create the directory relative to the SLURM job's
+	// working directory, not at the absolute path used by the subsequent heredoc.
+	if !strings.Contains(prefix, "mkdir -p \"/") {
+		t.Errorf("prefix mkdir -p must use an absolute path (got relative): prefix = %q", prefix)
+	}
+
 	// Extract the base64 content from between "base64 -d <<'MARKER'\n" and "\nMARKER".
 	// This is more robust than scanning for lines that look like base64.
 	const heredocCmdPrefix = "base64 -d <<'"

@@ -736,11 +736,17 @@ func prepareMountsSimpleVolume(
 		if os.Getenv("SHARED_FS") != "true" {
 			filePathSplitted := strings.Split(volumesHostToContainerPath, ":")
 			hostFilePath := filePathSplitted[0]
-			hostFilePathSplitted := strings.Split(hostFilePath, "/")
-			hostParentDir := filepath.Join(hostFilePathSplitted[:len(hostFilePathSplitted)-1]...)
+			// Use filepath.Dir to obtain the correct absolute parent directory.
+			// The previous approach (splitting on "/" and re-joining) discarded the
+			// leading empty component, producing a relative path such as
+			// "tmp/.interlink/…" instead of "/tmp/.interlink/…". With a relative
+			// mkdir -p the directory was created relative to the SLURM job's CWD,
+			// not at the absolute path used by the subsequent heredoc redirect, so
+			// the base64 -d write always failed in SHARED_FS=false mode.
+			hostParentDir := filepath.Dir(hostFilePath)
 
 			// Creates parent dir of the file, then create empty file.
-			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
+			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch \"" + hostFilePath + "\""
 
 			// Puts content of the file using a base64-encoded heredoc.
 			// Note: the envVarNames has the same number and order as volumesHostToContainerPaths.
