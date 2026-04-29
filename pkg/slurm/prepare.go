@@ -500,6 +500,27 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 	}, nil
 }
 
+
+// normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
+// literal backslash-n escape sequences (\n) to actual newline characters when the
+// string contains no real newlines. This handles a common misconfiguration where the
+// VK config has KubernetesApiCaCrt (or any PEM-like field) stored in unquoted YAML
+// without a block scalar (|), so the YAML parser never processes the \n escape.
+// The normalization is safe because:
+//   - If the string already contains real newlines, no change is made (correct YAML).
+//   - If the string contains only \n literals (no real newlines), all \n are replaced
+//     with real newlines. Legitimate content that intentionally contains \n without
+//     real newlines and should NOT be unescaped is extremely unusual in Kubernetes
+//     volume file values (all known cases are text or PEM certificates).
+func normalizeVolumeFileContent(s string) []byte {
+	// If there are already real newlines, or no literal \n sequences, return as-is.
+	if !strings.Contains(s, `\n`) || strings.ContainsRune(s, '\n') {
+		return []byte(s)
+	}
+	// The string has literal \n but no real newlines: unescape.
+	return []byte(strings.ReplaceAll(s, `\n`, "\n"))
+}
+
 // CreateDirectories is just a function to be sure directories exists at runtime
 func (h *SidecarHandler) CreateDirectories() error {
 	path := h.Config.DataRootFolder
@@ -1782,7 +1803,7 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			// Convert map of string to map of []byte
 			mountDataConfigMapsAsBytes := make(map[string][]byte)
 			for key := range retrievedDataObjectCasted.Data {
-				mountDataConfigMapsAsBytes[key] = []byte(retrievedDataObjectCasted.Data[key])
+				mountDataConfigMapsAsBytes[key] = normalizeVolumeFileContent(retrievedDataObjectCasted.Data[key])
 			}
 			fileMode := os.FileMode(*defaultMode)
 			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)

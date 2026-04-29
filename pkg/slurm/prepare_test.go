@@ -552,3 +552,53 @@ func TestPrepareMountsSimpleVolumeProjectedSharedFS(t *testing.T) {
 		t.Errorf("mountedDataSB does not contain expected container path %q: got %q", containerMountPath, mounts)
 	}
 }
+
+// TestNormalizeVolumeFileContent verifies that normalizeVolumeFileContent properly
+// handles the common misconfiguration where a PEM certificate (or any multiline
+// value) is stored in the VK YAML config without a block scalar (|), causing the
+// YAML parser to deliver literal \n sequences instead of real newlines.
+func TestNormalizeVolumeFileContent(t *testing.T) {
+const pemWithRealNewlines = "-----BEGIN CERTIFICATE-----\nMIIFakeCert==\n-----END CERTIFICATE-----\n"
+const pemWithLiteralBackslashN = `-----BEGIN CERTIFICATE-----\nMIIFakeCert==\n-----END CERTIFICATE-----\n`
+
+tests := []struct {
+name  string
+input string
+want  string
+}{
+{
+name:  "already has real newlines - no change",
+input: pemWithRealNewlines,
+want:  pemWithRealNewlines,
+},
+{
+name:  "literal backslash-n only - unescape to real newlines",
+input: pemWithLiteralBackslashN,
+want:  pemWithRealNewlines,
+},
+{
+name:  "plain text without any newlines or escape sequences - no change",
+input: "hello world",
+want:  "hello world",
+},
+{
+name:  "mixed real newlines and literal backslash-n - no change (real newlines present)",
+input: "line1\nli\\ne2\nline3\n",
+want:  "line1\nli\\ne2\nline3\n",
+},
+{
+name:  "empty string - no change",
+input: "",
+want:  "",
+},
+}
+
+for _, tc := range tests {
+t.Run(tc.name, func(t *testing.T) {
+got := normalizeVolumeFileContent(tc.input)
+if string(got) != tc.want {
+t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
+}
+})
+}
+}
