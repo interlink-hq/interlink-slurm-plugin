@@ -410,6 +410,14 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 		t.Errorf("prefix must not use echo to write file content: prefix = %q", prefix)
 	}
 
+	// The mkdir -p command must use an absolute path (starting with "/") so that
+	// the parent directory is created at the correct location on the SLURM compute
+	// node. A relative path would create the directory relative to the SLURM job's
+	// working directory, not at the absolute path used by the subsequent heredoc.
+	if !strings.Contains(prefix, "mkdir -p \"/") {
+		t.Errorf("prefix mkdir -p must use an absolute path (got relative): prefix = %q", prefix)
+	}
+
 	// Extract the base64 content from between "base64 -d <<'MARKER'\n" and "\nMARKER".
 	// This is more robust than scanning for lines that look like base64.
 	const heredocCmdPrefix = "base64 -d <<'"
@@ -446,6 +454,15 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 	}
 	if string(decoded) != multilineCert {
 		t.Errorf("decoded content = %q, want %q", string(decoded), multilineCert)
+	}
+
+	// The prefix must end with exactly the heredoc end-marker and nothing else
+	// on that line. produceSLURMScript appends "\n" + f.Name() after the prefix,
+	// so if the prefix ended with "VKDATA_abc /path/to/job.sh" bash would not
+	// recognise the end-of-heredoc and would consume job.sh into the heredoc.
+	if !strings.HasSuffix(prefix, "\n"+marker) {
+		t.Errorf("prefix must end with \"\\n%s\" so the heredoc terminator is on its own line; got suffix %q",
+			marker, prefix[max(0, len(prefix)-len(marker)-20):])
 	}
 }
 
@@ -534,4 +551,54 @@ func TestPrepareMountsSimpleVolumeProjectedSharedFS(t *testing.T) {
 	if !strings.Contains(mounts, containerMountPath) {
 		t.Errorf("mountedDataSB does not contain expected container path %q: got %q", containerMountPath, mounts)
 	}
+}
+
+// TestNormalizeVolumeFileContent verifies that normalizeVolumeFileContent properly
+// handles the common misconfiguration where a PEM certificate (or any multiline
+// value) is stored in the VK YAML config without a block scalar (|), causing the
+// YAML parser to deliver literal \n sequences instead of real newlines.
+func TestNormalizeVolumeFileContent(t *testing.T) {
+const pemWithRealNewlines = "-----BEGIN CERTIFICATE-----\nMIIFakeCert==\n-----END CERTIFICATE-----\n"
+const pemWithLiteralBackslashN = `-----BEGIN CERTIFICATE-----\nMIIFakeCert==\n-----END CERTIFICATE-----\n`
+
+tests := []struct {
+name  string
+input string
+want  string
+}{
+{
+name:  "already has real newlines - no change",
+input: pemWithRealNewlines,
+want:  pemWithRealNewlines,
+},
+{
+name:  "literal backslash-n only - unescape to real newlines",
+input: pemWithLiteralBackslashN,
+want:  pemWithRealNewlines,
+},
+{
+name:  "plain text without any newlines or escape sequences - no change",
+input: "hello world",
+want:  "hello world",
+},
+{
+name:  "mixed real newlines and literal backslash-n - no change (real newlines present)",
+input: "line1\nli\\ne2\nline3\n",
+want:  "line1\nli\\ne2\nline3\n",
+},
+{
+name:  "empty string - no change",
+input: "",
+want:  "",
+},
+}
+
+for _, tc := range tests {
+t.Run(tc.name, func(t *testing.T) {
+got := normalizeVolumeFileContent(tc.input)
+if string(got) != tc.want {
+t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
+}
+})
+}
 }

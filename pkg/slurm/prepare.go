@@ -500,6 +500,27 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 	}, nil
 }
 
+
+// normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
+// literal backslash-n escape sequences (\n) to actual newline characters when the
+// string contains no real newlines. This handles a common misconfiguration where the
+// VK config has KubernetesApiCaCrt (or any PEM-like field) stored in unquoted YAML
+// without a block scalar (|), so the YAML parser never processes the \n escape.
+// The normalization is safe because:
+//   - If the string already contains real newlines, no change is made (correct YAML).
+//   - If the string contains only \n literals (no real newlines), all \n are replaced
+//     with real newlines. Legitimate content that intentionally contains \n without
+//     real newlines and should NOT be unescaped is extremely unusual in Kubernetes
+//     volume file values (all known cases are text or PEM certificates).
+func normalizeVolumeFileContent(s string) []byte {
+	// If there are already real newlines, or no literal \n sequences, return as-is.
+	if !strings.Contains(s, `\n`) || strings.ContainsRune(s, '\n') {
+		return []byte(s)
+	}
+	// The string has literal \n but no real newlines: unescape.
+	return []byte(strings.ReplaceAll(s, `\n`, "\n"))
+}
+
 // CreateDirectories is just a function to be sure directories exists at runtime
 func (h *SidecarHandler) CreateDirectories() error {
 	path := h.Config.DataRootFolder
@@ -736,11 +757,17 @@ func prepareMountsSimpleVolume(
 		if os.Getenv("SHARED_FS") != "true" {
 			filePathSplitted := strings.Split(volumesHostToContainerPath, ":")
 			hostFilePath := filePathSplitted[0]
-			hostFilePathSplitted := strings.Split(hostFilePath, "/")
-			hostParentDir := filepath.Join(hostFilePathSplitted[:len(hostFilePathSplitted)-1]...)
+			// Use filepath.Dir to obtain the correct absolute parent directory.
+			// The previous approach (splitting on "/" and re-joining) discarded the
+			// leading empty component, producing a relative path such as
+			// "tmp/.interlink/…" instead of "/tmp/.interlink/…". With a relative
+			// mkdir -p the directory was created relative to the SLURM job's CWD,
+			// not at the absolute path used by the subsequent heredoc redirect, so
+			// the base64 -d write always failed in SHARED_FS=false mode.
+			hostParentDir := filepath.Dir(hostFilePath)
 
 			// Creates parent dir of the file, then create empty file.
-			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
+			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch \"" + hostFilePath + "\""
 
 			// Puts content of the file using a base64-encoded heredoc.
 			// Note: the envVarNames has the same number and order as volumesHostToContainerPaths.
@@ -1209,7 +1236,13 @@ func produceSLURMScript(
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		prefix + " " + f.Name() +
+		// NOTE: prefix must be separated from f.Name() by a newline, not a
+		// space.  When SHARED_FS=false the prefix ends with a base64 heredoc
+		// end-marker (e.g. "VKDATA_abc").  If f.Name() were appended on the
+		// same line ("VKDATA_abc /path/to/job.sh") bash would not recognise
+		// it as the end-of-heredoc, consume the rest of the script into the
+		// heredoc, and never execute job.sh.
+		prefix + "\n" + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
@@ -1770,7 +1803,7 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			// Convert map of string to map of []byte
 			mountDataConfigMapsAsBytes := make(map[string][]byte)
 			for key := range retrievedDataObjectCasted.Data {
-				mountDataConfigMapsAsBytes[key] = []byte(retrievedDataObjectCasted.Data[key])
+				mountDataConfigMapsAsBytes[key] = normalizeVolumeFileContent(retrievedDataObjectCasted.Data[key])
 			}
 			fileMode := os.FileMode(*defaultMode)
 			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)
