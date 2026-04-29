@@ -1215,7 +1215,13 @@ func produceSLURMScript(
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		prefix + " " + f.Name() +
+		// NOTE: prefix must be separated from f.Name() by a newline, not a
+		// space.  When SHARED_FS=false the prefix ends with a base64 heredoc
+		// end-marker (e.g. "VKDATA_abc").  If f.Name() were appended on the
+		// same line ("VKDATA_abc /path/to/job.sh") bash would not recognise
+		// it as the end-of-heredoc, consume the rest of the script into the
+		// heredoc, and never execute job.sh.
+		prefix + "\n" + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")

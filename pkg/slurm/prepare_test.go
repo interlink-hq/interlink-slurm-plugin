@@ -455,6 +455,15 @@ func TestPrepareMountsSimpleVolumeProjectedHeredoc(t *testing.T) {
 	if string(decoded) != multilineCert {
 		t.Errorf("decoded content = %q, want %q", string(decoded), multilineCert)
 	}
+
+	// The prefix must end with exactly the heredoc end-marker and nothing else
+	// on that line. produceSLURMScript appends "\n" + f.Name() after the prefix,
+	// so if the prefix ended with "VKDATA_abc /path/to/job.sh" bash would not
+	// recognise the end-of-heredoc and would consume job.sh into the heredoc.
+	if !strings.HasSuffix(prefix, "\n"+marker) {
+		t.Errorf("prefix must end with \"\\n%s\" so the heredoc terminator is on its own line; got suffix %q",
+			marker, prefix[max(0, len(prefix)-len(marker)-20):])
+	}
 }
 
 // TestPrepareMountsSimpleVolumeProjectedSharedFS verifies that when SHARED_FS=true,
