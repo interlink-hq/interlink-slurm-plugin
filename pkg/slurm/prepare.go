@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -254,6 +255,48 @@ func hasGPUInFlags(flags []string) bool {
 		}
 	}
 	return false
+}
+
+// gpuRequestFlagKeys are the SLURM flags that request GPUs on their own, i.e.
+// without going through --gres. Short aliases (-G) are normalised by slurmFlagKey.
+var gpuRequestFlagKeys = map[string]bool{
+	"--gpus":             true,
+	"--gpus-per-node":    true,
+	"--gpus-per-socket":  true,
+	"--gpus-per-task":    true,
+	"--ntasks-per-gpu":   true,
+	"--gpus-per-account": true,
+}
+
+// declaresGPUs reports whether a SLURM flag already asks for GPUs. A --gres flag
+// only counts when it actually mentions the gpu resource, since --gres is also
+// used for unrelated generic resources (e.g. --gres=lscratch:10).
+func declaresGPUs(flag string) bool {
+	key := slurmFlagKey(flag)
+	if gpuRequestFlagKeys[key] {
+		return true
+	}
+	if key == "--gres" {
+		return strings.Contains(strings.ToLower(slurmFlagValue(flag)), "gpu")
+	}
+	return false
+}
+
+// slurmFlagValue returns the value of a flag written either as "--flag=value" or
+// as "--flag value". It returns an empty string for flags without a value.
+func slurmFlagValue(flag string) string {
+	parts := splitShellWords(strings.TrimSpace(flag))
+	if len(parts) == 0 {
+		return ""
+	}
+
+	if _, inlineValue, found := strings.Cut(parts[0], "="); found {
+		parts[0] = inlineValue
+	} else {
+		parts = parts[1:]
+	}
+
+	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
 var slurmFlagAliases = map[string]string{
@@ -499,7 +542,6 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 		SlurmFlags:    selectedFlavor.SlurmFlags,
 	}, nil
 }
-
 
 // normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
 // literal backslash-n escape sequences (\n) to actual newline characters when the
@@ -1152,6 +1194,38 @@ func produceSLURMScript(
 		}
 	}
 
+	// Map GPU resources from the pod spec (nvidia.com/gpu, amd.com/gpu) to --gres.
+	// An explicit GPU request coming from the flavor or from the annotation flags
+	// always wins: it can name a specific model (--gres gpu:nvidia-h100:2), which
+	// the pod spec cannot express.
+	if gpuCount := detectGPUResources(Ctx, pod.Spec.Containers); gpuCount > 0 {
+		gpuGres := "gpu:" + strconv.FormatInt(gpuCount, 10)
+
+		if slices.ContainsFunc(sbatchFlagsFromArgo, declaresGPUs) {
+			log.G(Ctx).Infof("Ignoring the %d GPU(s) requested in the pod resources, GPUs are already requested through SLURM flags", gpuCount)
+		} else {
+			// Merge into an existing non-GPU --gres (e.g. --gres=lscratch:10) instead
+			// of appending a second one, since deduplication keeps only one per flag.
+			merged := false
+			for i, slurmFlag := range sbatchFlagsFromArgo {
+				if slurmFlagKey(slurmFlag) != "--gres" {
+					continue
+				}
+				if existing := slurmFlagValue(slurmFlag); existing != "" {
+					sbatchFlagsFromArgo[i] = "--gres=" + existing + "," + gpuGres
+				} else {
+					sbatchFlagsFromArgo[i] = "--gres=" + gpuGres
+				}
+				merged = true
+				break
+			}
+			if !merged {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--gres="+gpuGres)
+			}
+			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with --gres=%s", gpuCount, gpuGres)
+		}
+	}
+
 	// Deduplicate flags - later flags override earlier ones
 	// Priority order: flavor flags < annotation flags < pod spec resource flags
 	sbatchFlagsFromArgo = deduplicateSlurmFlags(sbatchFlagsFromArgo)
@@ -1196,6 +1270,11 @@ func produceSLURMScript(
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
 
+	// execWrapper, when set, is the command job.sh has to be passed to as an
+	// argument instead of being executed directly (e.g. the overlay network
+	// mesh.sh, which runs its arguments inside the network namespace it sets up).
+	execWrapper := ""
+
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
 		// Check if pre-exec contains a heredoc that creates mesh.sh
 		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
@@ -1208,9 +1287,12 @@ func produceSLURMScript(
 				if err != nil {
 					prefix += "\n" + preExecAnnotations
 				} else {
-					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
+					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc.
+					// mesh.sh itself is not run here: it must wrap job.sh, so it is
+					// recorded as the exec wrapper and emitted after the prefix.
 					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
-					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
+					prefix += "\n" + preExecWithoutHeredoc
+					execWrapper = meshPath
 				}
 
 				err = os.Chmod(path+"/mesh.sh", 0774)
@@ -1231,18 +1313,27 @@ func produceSLURMScript(
 		}
 	}
 
+	// The job.sh invocation, wrapped when a wrapper such as mesh.sh is in play.
+	jobCommand := f.Name()
+	if execWrapper != "" {
+		jobCommand = execWrapper + " " + jobCommand
+		log.G(Ctx).Debug("--- Wrapping job.sh into " + execWrapper)
+	}
+
 	sbatch_macros := "#!" + config.BashPath +
 		"\n#SBATCH --job-name=" + podUID +
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		// NOTE: prefix must be separated from f.Name() by a newline, not a
+		// NOTE: prefix must be separated from jobCommand by a newline, not a
 		// space.  When SHARED_FS=false the prefix ends with a base64 heredoc
-		// end-marker (e.g. "VKDATA_abc").  If f.Name() were appended on the
+		// end-marker (e.g. "VKDATA_abc").  If jobCommand were appended on the
 		// same line ("VKDATA_abc /path/to/job.sh") bash would not recognise
 		// it as the end-of-heredoc, consume the rest of the script into the
-		// heredoc, and never execute job.sh.
-		prefix + "\n" + f.Name() +
+		// heredoc, and never execute job.sh.  A command that has to wrap job.sh
+		// belongs in execWrapper, so that it lands on the same line as job.sh
+		// without being pasted onto the last line of the prefix.
+		prefix + "\n" + jobCommand +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")

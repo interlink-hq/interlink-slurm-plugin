@@ -81,7 +81,10 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		image := ""
 
 		cpuLimitFloat := container.Resources.Limits.Cpu().AsApproximateFloat64()
-		memoryLimitFromContainer, _ := container.Resources.Limits.Memory().AsInt64()
+		// Value() rounds up to whole bytes. AsInt64() would return (0, false) for
+		// fractional quantities such as "10307921510400m" (Kubeflow-style limits),
+		// which used to be misread as "no memory limit set".
+		memoryLimitFromContainer := container.Resources.Limits.Memory().Value()
 
 		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
 

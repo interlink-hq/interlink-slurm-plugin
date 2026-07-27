@@ -10,6 +10,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -601,4 +602,193 @@ t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
 }
 })
 }
+}
+
+func TestProduceSLURMScriptGPUMapping(t *testing.T) {
+	ctx := context.Background()
+
+	gpuContainer := func(gpus string) []v1.Container {
+		return []v1.Container{
+			{
+				Name: "gpu-container",
+				Resources: v1.ResourceRequirements{
+					Limits: v1.ResourceList{"nvidia.com/gpu": resource.MustParse(gpus)},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		flags         string
+		containers    []v1.Container
+		flavor        *FlavorResolution
+		wantLines     []string
+		unwantedLines []string
+	}{
+		{
+			name:       "gpu resource without flags produces gres",
+			containers: gpuContainer("1"),
+			wantLines:  []string{"#SBATCH --gres=gpu:1"},
+		},
+		{
+			name:       "several gpus are summed",
+			containers: append(gpuContainer("1"), gpuContainer("2")...),
+			wantLines:  []string{"#SBATCH --gres=gpu:3"},
+		},
+		{
+			name:          "gres in annotation wins over gpu resource",
+			flags:         "-A geant4 -p geant4 --gres gpu:nvidia-h100:2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gres gpu:nvidia-h100:2"},
+			unwantedLines: []string{"--gres=gpu:1"},
+		},
+		{
+			name:          "gres=... in annotation wins over gpu resource",
+			flags:         "--gres=gpu:a100:4",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gres=gpu:a100:4"},
+			unwantedLines: []string{"gpu:1"},
+		},
+		{
+			name:          "gpus flag in annotation wins over gpu resource",
+			flags:         "--gpus=2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gpus=2"},
+			unwantedLines: []string{"--gres"},
+		},
+		{
+			name:          "-G short flag in annotation wins over gpu resource",
+			flags:         "-G 2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH -G 2"},
+			unwantedLines: []string{"--gres"},
+		},
+		{
+			name:       "gres from flavor wins over gpu resource",
+			containers: gpuContainer("1"),
+			flavor: &FlavorResolution{
+				FlavorName: "gpu-flavor",
+				SlurmFlags: []string{"--partition=gpu", "--gres=gpu:v100:8"},
+			},
+			wantLines:     []string{"#SBATCH --gres=gpu:v100:8"},
+			unwantedLines: []string{"gpu:1"},
+		},
+		{
+			name:          "non-gpu gres is preserved and merged",
+			flags:         "--gres=lscratch:10",
+			containers:    gpuContainer("2"),
+			wantLines:     []string{"#SBATCH --gres=lscratch:10,gpu:2"},
+			unwantedLines: []string{"#SBATCH --gres=gpu:2"},
+		},
+		{
+			name:          "no gpu resource produces no gres",
+			flags:         "-p geant4",
+			containers:    []v1.Container{{Name: "cpu-container"}},
+			unwantedLines: []string{"--gres", "--gpus"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workingDir := t.TempDir()
+
+			pod := v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "gpu-pod",
+					Namespace: "default",
+					UID:       "bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+				},
+				Spec: v1.PodSpec{Containers: tt.containers},
+			}
+			if tt.flags != "" {
+				pod.ObjectMeta.Annotations = map[string]string{"slurm-job.vk.io/flags": tt.flags}
+			}
+
+			config := SlurmConfig{BashPath: "/bin/bash"}
+			resourceLimits := ResourceLimits{CPU: 1, Memory: 1024 * 1024}
+
+			_, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, tt.flavor)
+			if err != nil {
+				t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+			}
+
+			jobSlurm, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+			if err != nil {
+				t.Fatalf("failed to read generated job.slurm: %v", err)
+			}
+
+			content := string(jobSlurm)
+			for _, line := range tt.wantLines {
+				if !strings.Contains(content, line) {
+					t.Errorf("generated job.slurm missing %q\ncontent:\n%s", line, content)
+				}
+			}
+			for _, line := range tt.unwantedLines {
+				if strings.Contains(content, line) {
+					t.Errorf("generated job.slurm unexpectedly contains %q\ncontent:\n%s", line, content)
+				}
+			}
+		})
+	}
+}
+
+// TestProduceSLURMScriptMeshWrapsJobScript pins the two constraints on the last
+// line of job.slurm at once: mesh.sh has to receive job.sh as an argument (it
+// executes "$@" inside the network namespace it sets up, so an unwrapped job.sh
+// would run outside the overlay network), while the prefix must still end on its
+// own line so that a trailing base64 heredoc end-marker stays recognisable.
+func TestProduceSLURMScriptMeshWrapsJobScript(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	preExec := "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\necho setting up the overlay network\n$@\nEOFMESH\n export APPTAINER_CACHEDIR=~/apptainer-cache "
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mesh-pod",
+			Namespace: "default",
+			UID:       "bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+			Annotations: map[string]string{
+				"slurm-job.vk.io/pre-exec": preExec,
+			},
+		},
+	}
+
+	config := SlurmConfig{BashPath: "/bin/bash"}
+	resourceLimits := ResourceLimits{CPU: 1, Memory: 1024 * 1024}
+
+	_, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, nil)
+	if err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	jobSlurm, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("failed to read generated job.slurm: %v", err)
+	}
+
+	meshPath := filepath.Join(workingDir, "mesh.sh")
+	jobPath := filepath.Join(workingDir, "job.sh")
+
+	if _, err := os.Stat(meshPath); err != nil {
+		t.Fatalf("mesh.sh was not created: %v", err)
+	}
+
+	content := string(jobSlurm)
+	if !strings.Contains(content, "\n"+meshPath+" "+jobPath+"\n") {
+		t.Errorf("job.slurm does not wrap job.sh into mesh.sh\nwant line %q\ncontent:\n%s", meshPath+" "+jobPath, content)
+	}
+
+	// The rest of the pre-exec (outside the heredoc) must still run before it.
+	if !strings.Contains(content, "export APPTAINER_CACHEDIR") {
+		t.Errorf("job.slurm lost the non-heredoc part of the pre-exec\ncontent:\n%s", content)
+	}
+
+	// mesh.sh must not be invoked on its own, without job.sh as argument.
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == meshPath {
+			t.Errorf("job.slurm runs mesh.sh without job.sh as argument\ncontent:\n%s", content)
+		}
+	}
 }
