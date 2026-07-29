@@ -1192,6 +1192,11 @@ func produceSLURMScript(
 		prefix += "\n" + config.Commandprefix
 	}
 
+	// Record the compute node the job landed on, for StatusHandler to report back to
+	// interLink. The generator knows the pod's directory, so nothing has to derive it
+	// at runtime. Best-effort: a failed write must never take the workload down.
+	prefix += "\nhostname -f > " + filepath.Join(path, ComputeNodeFileName) + " || true"
+
 	if wstunnelClientCommands, ok := metadata.Annotations["interlink.eu/wstunnel-client-commands"]; ok {
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
