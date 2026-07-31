@@ -1,7 +1,7 @@
 # Change tag to switch Slurm version
 ARG SLURM_TAG=25.11-ubuntu24.04
 
-FROM golang:1.24 AS build-stage
+FROM golang:1.26 AS build-stage
 
 WORKDIR /app
 

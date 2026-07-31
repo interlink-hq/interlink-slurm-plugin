@@ -602,3 +602,60 @@ t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
 })
 }
 }
+
+// The batch script records the compute node itself. The generator knows the pod's
+// directory, so nothing downstream has to reverse-engineer it from scontrol output
+// or guess by picking the most recently written file in a shared jobs directory.
+func TestProduceSLURMScriptRecordsComputeNode(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cn-pod",
+			Namespace: "default",
+			UID:       "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		},
+	}
+
+	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
+	}
+	content := string(raw)
+
+	want := "hostname -f > " + filepath.Join(workingDir, ComputeNodeFileName)
+	if !strings.Contains(content, want) {
+		t.Errorf("job.slurm must record the compute node (%q)\n---\n%s", want, content)
+	}
+
+	// It has to run before the workload, so a tunnel can be pointed at the node
+	// while the workload is still coming up.
+	cn := strings.Index(content, want)
+	job := strings.Index(content, filepath.Join(workingDir, "job.sh"))
+	if cn < 0 || job < 0 || cn > job {
+		t.Errorf("the compute-node write must precede job.sh (cn@%d job.sh@%d)\n---\n%s", cn, job, content)
+	}
+}
+
+func TestReadComputeNode(t *testing.T) {
+	t.Run("returns the recorded node", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ComputeNodeFileName), []byte("node042.hpc.example.org\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := readComputeNode(dir); got != "node042.hpc.example.org" {
+			t.Errorf("readComputeNode() = %q, want %q", got, "node042.hpc.example.org")
+		}
+	})
+
+	t.Run("a queued job has no file yet, which is not an error", func(t *testing.T) {
+		if got := readComputeNode(t.TempDir()); got != "" {
+			t.Errorf("readComputeNode() = %q, want empty", got)
+		}
+	})
+}
