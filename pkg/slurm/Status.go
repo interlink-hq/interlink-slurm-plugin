@@ -153,12 +153,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
-				// With test, exit_code is better than DerivedEC, because for canceled jobs, it gives 15 while DerivedEC gives 0.
-				// states=all or else some jobs are hidden, then it is impossible to get job exit code.
-				cmd := []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j ", (*h.JIDs)[uid].JID}
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
-					Args:    cmd,
+					Args:    squeueStatusArgs((*h.JIDs)[uid].JID),
 					// true to be able to add prefix to squeue, but this is ugly
 					Shell: true,
 				}
@@ -497,6 +494,22 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Write(bodyBytes)
 	}
+}
+
+// squeueStatusArgs builds the per-job status query.
+//
+// Every argument has to stand on its own.  Shell: true joins them for bash, which
+// splits them again, so "-j " with a trailing space used to reach squeue as
+// "-j <jid>" by accident.  A SqueuePath wrapper that forwards its arguments
+// faithfully - which any correctly quoting ssh shim does - passes "-j " through
+// intact instead, squeue sees an empty job id, and the poll fails with
+// "Invalid job id".
+//
+// exit_code is preferred over DerivedEC: a cancelled job reports 15 there and 0 in
+// DerivedEC.  --states=all is needed or terminal jobs are hidden and the exit code
+// cannot be read back.
+func squeueStatusArgs(jid string) []string {
+	return []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j", jid}
 }
 
 // getSinfoSummary executes 'sinfo -s' command and returns the output
