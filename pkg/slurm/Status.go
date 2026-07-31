@@ -520,8 +520,11 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 // shell metacharacter: see getClusterResourcesFromText.
 const sinfoTextSeparator = ","
 
-// sinfoTextFormat asks sinfo for CPUs, real memory and free memory per node.
-const sinfoTextFormat = "--format=%c" + sinfoTextSeparator + "%m" + sinfoTextSeparator + "%e"
+// sinfoTextFormat asks sinfo for the node name, CPUs, real memory and free memory.
+// The node name is what makes -N output usable: a node in two partitions is listed
+// once per partition, and counting it twice inflates the reported capacity.
+const sinfoTextFormat = "--format=%N" + sinfoTextSeparator + "%c" +
+	sinfoTextSeparator + "%m" + sinfoTextSeparator + "%e"
 
 // getClusterResources queries SLURM for the current resource usage of the cluster and
 // returns a PingResponse aligned with interlink-hq/interLink#516.
@@ -638,8 +641,10 @@ func (h *SidecarHandler) getClusterResourcesFromText() (PingResponse, error) {
 	// node hands it to a second shell there.  A comma is literal to both; a pipe
 	// turns the format into a three-stage pipeline.
 	shell := exec.ExecTask{
+		// -N is required: without it sinfo summarises per partition and prints
+		// ranges and "+" suffixes ("24+,191024+,184251-N/A") that are not numbers.
+		Args:    []string{"--noheader", "-N", sinfoTextFormat},
 		Command: h.Config.Sinfopath,
-		Args:    []string{"--noheader", sinfoTextFormat},
 		Shell:   true,
 	}
 	execReturn, err := shell.Execute()
@@ -700,27 +705,37 @@ func parseClusterResourcesFromJSON(stdout string) (PingResponse, error) {
 // per-node allocated CPU counts, so total CPU is the best approximation available.
 func parseClusterResourcesFromText(stdout string) (PingResponse, error) {
 	var totalCPU, totalMemMB, freeMemMB int64
+	// sinfo -N lists a node once per partition it belongs to.
+	counted := map[string]struct{}{}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		parts := strings.Split(line, sinfoTextSeparator)
-		if len(parts) < 3 {
+		if len(parts) < 4 {
 			continue
 		}
-		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		node := strings.TrimSpace(parts[0])
+		if node == "" {
+			continue
+		}
+		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 		if err != nil {
 			continue
 		}
-		mem, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		mem, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
 		if err != nil {
 			continue
 		}
-		free, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		free, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
 		if err != nil {
 			continue
 		}
+		if _, seen := counted[node]; seen {
+			continue
+		}
+		counted[node] = struct{}{}
 		totalCPU += cpu
 		totalMemMB += mem
 		freeMemMB += free
