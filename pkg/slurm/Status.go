@@ -516,6 +516,13 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 	return execReturn.Stdout, nil
 }
 
+// sinfoTextSeparator separates the fields of sinfoTextFormat.  It must not be a
+// shell metacharacter: see getClusterResourcesFromText.
+const sinfoTextSeparator = ","
+
+// sinfoTextFormat asks sinfo for CPUs, real memory and free memory per node.
+const sinfoTextFormat = "--format=%c" + sinfoTextSeparator + "%m" + sinfoTextSeparator + "%e"
+
 // getClusterResources queries SLURM for the current resource usage of the cluster and
 // returns a PingResponse aligned with interlink-hq/interLink#516.
 //
@@ -626,10 +633,13 @@ func (h *SidecarHandler) getClusterResourcesFromJSON() (PingResponse, error) {
 // CPU counts, the CPU field reflects the total installed CPUs.
 func (h *SidecarHandler) getClusterResourcesFromText() (PingResponse, error) {
 	// %c = CPUs on node, %m = real memory (MB), %e = free memory (MB).
-	// Field separator is a pipe so that values with spaces still parse correctly.
+	// The separator has to survive a shell: Shell below means bash re-parses the
+	// whole command line, and any wrapper around SinfoPath that forwards to a login
+	// node hands it to a second shell there.  A comma is literal to both; a pipe
+	// turns the format into a three-stage pipeline.
 	shell := exec.ExecTask{
 		Command: h.Config.Sinfopath,
-		Args:    []string{"--noheader", "--format=%c|%m|%e"},
+		Args:    []string{"--noheader", sinfoTextFormat},
 		Shell:   true,
 	}
 	execReturn, err := shell.Execute()
@@ -695,7 +705,7 @@ func parseClusterResourcesFromText(stdout string) (PingResponse, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "|")
+		parts := strings.Split(line, sinfoTextSeparator)
 		if len(parts) < 3 {
 			continue
 		}

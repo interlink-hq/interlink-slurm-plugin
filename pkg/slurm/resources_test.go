@@ -4,6 +4,7 @@ import (
 "context"
 "encoding/json"
 "os"
+"strings"
 "testing"
 )
 
@@ -11,10 +12,10 @@ import (
 // correctly aggregates per-node CPU and memory fields from a multi-line sinfo output
 // and returns a PingResponse aligned with interlink-hq/interLink#516.
 func TestGetClusterResourcesFromText_HappyPath(t *testing.T) {
-// Simulate what sinfo --noheader --format=%c|%m|%e would return for two nodes:
+// Simulate what sinfo --noheader --format=%c,%m,%e would return for two nodes:
 //   node01: 16 CPUs, 128 000 MB total, 64 000 MB free
 //   node02: 32 CPUs,  64 000 MB total, 32 000 MB free
-sinfoLines := "16|128000|64000\n32|64000|32000\n"
+sinfoLines := "16,128000,64000\n32,64000,32000\n"
 
 resp, err := parseClusterResourcesFromText(sinfoLines)
 if err != nil {
@@ -44,7 +45,7 @@ t.Errorf("Memory = %q, want %q", resp.Resources.Memory, "96000Mi")
 // partial data does not cause a hard failure.
 func TestGetClusterResourcesFromText_SkipsInvalidLines(t *testing.T) {
 // Mix valid and invalid lines
-sinfoLines := "8|32000|16000\nbadline\n4|N/A|8000\n4|16000|8000\n"
+sinfoLines := "8,32000,16000\nbadline\n4,N/A,8000\n4,16000,8000\n"
 
 resp, err := parseClusterResourcesFromText(sinfoLines)
 if err != nil {
@@ -531,5 +532,18 @@ t.Fatalf("unexpected error: %v", err)
 }
 if resp.Status != "ok" {
 t.Errorf("Status = %q, want \"ok\" (default)", resp.Status)
+}
+}
+
+// TestSinfoTextFormatSurvivesAShell guards the separator in the sinfo format
+// string.  getClusterResourcesFromText runs with Shell: true, so bash re-parses
+// the command line, and any SinfoPath wrapper that forwards to a login node hands
+// it to a second shell there.  A pipe made bash read the format as a pipeline and
+// print "%m: command not found" on stderr, which the plugin treats as a failure.
+func TestSinfoTextFormatSurvivesAShell(t *testing.T) {
+for _, char := range []string{"|", ";", "&", "<", ">", "(", ")", "$", "`", "*", "?", " "} {
+if strings.Contains(sinfoTextFormat, char) {
+t.Errorf("sinfo format %q contains the shell metacharacter %q", sinfoTextFormat, char)
+}
 }
 }
