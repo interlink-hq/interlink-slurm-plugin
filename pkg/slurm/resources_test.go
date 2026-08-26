@@ -4,6 +4,7 @@ import (
 "context"
 "encoding/json"
 "os"
+"strings"
 "testing"
 )
 
@@ -531,5 +532,26 @@ t.Fatalf("unexpected error: %v", err)
 }
 if resp.Status != "ok" {
 t.Errorf("Status = %q, want \"ok\" (default)", resp.Status)
+}
+}
+
+// TestSqueueStatusArgsAreSelfContained guards against reintroducing an argument
+// that only works because a shell splits it again.  The query used to pass "-j "
+// with a trailing space and the job id separately, which reached squeue correctly
+// only when bash rejoined them; a SqueuePath wrapper that quotes its arguments
+// made squeue see an empty job id and answer "Invalid job id", leaving the pod
+// reported as terminal while its job was still running.
+func TestSqueueStatusArgsAreSelfContained(t *testing.T) {
+args := squeueStatusArgs("227105")
+
+for _, arg := range args {
+if arg != strings.TrimSpace(arg) {
+t.Errorf("argument %q has surrounding whitespace and only works if a shell re-splits it", arg)
+}
+}
+
+joined := strings.Join(args, " ")
+if !strings.Contains(joined, "-j 227105") {
+t.Errorf("expected the job id to follow -j, got %q", joined)
 }
 }
