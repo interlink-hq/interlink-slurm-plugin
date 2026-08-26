@@ -90,6 +90,25 @@ fi
 
 cd "${VK_TEST_DIR}"
 
+# Apply local fixes for known upstream test YAML issues
+# Fix 085-secret-envfrom.yaml: the Python script uses the Unicode checkmark (✓,
+# U+2713) both in its print() calls and in the check_logs regex patterns.
+# Alpine Linux containers default to LANG=C (ASCII), so Python 3 raises
+# UnicodeEncodeError when it tries to write the checkmark to stdout, producing
+# no useful output and causing every regex poll to return [].
+# Replacing ✓ with the ASCII string "PASS" in both the script body and the
+# validation regexes makes the test encoding-independent.
+python3 -c "
+import sys
+path = '${VK_TEST_DIR}/vktestset/templates/085-secret-envfrom.yaml'
+with open(path, encoding='utf-8') as f:
+    content = f.read()
+patched = content.replace('\u2713', 'PASS').replace('\u2717', 'FAIL')
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(patched)
+print('Patched 085-secret-envfrom.yaml: replaced Unicode checkmarks with ASCII')
+"
+
 # Create test configuration with SLURM-specific settings
 echo "Creating test configuration..."
 cat > vktest_config.yaml <<EOF

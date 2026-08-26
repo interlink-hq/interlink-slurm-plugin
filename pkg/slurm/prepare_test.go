@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -391,6 +392,9 @@ func TestGetJobWorkDir(t *testing.T) {
 				t.Errorf("getJobWorkDir() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
 // TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
 // not set (non-shared filesystem mode), multiline projected volume data (e.g. a
 // PEM certificate from kube-root-ca.crt) is written using a base64-encoded
@@ -672,6 +676,9 @@ func TestDeleteContainerWithoutJID(t *testing.T) {
 	}
 	if _, statErr := os.Stat(podDir); !os.IsNotExist(statErr) {
 		t.Errorf("expected the pod directory to be removed, stat returned %v", statErr)
+	}
+}
+
 // mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
 // its "$@". If job.sh is emitted on the following line instead of as that argument,
 // mesh.sh exits first and the workload runs outside the namespace: the job succeeds
@@ -733,5 +740,203 @@ func TestProduceSLURMScriptKeepsNewlineBeforeJobScriptWithoutMesh(t *testing.T) 
 	jobScript := filepath.Join(workingDir, "job.sh")
 	if !strings.Contains(string(raw), "\n"+jobScript) {
 		t.Errorf("job.sh must start its own line when no mesh script is in play\n---\n%s", string(raw))
+	}
+}
+
+// TestCreateEnvFileEnvFrom verifies that keys from a Secret or ConfigMap referenced
+// via envFrom are written into the envfile so the container picks them up.
+func TestCreateEnvFileEnvFrom(t *testing.T) {
+	ctx := context.Background()
+	optional := false
+
+	tests := []struct {
+		name             string
+		container        v1.Container
+		podData          commonIL.RetrievedPodData
+		expectedContains []string
+		expectError      bool
+	}{
+		{
+			name: "envFrom secretRef injects secret keys",
+			container: v1.Container{
+				Name: "mycontainer",
+				EnvFrom: []v1.EnvFromSource{
+					{
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{Name: "mysecret"},
+							Optional:             &optional,
+						},
+					},
+				},
+			},
+			podData: commonIL.RetrievedPodData{
+				Pod: v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mypod"}},
+				Containers: []commonIL.RetrievedContainer{
+					{
+						Name: "mycontainer",
+						Secrets: []v1.Secret{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: "mysecret"},
+								Data: map[string][]byte{
+									"SECRET_KEY": []byte("secretvalue"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedContains: []string{"SECRET_KEY="},
+		},
+		{
+			name: "envFrom configMapRef injects configmap keys",
+			container: v1.Container{
+				Name: "mycontainer",
+				EnvFrom: []v1.EnvFromSource{
+					{
+						ConfigMapRef: &v1.ConfigMapEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{Name: "myconfigmap"},
+							Optional:             &optional,
+						},
+					},
+				},
+			},
+			podData: commonIL.RetrievedPodData{
+				Pod: v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mypod"}},
+				Containers: []commonIL.RetrievedContainer{
+					{
+						Name: "mycontainer",
+						ConfigMaps: []v1.ConfigMap{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: "myconfigmap"},
+								Data: map[string]string{
+									"CONFIG_KEY": "configvalue",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedContains: []string{"CONFIG_KEY="},
+		},
+		{
+			name: "envFrom secretRef with prefix injects prefixed keys",
+			container: v1.Container{
+				Name: "mycontainer",
+				EnvFrom: []v1.EnvFromSource{
+					{
+						Prefix: "MY_PREFIX_",
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{Name: "mysecret"},
+							Optional:             &optional,
+						},
+					},
+				},
+			},
+			podData: commonIL.RetrievedPodData{
+				Pod: v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mypod"}},
+				Containers: []commonIL.RetrievedContainer{
+					{
+						Name: "mycontainer",
+						Secrets: []v1.Secret{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: "mysecret"},
+								Data: map[string][]byte{
+									"KEY": []byte("val"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedContains: []string{"MY_PREFIX_KEY="},
+		},
+		{
+			name: "envFrom and container.Env both written",
+			container: v1.Container{
+				Name: "mycontainer",
+				Env: []v1.EnvVar{
+					{Name: "DIRECT_VAR", Value: "direct"},
+				},
+				EnvFrom: []v1.EnvFromSource{
+					{
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{Name: "mysecret"},
+							Optional:             &optional,
+						},
+					},
+				},
+			},
+			podData: commonIL.RetrievedPodData{
+				Pod: v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mypod"}},
+				Containers: []commonIL.RetrievedContainer{
+					{
+						Name: "mycontainer",
+						Secrets: []v1.Secret{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: "mysecret"},
+								Data: map[string][]byte{
+									"SECRET_KEY": []byte("secretvalue"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedContains: []string{"DIRECT_VAR=", "SECRET_KEY="},
+		},
+		{
+			name: "missing required secret returns error",
+			container: v1.Container{
+				Name: "mycontainer",
+				EnvFrom: []v1.EnvFromSource{
+					{
+						SecretRef: &v1.SecretEnvSource{
+							LocalObjectReference: v1.LocalObjectReference{Name: "nonexistent"},
+							Optional:             &optional,
+						},
+					},
+				},
+			},
+			podData: commonIL.RetrievedPodData{
+				Pod: v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "mypod"}},
+				Containers: []commonIL.RetrievedContainer{
+					{Name: "mycontainer"},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			envs, _, err := createEnvFile(ctx, SlurmConfig{ContainerRuntime: "singularity"}, tt.podData, tt.container, workDir)
+			if tt.expectError {
+				if err == nil {
+					t.Fatal("expected an error but got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			envfilePath := workDir + "/" + tt.container.Name + "_envfile.properties"
+			content, err := os.ReadFile(envfilePath)
+			if err != nil {
+				t.Fatalf("could not read envfile: %v", err)
+			}
+			contentStr := string(content)
+
+			for _, expected := range tt.expectedContains {
+				if !strings.Contains(contentStr, expected) {
+					t.Errorf("envfile does not contain %q\nenvfile content:\n%s", expected, contentStr)
+				}
+			}
+
+			if len(envs) == 0 {
+				t.Errorf("expected envs args to be non-empty (envfile flag)")
+			}
+		})
 	}
 }

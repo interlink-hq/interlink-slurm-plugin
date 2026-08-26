@@ -693,6 +693,62 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 		}
 	}
 
+	// Handle envFrom: inject all key-value pairs from referenced Secrets and ConfigMaps.
+	retrievedContainer, err := getRetrievedContainer(&podData, container.Name)
+	if err != nil {
+		log.G(Ctx).Warning("-- Could not find retrieved container for envFrom resolution: ", err)
+	} else {
+		for _, envFrom := range container.EnvFrom {
+			prefix := envFrom.Prefix
+
+			if envFrom.SecretRef != nil {
+				secret, err := getRetrievedSecret(retrievedContainer, envFrom.SecretRef.Name, container.Name, podData.Pod.Name)
+				if err != nil {
+					if envFrom.SecretRef.Optional != nil && *envFrom.SecretRef.Optional {
+						log.G(Ctx).Warning("-- Optional secret not found for envFrom: ", envFrom.SecretRef.Name)
+						continue
+					}
+					log.G(Ctx).Error(err)
+					return nil, nil, err
+				}
+				for k, v := range secret.Data {
+					tmpValue := shellescape.Quote(string(v))
+					tmp := prefix + k + "=" + tmpValue
+					envs_data = append(envs_data, tmp)
+					_, err := envfile.WriteString(tmp + "\n")
+					if err != nil {
+						log.G(Ctx).Error(err)
+						return nil, nil, err
+					}
+					log.G(Ctx).Debug("---- Written envfile from secret " + envFrom.SecretRef.Name + " key " + k)
+				}
+			}
+
+			if envFrom.ConfigMapRef != nil {
+				configMap, err := getRetrievedConfigMap(retrievedContainer, envFrom.ConfigMapRef.Name, container.Name, podData.Pod.Name)
+				if err != nil {
+					if envFrom.ConfigMapRef.Optional != nil && *envFrom.ConfigMapRef.Optional {
+						log.G(Ctx).Warning("-- Optional configMap not found for envFrom: ", envFrom.ConfigMapRef.Name)
+						continue
+					}
+					log.G(Ctx).Error(err)
+					return nil, nil, err
+				}
+				for k, v := range configMap.Data {
+					tmpValue := shellescape.Quote(v)
+					tmp := prefix + k + "=" + tmpValue
+					envs_data = append(envs_data, tmp)
+					_, err := envfile.WriteString(tmp + "\n")
+					if err != nil {
+						log.G(Ctx).Error(err)
+						return nil, nil, err
+					}
+					log.G(Ctx).Debug("---- Written envfile from configMap " + envFrom.ConfigMapRef.Name + " key " + k)
+				}
+			}
+		}
+	}
+
 	// All env variables are written, we flush it now.
 	err = envfile.Sync()
 	if err != nil {
@@ -717,7 +773,7 @@ func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.Retri
 	envs_data := []string{}
 	var err error
 
-	if len(container.Env) > 0 {
+	if len(container.Env) > 0 || len(container.EnvFrom) > 0 {
 		envs, envs_data, err = createEnvFile(Ctx, config, podData, container, workDir)
 		if err != nil {
 			log.G(Ctx).Error(err)
