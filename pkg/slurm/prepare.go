@@ -49,6 +49,20 @@ type JidStruct struct {
 	WorkDir      string    `json:"WorkDir"`
 }
 
+// isValidWorkDir reports whether workDir is safe to use as a filesystem path.
+// It must be absolute and must not contain any ".." path elements.
+func isValidWorkDir(workDir string) bool {
+	if !filepath.IsAbs(workDir) {
+		return false
+	}
+	for _, elem := range strings.Split(workDir, string(filepath.Separator)) {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // getJobWorkDir returns the job working directory for a pod.
 // If the annotation "slurm-job.vk.io/job-workdir" is set, it is used as the
 // base directory and the full path is "<annotation>/<namespace>-<podUID>".
@@ -501,8 +515,10 @@ func (h *SidecarHandler) LoadJIDs() error {
 			workDirBytes, err := os.ReadFile(path + entry.Name() + "/" + "WorkDir.path")
 			if err == nil && len(workDirBytes) > 0 {
 				workDir := strings.TrimSpace(string(workDirBytes))
-				if workDir != "" {
+				if workDir != "" && isValidWorkDir(workDir) {
 					JIDEntry.WorkDir = workDir
+				} else if workDir != "" {
+					log.G(h.Ctx).Warn("LoadJIDs: discarding invalid WorkDir.path value: ", workDir)
 				}
 			}
 			(*h.JIDs)[string(podUID)] = &JIDEntry
@@ -1442,6 +1458,9 @@ func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (str
 // status at startup.
 // Return the first encountered error.
 func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, filesPath string, workDir string) (string, error) {
+	if err := os.MkdirAll(filesPath, 0o755); err != nil {
+		return "", err
+	}
 	r := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
 	jid := r.FindStringSubmatch(output)
 	fJID, err := os.Create(filesPath + "/JobID.jid")
@@ -1519,7 +1538,10 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	jid := (*JIDs)[podUID].JID
+	var jid string
+	if entry, ok := (*JIDs)[podUID]; ok {
+		jid = entry.JID
+	}
 	removeJID(podUID, JIDs)
 
 	errFirstAttempt := os.RemoveAll(path)
