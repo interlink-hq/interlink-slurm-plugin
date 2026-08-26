@@ -58,12 +58,14 @@ type JidStruct struct {
 func getJobWorkDir(config SlurmConfig, annotations map[string]string, namespace, podUID string) string {
 	if customBase, ok := annotations["slurm-job.vk.io/job-workdir"]; ok && customBase != "" {
 		// Reject paths that contain path traversal components before cleaning.
-		if strings.Contains(customBase, "..") {
-			return config.DataRootFolder + namespace + "-" + podUID
+		for _, elem := range strings.Split(customBase, string(filepath.Separator)) {
+			if elem == ".." {
+				return config.DataRootFolder + namespace + "-" + podUID
+			}
 		}
 		clean := filepath.Clean(customBase)
 		if filepath.IsAbs(clean) {
-			return clean + "/" + namespace + "-" + podUID
+			return filepath.Join(clean, namespace+"-"+podUID)
 		}
 	}
 	return config.DataRootFolder + namespace + "-" + podUID
