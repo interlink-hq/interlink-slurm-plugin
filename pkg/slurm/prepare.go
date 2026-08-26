@@ -580,6 +580,7 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 	}, nil
 }
 
+
 // normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
 // literal backslash-n escape sequences (\n) to actual newline characters when the
 // string contains no real newlines. This handles a common misconfiguration where the
@@ -1333,9 +1334,7 @@ func produceSLURMScript(
 				if err != nil {
 					prefix += "\n" + preExecAnnotations
 				} else {
-					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc.
-					// mesh.sh itself is not run here: it must wrap job.sh, so it is
-					// recorded as the exec wrapper and emitted after the prefix.
+					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
 					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
 					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
 					meshDetected = true
