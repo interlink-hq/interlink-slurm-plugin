@@ -584,7 +584,10 @@ t.Errorf("aggregated output has no parseable per-node numbers, got CPU=%s", resp
 // cannot produce numbers at all.
 func TestSinfoIsQueriedPerNode(t *testing.T) {
 if !strings.Contains(sinfoTextFormat, "%N") {
-t.Errorf("the format must ask for the node name so duplicates can be detected: %s", sinfoTextFormat)
+	t.Errorf("the format must ask for the node name so duplicates can be detected: %s", sinfoTextFormat)
+}
+}
+
 // TestSqueueStatusArgsAreSelfContained guards against reintroducing an argument
 // that only works because a shell splits it again.  The query used to pass "-j "
 // with a trailing space and the job id separately, which reached squeue correctly

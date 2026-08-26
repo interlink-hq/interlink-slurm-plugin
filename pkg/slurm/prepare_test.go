@@ -391,6 +391,9 @@ func TestGetJobWorkDir(t *testing.T) {
 				t.Errorf("getJobWorkDir() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
 // TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
 // not set (non-shared filesystem mode), multiline projected volume data (e.g. a
 // PEM certificate from kube-root-ca.crt) is written using a base64-encoded
@@ -672,6 +675,9 @@ func TestDeleteContainerWithoutJID(t *testing.T) {
 	}
 	if _, statErr := os.Stat(podDir); !os.IsNotExist(statErr) {
 		t.Errorf("expected the pod directory to be removed, stat returned %v", statErr)
+	}
+}
+
 // mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
 // its "$@". If job.sh is emitted on the following line instead of as that argument,
 // mesh.sh exits first and the workload runs outside the namespace: the job succeeds
