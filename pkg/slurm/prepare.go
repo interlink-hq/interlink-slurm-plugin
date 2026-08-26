@@ -500,7 +500,10 @@ func (h *SidecarHandler) LoadJIDs() error {
 			JIDEntry := JidStruct{PodUID: string(podUID), PodNamespace: string(podNamespace), JID: string(JID), StartTime: StartedAt, EndTime: FinishedAt}
 			workDirBytes, err := os.ReadFile(path + entry.Name() + "/" + "WorkDir.path")
 			if err == nil && len(workDirBytes) > 0 {
-				JIDEntry.WorkDir = string(workDirBytes)
+				workDir := strings.TrimSpace(string(workDirBytes))
+				if workDir != "" {
+					JIDEntry.WorkDir = workDir
+				}
 			}
 			(*h.JIDs)[string(podUID)] = &JIDEntry
 		}
