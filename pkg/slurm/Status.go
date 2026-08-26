@@ -149,16 +149,20 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		for _, pod := range req {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
-			path := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
+			// Resolve the job working directory: prefer in-memory cache, then
+			// fall back to the pod annotation so the path is correct even when
+			// the JIDs cache was wiped (e.g. after a sidecar restart where
+			// LoadJIDs failed or the WorkDir.path file was missing on disk).
+			path := getJobWorkDir(h.Config, pod.Annotations, pod.Namespace, uid)
+			if jid, ok := (*h.JIDs)[uid]; ok && jid.WorkDir != "" {
+				path = jid.WorkDir
+			}
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
-				// With test, exit_code is better than DerivedEC, because for canceled jobs, it gives 15 while DerivedEC gives 0.
-				// states=all or else some jobs are hidden, then it is impossible to get job exit code.
-				cmd := []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j ", (*h.JIDs)[uid].JID}
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
-					Args:    cmd,
+					Args:    squeueStatusArgs((*h.JIDs)[uid].JID),
 					// true to be able to add prefix to squeue, but this is ugly
 					Shell: true,
 				}
@@ -499,6 +503,22 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// squeueStatusArgs builds the per-job status query.
+//
+// Every argument has to stand on its own.  Shell: true joins them for bash, which
+// splits them again, so "-j " with a trailing space used to reach squeue as
+// "-j <jid>" by accident.  A SqueuePath wrapper that forwards its arguments
+// faithfully - which any correctly quoting ssh shim does - passes "-j " through
+// intact instead, squeue sees an empty job id, and the poll fails with
+// "Invalid job id".
+//
+// exit_code is preferred over DerivedEC: a cancelled job reports 15 there and 0 in
+// DerivedEC.  --states=all is needed or terminal jobs are hidden and the exit code
+// cannot be read back.
+func squeueStatusArgs(jid string) []string {
+	return []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j", jid}
+}
+
 // getSinfoSummary executes 'sinfo -s' command and returns the output
 func (h *SidecarHandler) getSinfoSummary() (string, error) {
 	cmd := []string{"-s"}
@@ -515,6 +535,16 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 
 	return execReturn.Stdout, nil
 }
+
+// sinfoTextSeparator separates the fields of sinfoTextFormat.  It must not be a
+// shell metacharacter: see getClusterResourcesFromText.
+const sinfoTextSeparator = ","
+
+// sinfoTextFormat asks sinfo for the node name, CPUs, real memory and free memory.
+// The node name is what makes -N output usable: a node in two partitions is listed
+// once per partition, and counting it twice inflates the reported capacity.
+const sinfoTextFormat = "--format=%N" + sinfoTextSeparator + "%c" +
+	sinfoTextSeparator + "%m" + sinfoTextSeparator + "%e"
 
 // getClusterResources queries SLURM for the current resource usage of the cluster and
 // returns a PingResponse aligned with interlink-hq/interLink#516.
@@ -626,10 +656,15 @@ func (h *SidecarHandler) getClusterResourcesFromJSON() (PingResponse, error) {
 // CPU counts, the CPU field reflects the total installed CPUs.
 func (h *SidecarHandler) getClusterResourcesFromText() (PingResponse, error) {
 	// %c = CPUs on node, %m = real memory (MB), %e = free memory (MB).
-	// Field separator is a pipe so that values with spaces still parse correctly.
+	// The separator has to survive a shell: Shell below means bash re-parses the
+	// whole command line, and any wrapper around SinfoPath that forwards to a login
+	// node hands it to a second shell there.  A comma is literal to both; a pipe
+	// turns the format into a three-stage pipeline.
 	shell := exec.ExecTask{
+		// -N is required: without it sinfo summarises per partition and prints
+		// ranges and "+" suffixes ("24+,191024+,184251-N/A") that are not numbers.
+		Args:    []string{"--noheader", "-N", sinfoTextFormat},
 		Command: h.Config.Sinfopath,
-		Args:    []string{"--noheader", "--format=%c|%m|%e"},
 		Shell:   true,
 	}
 	execReturn, err := shell.Execute()
@@ -690,27 +725,37 @@ func parseClusterResourcesFromJSON(stdout string) (PingResponse, error) {
 // per-node allocated CPU counts, so total CPU is the best approximation available.
 func parseClusterResourcesFromText(stdout string) (PingResponse, error) {
 	var totalCPU, totalMemMB, freeMemMB int64
+	// sinfo -N lists a node once per partition it belongs to.
+	counted := map[string]struct{}{}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "|")
-		if len(parts) < 3 {
+		parts := strings.Split(line, sinfoTextSeparator)
+		if len(parts) < 4 {
 			continue
 		}
-		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+		node := strings.TrimSpace(parts[0])
+		if node == "" {
+			continue
+		}
+		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 		if err != nil {
 			continue
 		}
-		mem, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		mem, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
 		if err != nil {
 			continue
 		}
-		free, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+		free, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
 		if err != nil {
 			continue
 		}
+		if _, seen := counted[node]; seen {
+			continue
+		}
+		counted[node] = struct{}{}
 		totalCPU += cpu
 		totalMemMB += mem
 		freeMemMB += free

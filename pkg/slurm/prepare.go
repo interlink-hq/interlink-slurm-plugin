@@ -49,6 +49,43 @@ type JidStruct struct {
 	JID          string    `json:"JID"`
 	StartTime    time.Time `json:"StartTime"`
 	EndTime      time.Time `json:"EndTime"`
+	WorkDir      string    `json:"WorkDir"`
+}
+
+// isValidWorkDir reports whether workDir is safe to use as a filesystem path.
+// It must be absolute and must not contain any ".." path elements.
+func isValidWorkDir(workDir string) bool {
+	if !filepath.IsAbs(workDir) {
+		return false
+	}
+	for _, elem := range strings.Split(workDir, string(filepath.Separator)) {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// getJobWorkDir returns the job working directory for a pod.
+// If the annotation "slurm-job.vk.io/job-workdir" is set, it is used as the
+// base directory and the full path is "<annotation>/<namespace>-<podUID>".
+// Otherwise the default path "<DataRootFolder><namespace>-<podUID>" is returned.
+// The annotation value must be an absolute path without traversal components;
+// an invalid value is silently ignored and the default is used instead.
+func getJobWorkDir(config SlurmConfig, annotations map[string]string, namespace, podUID string) string {
+	if customBase, ok := annotations["slurm-job.vk.io/job-workdir"]; ok && customBase != "" {
+		// Reject paths that contain path traversal components before cleaning.
+		for _, elem := range strings.Split(customBase, string(filepath.Separator)) {
+			if elem == ".." {
+				return config.DataRootFolder + namespace + "-" + podUID
+			}
+		}
+		clean := filepath.Clean(customBase)
+		if filepath.IsAbs(clean) {
+			return filepath.Join(clean, namespace+"-"+podUID)
+		}
+	}
+	return config.DataRootFolder + namespace + "-" + podUID
 }
 
 type ResourceLimits struct {
@@ -641,6 +678,15 @@ func (h *SidecarHandler) LoadJIDs() error {
 				}
 			}
 			JIDEntry := JidStruct{PodUID: string(podUID), PodNamespace: string(podNamespace), JID: string(JID), StartTime: StartedAt, EndTime: FinishedAt}
+			workDirBytes, err := os.ReadFile(path + entry.Name() + "/" + "WorkDir.path")
+			if err == nil && len(workDirBytes) > 0 {
+				workDir := strings.TrimSpace(string(workDirBytes))
+				if workDir != "" && isValidWorkDir(workDir) {
+					JIDEntry.WorkDir = workDir
+				} else if workDir != "" {
+					log.G(h.Ctx).Warn("LoadJIDs: discarding invalid WorkDir.path value: ", workDir)
+				}
+			}
 			(*h.JIDs)[string(podUID)] = &JIDEntry
 		}
 	}
@@ -648,12 +694,12 @@ func (h *SidecarHandler) LoadJIDs() error {
 	return nil
 }
 
-func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) ([]string, []string, error) {
+func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) ([]string, []string, error) {
 	envs := []string{}
 	// For debugging purpose only
 	envs_data := []string{}
 
-	envfilePath := (config.DataRootFolder + podData.Pod.Namespace + "-" + string(podData.Pod.UID) + "/" + container.Name + "_envfile.properties")
+	envfilePath := workDir + "/" + container.Name + "_envfile.properties"
 	log.G(Ctx).Info("-- Appending envs using envfile " + envfilePath)
 
 	switch config.ContainerRuntime {
@@ -704,7 +750,7 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 
 // prepareEnvs reads all Environment variables from a container and append them to a envfile.properties. The values are sh-escaped.
 // It returns the slice containing, if there are Environment variables, the arguments for envfile and its path, or else an empty array.
-func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container) []string {
+func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) []string {
 	start := time.Now().UnixMicro()
 	span := trace.SpanFromContext(Ctx)
 	span.AddEvent("Preparing ENVs for container " + container.Name)
@@ -714,7 +760,7 @@ func prepareEnvs(Ctx context.Context, config SlurmConfig, podData commonIL.Retri
 	var err error
 
 	if len(container.Env) > 0 {
-		envs, envs_data, err = createEnvFile(Ctx, config, podData, container)
+		envs, envs_data, err = createEnvFile(Ctx, config, podData, container, workDir)
 		if err != nil {
 			log.G(Ctx).Error(err)
 			return nil
@@ -1270,11 +1316,11 @@ func produceSLURMScript(
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
 
-	// execWrapper, when set, is the command job.sh has to be passed to as an
-	// argument instead of being executed directly (e.g. the overlay network
-	// mesh.sh, which runs its arguments inside the network namespace it sets up).
-	execWrapper := ""
-
+	// mesh.sh sets up the mesh network in an unshared netns and then execs its "$@".
+	// The workload has to be that argument, so it must end up on the SAME line as
+	// mesh.sh; the default newline separator below would run it after mesh.sh had
+	// already exited, outside the netns.
+	meshDetected := false
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
 		// Check if pre-exec contains a heredoc that creates mesh.sh
 		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
@@ -1291,8 +1337,8 @@ func produceSLURMScript(
 					// mesh.sh itself is not run here: it must wrap job.sh, so it is
 					// recorded as the exec wrapper and emitted after the prefix.
 					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
-					prefix += "\n" + preExecWithoutHeredoc
-					execWrapper = meshPath
+					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
+					meshDetected = true
 				}
 
 				err = os.Chmod(path+"/mesh.sh", 0774)
@@ -1313,11 +1359,17 @@ func produceSLURMScript(
 		}
 	}
 
-	// The job.sh invocation, wrapped when a wrapper such as mesh.sh is in play.
-	jobCommand := f.Name()
-	if execWrapper != "" {
-		jobCommand = execWrapper + " " + jobCommand
-		log.G(Ctx).Debug("--- Wrapping job.sh into " + execWrapper)
+	// NOTE: prefix is separated from f.Name() by a newline, not a space.  When
+	// SHARED_FS=false the prefix ends with a base64 heredoc end-marker (e.g.
+	// "VKDATA_abc").  If f.Name() were appended on the same line ("VKDATA_abc
+	// /path/to/job.sh") bash would not recognise it as the end-of-heredoc, consume
+	// the rest of the script into the heredoc, and never execute job.sh.
+	//
+	// A mesh prefix is the exception: there job.sh must be mesh.sh's argument. The
+	// mesh prefix never ends in a heredoc marker, so the two cases cannot collide.
+	separator := "\n"
+	if meshDetected {
+		separator = " "
 	}
 
 	sbatch_macros := "#!" + config.BashPath +
@@ -1325,15 +1377,7 @@ func produceSLURMScript(
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		// NOTE: prefix must be separated from jobCommand by a newline, not a
-		// space.  When SHARED_FS=false the prefix ends with a base64 heredoc
-		// end-marker (e.g. "VKDATA_abc").  If jobCommand were appended on the
-		// same line ("VKDATA_abc /path/to/job.sh") bash would not recognise
-		// it as the end-of-heredoc, consume the rest of the script into the
-		// heredoc, and never execute job.sh.  A command that has to wrap job.sh
-		// belongs in execWrapper, so that it lands on the same line as job.sh
-		// without being pasted onto the last line of the prefix.
-		prefix + "\n" + jobCommand +
+		prefix + separator + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
@@ -1637,24 +1681,27 @@ func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (str
 // Finally, it stores the namespace and podUID info in the same location, to restore
 // status at startup.
 // Return the first encountered error.
-func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, path string) (string, error) {
+func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidStruct, output string, filesPath string, workDir string) (string, error) {
+	if err := os.MkdirAll(filesPath, 0o755); err != nil {
+		return "", err
+	}
 	r := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
 	jid := r.FindStringSubmatch(output)
-	fJID, err := os.Create(path + "/JobID.jid")
+	fJID, err := os.Create(filesPath + "/JobID.jid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create jid_file")
 		return "", err
 	}
 	defer fJID.Close()
 
-	fNS, err := os.Create(path + "/PodNamespace.ns")
+	fNS, err := os.Create(filesPath + "/PodNamespace.ns")
 	if err != nil {
 		log.G(Ctx).Error("Can't create namespace_file")
 		return "", err
 	}
 	defer fNS.Close()
 
-	fUID, err := os.Create(path + "/PodUID.uid")
+	fUID, err := os.Create(filesPath + "/PodUID.uid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create PodUID_file")
 		return "", err
@@ -1682,6 +1729,16 @@ func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidSt
 		return "", err
 	}
 
+	// If the job uses a custom working directory, persist it so it can be
+	// recovered across sidecar restarts (see LoadJIDs).
+	if workDir != filesPath {
+		(*JIDs)[string(pod.UID)].WorkDir = workDir
+		if err := os.WriteFile(filesPath+"/WorkDir.path", []byte(workDir), 0o644); err != nil {
+			log.G(Ctx).Error("Can't write WorkDir.path: ", err)
+			return "", err
+		}
+	}
+
 	return (*JIDs)[string(pod.UID)].JID, nil
 }
 
@@ -1705,7 +1762,13 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	jid := (*JIDs)[podUID].JID
+	// Not every pod that reaches here has a job: sbatch may have been rejected, or
+	// the plugin may have restarted since submission. Both leave no JIDs entry, and
+	// dereferencing the nil *JidStruct panics the whole request handler.
+	jid := ""
+	if entry := (*JIDs)[podUID]; entry != nil {
+		jid = entry.JID
+	}
 	removeJID(podUID, JIDs)
 
 	errFirstAttempt := os.RemoveAll(path)

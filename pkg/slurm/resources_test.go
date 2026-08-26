@@ -4,6 +4,7 @@ import (
 "context"
 "encoding/json"
 "os"
+"strings"
 "testing"
 )
 
@@ -11,10 +12,10 @@ import (
 // correctly aggregates per-node CPU and memory fields from a multi-line sinfo output
 // and returns a PingResponse aligned with interlink-hq/interLink#516.
 func TestGetClusterResourcesFromText_HappyPath(t *testing.T) {
-// Simulate what sinfo --noheader --format=%c|%m|%e would return for two nodes:
+// Simulate what sinfo --noheader -N --format=%N,%c,%m,%e returns for two nodes:
 //   node01: 16 CPUs, 128 000 MB total, 64 000 MB free
 //   node02: 32 CPUs,  64 000 MB total, 32 000 MB free
-sinfoLines := "16|128000|64000\n32|64000|32000\n"
+sinfoLines := "n01,16,128000,64000\nn02,32,64000,32000\n"
 
 resp, err := parseClusterResourcesFromText(sinfoLines)
 if err != nil {
@@ -44,7 +45,7 @@ t.Errorf("Memory = %q, want %q", resp.Resources.Memory, "96000Mi")
 // partial data does not cause a hard failure.
 func TestGetClusterResourcesFromText_SkipsInvalidLines(t *testing.T) {
 // Mix valid and invalid lines
-sinfoLines := "8|32000|16000\nbadline\n4|N/A|8000\n4|16000|8000\n"
+sinfoLines := "n01,8,32000,16000\nbadline\nn02,4,N/A,8000\nn03,4,16000,8000\n"
 
 resp, err := parseClusterResourcesFromText(sinfoLines)
 if err != nil {
@@ -531,5 +532,79 @@ t.Fatalf("unexpected error: %v", err)
 }
 if resp.Status != "ok" {
 t.Errorf("Status = %q, want \"ok\" (default)", resp.Status)
+}
+}
+
+// TestSinfoTextFormatSurvivesAShell guards the separator in the sinfo format
+// string.  getClusterResourcesFromText runs with Shell: true, so bash re-parses
+// the command line, and any SinfoPath wrapper that forwards to a login node hands
+// it to a second shell there.  A pipe made bash read the format as a pipeline and
+// print "%m: command not found" on stderr, which the plugin treats as a failure.
+func TestSinfoTextFormatSurvivesAShell(t *testing.T) {
+for _, char := range []string{"|", ";", "&", "<", ">", "(", ")", "$", "`", "*", "?", " "} {
+if strings.Contains(sinfoTextFormat, char) {
+t.Errorf("sinfo format %q contains the shell metacharacter %q", sinfoTextFormat, char)
+}
+}
+}
+
+// TestParseClusterResourcesCountsEachNodeOnce covers sinfo -N listing a node once
+// per partition it belongs to. Adding those lines up reports more capacity than the
+// cluster has.
+func TestParseClusterResourcesCountsEachNodeOnce(t *testing.T) {
+resp, err := parseClusterResourcesFromText(
+"n01,16,128000,64000\nn01,16,128000,64000\nn02,32,64000,32000\n")
+if err != nil {
+t.Fatalf("unexpected error: %v", err)
+}
+if resp.Resources.CPU != "48" {
+t.Errorf("expected 48 CPUs counting n01 once, got %s", resp.Resources.CPU)
+}
+if resp.Resources.Memory != "96000Mi" {
+t.Errorf("expected 96000Mi counting n01 once, got %s", resp.Resources.Memory)
+}
+}
+
+// TestParseClusterResourcesRejectsAggregatedOutput is the regression this fix is
+// for. Without -N, sinfo summarises per partition and prints ranges and "+"
+// suffixes; every line was skipped and the virtual node advertised zero capacity,
+// so the scheduler refused every pod with "Insufficient cpu" while the node still
+// showed Ready.
+func TestParseClusterResourcesRejectsAggregatedOutput(t *testing.T) {
+resp, err := parseClusterResourcesFromText("24+,191024+,184251-N/A\n")
+if err != nil {
+t.Fatalf("unexpected error: %v", err)
+}
+if resp.Resources.CPU != "0" {
+t.Errorf("aggregated output has no parseable per-node numbers, got CPU=%s", resp.Resources.CPU)
+}
+}
+
+// TestSinfoIsQueriedPerNode pins the -N flag, without which the format above
+// cannot produce numbers at all.
+func TestSinfoIsQueriedPerNode(t *testing.T) {
+if !strings.Contains(sinfoTextFormat, "%N") {
+t.Errorf("the format must ask for the node name so duplicates can be detected: %s", sinfoTextFormat)
+}
+}
+
+// TestSqueueStatusArgsAreSelfContained guards against reintroducing an argument
+// that only works because a shell splits it again.  The query used to pass "-j "
+// with a trailing space and the job id separately, which reached squeue correctly
+// only when bash rejoined them; a SqueuePath wrapper that quotes its arguments
+// made squeue see an empty job id and answer "Invalid job id", leaving the pod
+// reported as terminal while its job was still running.
+func TestSqueueStatusArgsAreSelfContained(t *testing.T) {
+args := squeueStatusArgs("227105")
+
+for _, arg := range args {
+if arg != strings.TrimSpace(arg) {
+t.Errorf("argument %q has surrounding whitespace and only works if a shell re-splits it", arg)
+}
+}
+
+joined := strings.Join(args, " ")
+if !strings.Contains(joined, "-j 227105") {
+t.Errorf("expected the job id to follow -j, got %q", joined)
 }
 }

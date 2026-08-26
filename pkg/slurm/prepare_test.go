@@ -340,6 +340,61 @@ func TestRemoveJID(t *testing.T) {
 	}
 }
 
+func TestGetJobWorkDir(t *testing.T) {
+	config := SlurmConfig{
+		DataRootFolder: "/default/root/",
+	}
+	namespace := "mynamespace"
+	podUID := "abc-123"
+	defaultPath := config.DataRootFolder + namespace + "-" + podUID
+
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    string
+	}{
+		{
+			name:        "no annotation uses default",
+			annotations: map[string]string{},
+			expected:    defaultPath,
+		},
+		{
+			name:        "annotation overrides base dir",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/mygroup"},
+			expected:    "/scratch/mygroup/" + namespace + "-" + podUID,
+		},
+		{
+			name:        "annotation with trailing slash",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/mygroup/"},
+			expected:    "/scratch/mygroup/" + namespace + "-" + podUID,
+		},
+		{
+			name:        "empty annotation value uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": ""},
+			expected:    defaultPath,
+		},
+		{
+			name:        "relative path annotation is rejected, uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "relative/path"},
+			expected:    defaultPath,
+		},
+		{
+			name:        "path traversal annotation is rejected, uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/../etc"},
+			expected:    defaultPath,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getJobWorkDir(config, tt.annotations, namespace, podUID)
+			if result != tt.expected {
+				t.Errorf("getJobWorkDir() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
 // TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
 // not set (non-shared filesystem mode), multiline projected volume data (e.g. a
 // PEM certificate from kube-root-ca.crt) is written using a base64-encoded
@@ -733,62 +788,86 @@ func TestProduceSLURMScriptGPUMapping(t *testing.T) {
 	}
 }
 
-// TestProduceSLURMScriptMeshWrapsJobScript pins the two constraints on the last
-// line of job.slurm at once: mesh.sh has to receive job.sh as an argument (it
-// executes "$@" inside the network namespace it sets up, so an unwrapped job.sh
-// would run outside the overlay network), while the prefix must still end on its
-// own line so that a trailing base64 heredoc end-marker stays recognisable.
-func TestProduceSLURMScriptMeshWrapsJobScript(t *testing.T) {
+// TestDeleteContainerWithoutJID covers deleting a pod that never got a Slurm job:
+// sbatch may have been rejected, or the plugin may have restarted since submission.
+// Both leave no JIDs entry, and reading the JID unguarded panicked the handler.
+func TestDeleteContainerWithoutJID(t *testing.T) {
+	dir := t.TempDir()
+	podDir := filepath.Join(dir, "ns-11111111-2222-3333-4444-555555555555")
+	if err := os.MkdirAll(podDir, 0o755); err != nil {
+		t.Fatalf("failed to create pod dir: %v", err)
+	}
+
+	JIDs := map[string]*JidStruct{}
+	err := deleteContainer(context.Background(), SlurmConfig{}, "11111111-2222-3333-4444-555555555555", &JIDs, podDir)
+	if err != nil {
+		t.Fatalf("deleteContainer returned an error for a pod with no job: %v", err)
+	}
+	if _, statErr := os.Stat(podDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected the pod directory to be removed, stat returned %v", statErr)
+	}
+}
+
+// mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
+// its "$@". If job.sh is emitted on the following line instead of as that argument,
+// mesh.sh exits first and the workload runs outside the namespace: the job succeeds
+// but has no mesh connectivity, which is silent and hard to diagnose.
+func TestProduceSLURMScriptRunsWorkloadInsideMeshNetns(t *testing.T) {
 	ctx := context.Background()
 	workingDir := t.TempDir()
-
-	preExec := "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\necho setting up the overlay network\n$@\nEOFMESH\n export APPTAINER_CACHEDIR=~/apptainer-cache "
 
 	pod := v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "mesh-pod",
 			Namespace: "default",
-			UID:       "bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+			UID:       "11111111-2222-3333-4444-555555555555",
 			Annotations: map[string]string{
-				"slurm-job.vk.io/pre-exec": preExec,
+				"slurm-job.vk.io/pre-exec": "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\nexec \"$@\"\nEOFMESH\n",
 			},
 		},
 	}
 
-	config := SlurmConfig{BashPath: "/bin/bash"}
-	resourceLimits := ResourceLimits{CPU: 1, Memory: 1024 * 1024}
-
-	_, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, nil)
-	if err != nil {
+	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
 		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
 	}
 
-	jobSlurm, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
 	if err != nil {
-		t.Fatalf("failed to read generated job.slurm: %v", err)
+		t.Fatalf("read job.slurm: %v", err)
 	}
 
-	meshPath := filepath.Join(workingDir, "mesh.sh")
-	jobPath := filepath.Join(workingDir, "job.sh")
+	want := filepath.Join(workingDir, "mesh.sh") + " " + filepath.Join(workingDir, "job.sh")
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("job.sh must be passed to mesh.sh as its argument (%q)\n---\n%s", want, string(raw))
+	}
+}
 
-	if _, err := os.Stat(meshPath); err != nil {
-		t.Fatalf("mesh.sh was not created: %v", err)
+// Without mesh.sh the separator must stay a newline: with SHARED_FS=false the
+// prefix ends in a base64 heredoc end-marker, and gluing job.sh onto that line
+// makes bash swallow the rest of the script instead of ending the heredoc.
+func TestProduceSLURMScriptKeepsNewlineBeforeJobScriptWithoutMesh(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "plain-pod",
+			Namespace: "default",
+			UID:       "66666666-7777-8888-9999-000000000000",
+		},
 	}
 
-	content := string(jobSlurm)
-	if !strings.Contains(content, "\n"+meshPath+" "+jobPath+"\n") {
-		t.Errorf("job.slurm does not wrap job.sh into mesh.sh\nwant line %q\ncontent:\n%s", meshPath+" "+jobPath, content)
+	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
 	}
 
-	// The rest of the pre-exec (outside the heredoc) must still run before it.
-	if !strings.Contains(content, "export APPTAINER_CACHEDIR") {
-		t.Errorf("job.slurm lost the non-heredoc part of the pre-exec\ncontent:\n%s", content)
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
 	}
 
-	// mesh.sh must not be invoked on its own, without job.sh as argument.
-	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) == meshPath {
-			t.Errorf("job.slurm runs mesh.sh without job.sh as argument\ncontent:\n%s", content)
-		}
+	jobScript := filepath.Join(workingDir, "job.sh")
+	if !strings.Contains(string(raw), "\n"+jobScript) {
+		t.Errorf("job.sh must start its own line when no mesh script is in play\n---\n%s", string(raw))
 	}
 }
