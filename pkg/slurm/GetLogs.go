@@ -200,7 +200,9 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	if jid, ok := (*h.JIDs)[req.PodUID]; ok && jid.WorkDir != "" {
 		path = jid.WorkDir
 	} else if workDirBytes, rdErr := os.ReadFile(metadataPath + "/WorkDir.path"); rdErr == nil && len(workDirBytes) > 0 {
-		path = string(workDirBytes)
+		if workDirPath := strings.TrimSpace(string(workDirBytes)); workDirPath != "" {
+			path = workDirPath
+		}
 	}
 	containerOutputPath := path + "/run-" + req.ContainerName + ".out"
 	var output []byte
