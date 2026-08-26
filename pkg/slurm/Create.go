@@ -298,9 +298,16 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		if workDir != filesPath {
 			os.RemoveAll(workDir)
 		}
-		err = deleteContainer(spanCtx, h.Config, string(data.Pod.UID), h.JIDs, workDir)
-		if err != nil {
-			log.G(h.Ctx).Error(err)
+		podUID := string(data.Pod.UID)
+		if h.JIDs != nil {
+			if _, ok := (*h.JIDs)[podUID]; ok {
+				err = deleteContainer(spanCtx, h.Config, podUID, h.JIDs, workDir)
+				if err != nil {
+					log.G(h.Ctx).Error(err)
+				}
+			} else {
+				log.G(h.Ctx).Info("Skipping deleteContainer cleanup because no JID was registered for pod UID " + podUID)
+			}
 		}
 		return
 	}
