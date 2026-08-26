@@ -90,6 +90,13 @@ fi
 
 cd "${VK_TEST_DIR}"
 
+# Apply local fixes for known upstream test YAML issues
+# Fix DATABASE_URL value in 085-secret-envfrom.yaml: upstream accidentally stored
+# the URL with "******" instead of the "postgresql://" prefix that the log-check
+# regex expects ("✓ DATABASE_URL: postgresql").
+sed -i 's|DATABASE_URL: "\*\*\*\*\*\*localhost:5432/mydb"|DATABASE_URL: "postgresql://localhost:5432/mydb"|' \
+  "${VK_TEST_DIR}/vktestset/templates/085-secret-envfrom.yaml" || true
+
 # Create test configuration with SLURM-specific settings
 echo "Creating test configuration..."
 cat > vktest_config.yaml <<EOF
