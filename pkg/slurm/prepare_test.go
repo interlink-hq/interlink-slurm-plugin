@@ -11,6 +11,7 @@ import (
 
 	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -657,6 +658,135 @@ t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
 }
 })
 }
+}
+
+func TestProduceSLURMScriptGPUMapping(t *testing.T) {
+	ctx := context.Background()
+
+	gpuContainer := func(gpus string) []v1.Container {
+		return []v1.Container{
+			{
+				Name: "gpu-container",
+				Resources: v1.ResourceRequirements{
+					Limits: v1.ResourceList{"nvidia.com/gpu": resource.MustParse(gpus)},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		flags         string
+		containers    []v1.Container
+		flavor        *FlavorResolution
+		wantLines     []string
+		unwantedLines []string
+	}{
+		{
+			name:       "gpu resource without flags produces gres",
+			containers: gpuContainer("1"),
+			wantLines:  []string{"#SBATCH --gres=gpu:1"},
+		},
+		{
+			name:       "several gpus are summed",
+			containers: append(gpuContainer("1"), gpuContainer("2")...),
+			wantLines:  []string{"#SBATCH --gres=gpu:3"},
+		},
+		{
+			name:          "gres in annotation wins over gpu resource",
+			flags:         "-A geant4 -p geant4 --gres gpu:nvidia-h100:2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gres gpu:nvidia-h100:2"},
+			unwantedLines: []string{"--gres=gpu:1"},
+		},
+		{
+			name:          "gres=... in annotation wins over gpu resource",
+			flags:         "--gres=gpu:a100:4",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gres=gpu:a100:4"},
+			unwantedLines: []string{"gpu:1"},
+		},
+		{
+			name:          "gpus flag in annotation wins over gpu resource",
+			flags:         "--gpus=2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH --gpus=2"},
+			unwantedLines: []string{"--gres"},
+		},
+		{
+			name:          "-G short flag in annotation wins over gpu resource",
+			flags:         "-G 2",
+			containers:    gpuContainer("1"),
+			wantLines:     []string{"#SBATCH -G 2"},
+			unwantedLines: []string{"--gres"},
+		},
+		{
+			name:       "gres from flavor wins over gpu resource",
+			containers: gpuContainer("1"),
+			flavor: &FlavorResolution{
+				FlavorName: "gpu-flavor",
+				SlurmFlags: []string{"--partition=gpu", "--gres=gpu:v100:8"},
+			},
+			wantLines:     []string{"#SBATCH --gres=gpu:v100:8"},
+			unwantedLines: []string{"gpu:1"},
+		},
+		{
+			name:          "non-gpu gres is preserved and merged",
+			flags:         "--gres=lscratch:10",
+			containers:    gpuContainer("2"),
+			wantLines:     []string{"#SBATCH --gres=lscratch:10,gpu:2"},
+			unwantedLines: []string{"#SBATCH --gres=gpu:2"},
+		},
+		{
+			name:          "no gpu resource produces no gres",
+			flags:         "-p geant4",
+			containers:    []v1.Container{{Name: "cpu-container"}},
+			unwantedLines: []string{"--gres", "--gpus"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workingDir := t.TempDir()
+
+			pod := v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "gpu-pod",
+					Namespace: "default",
+					UID:       "bca0ba6d-b9cb-499e-a16f-700f61a1b030",
+				},
+				Spec: v1.PodSpec{Containers: tt.containers},
+			}
+			if tt.flags != "" {
+				pod.ObjectMeta.Annotations = map[string]string{"slurm-job.vk.io/flags": tt.flags}
+			}
+
+			config := SlurmConfig{BashPath: "/bin/bash"}
+			resourceLimits := ResourceLimits{CPU: 1, Memory: 1024 * 1024}
+
+			_, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, tt.flavor)
+			if err != nil {
+				t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+			}
+
+			jobSlurm, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+			if err != nil {
+				t.Fatalf("failed to read generated job.slurm: %v", err)
+			}
+
+			content := string(jobSlurm)
+			for _, line := range tt.wantLines {
+				if !strings.Contains(content, line) {
+					t.Errorf("generated job.slurm missing %q\ncontent:\n%s", line, content)
+				}
+			}
+			for _, line := range tt.unwantedLines {
+				if strings.Contains(content, line) {
+					t.Errorf("generated job.slurm unexpectedly contains %q\ncontent:\n%s", line, content)
+				}
+			}
+		})
+	}
 }
 
 // TestDeleteContainerWithoutJID covers deleting a pod that never got a Slurm job:

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -291,6 +292,48 @@ func hasGPUInFlags(flags []string) bool {
 		}
 	}
 	return false
+}
+
+// gpuRequestFlagKeys are the SLURM flags that request GPUs on their own, i.e.
+// without going through --gres. Short aliases (-G) are normalised by slurmFlagKey.
+var gpuRequestFlagKeys = map[string]bool{
+	"--gpus":             true,
+	"--gpus-per-node":    true,
+	"--gpus-per-socket":  true,
+	"--gpus-per-task":    true,
+	"--ntasks-per-gpu":   true,
+	"--gpus-per-account": true,
+}
+
+// declaresGPUs reports whether a SLURM flag already asks for GPUs. A --gres flag
+// only counts when it actually mentions the gpu resource, since --gres is also
+// used for unrelated generic resources (e.g. --gres=lscratch:10).
+func declaresGPUs(flag string) bool {
+	key := slurmFlagKey(flag)
+	if gpuRequestFlagKeys[key] {
+		return true
+	}
+	if key == "--gres" {
+		return strings.Contains(strings.ToLower(slurmFlagValue(flag)), "gpu")
+	}
+	return false
+}
+
+// slurmFlagValue returns the value of a flag written either as "--flag=value" or
+// as "--flag value". It returns an empty string for flags without a value.
+func slurmFlagValue(flag string) string {
+	parts := splitShellWords(strings.TrimSpace(flag))
+	if len(parts) == 0 {
+		return ""
+	}
+
+	if _, inlineValue, found := strings.Cut(parts[0], "="); found {
+		parts[0] = inlineValue
+	} else {
+		parts = parts[1:]
+	}
+
+	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
 var slurmFlagAliases = map[string]string{
@@ -1251,6 +1294,38 @@ func produceSLURMScript(
 		log.G(Ctx).Info("Using default Memory limit of 1MB")
 		if !memoryLimitSetFromFlags {
 			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
+		}
+	}
+
+	// Map GPU resources from the pod spec (nvidia.com/gpu, amd.com/gpu) to --gres.
+	// An explicit GPU request coming from the flavor or from the annotation flags
+	// always wins: it can name a specific model (--gres gpu:nvidia-h100:2), which
+	// the pod spec cannot express.
+	if gpuCount := detectGPUResources(Ctx, pod.Spec.Containers); gpuCount > 0 {
+		gpuGres := "gpu:" + strconv.FormatInt(gpuCount, 10)
+
+		if slices.ContainsFunc(sbatchFlagsFromArgo, declaresGPUs) {
+			log.G(Ctx).Infof("Ignoring the %d GPU(s) requested in the pod resources, GPUs are already requested through SLURM flags", gpuCount)
+		} else {
+			// Merge into an existing non-GPU --gres (e.g. --gres=lscratch:10) instead
+			// of appending a second one, since deduplication keeps only one per flag.
+			merged := false
+			for i, slurmFlag := range sbatchFlagsFromArgo {
+				if slurmFlagKey(slurmFlag) != "--gres" {
+					continue
+				}
+				if existing := slurmFlagValue(slurmFlag); existing != "" {
+					sbatchFlagsFromArgo[i] = "--gres=" + existing + "," + gpuGres
+				} else {
+					sbatchFlagsFromArgo[i] = "--gres=" + gpuGres
+				}
+				merged = true
+				break
+			}
+			if !merged {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--gres="+gpuGres)
+			}
+			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with --gres=%s", gpuCount, gpuGres)
 		}
 	}
 
