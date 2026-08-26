@@ -350,6 +350,54 @@ spec:
 - The `--uid` flag is added to the SBATCH script as `#SBATCH --uid=<value>`
 - This feature is designed for scenarios where the plugin runs as root and needs to impersonate users
 
+### :file_folder: Custom Job Working Directory
+
+By default the plugin places all job files (scripts, output, logs, mounts) under `DataRootFolder/<namespace>-<podUID>`. The `slurm-job.vk.io/job-workdir` annotation lets you redirect these job files to a different base directory — for example a shared group-accessible path — while keeping a small metadata directory under `DataRootFolder` for reliable restart recovery.
+
+#### How it works
+
+| Directory | Location | Contents |
+|-----------|----------|----------|
+| Metadata directory | `DataRootFolder/<namespace>-<podUID>` | `JobID.jid`, `PodUID.uid`, `PodNamespace.ns`, timing files, `WorkDir.path` pointer |
+| Job working directory | `<job-workdir>/<namespace>-<podUID>` | Job scripts, SLURM stdout/stderr, container logs, env files, mount data |
+
+The metadata directory is **always** created so that `LoadJIDs` can recover job state after a plugin restart. The `WorkDir.path` file inside it stores the custom path so that status, log, and delete operations resolve the correct directory even after the in-memory cache is wiped.
+
+#### Usage
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: group-job
+  annotations:
+    slurm-job.vk.io/job-workdir: /scratch/mygroup
+    slurm-job.vk.io/flags: "--gid=mygroup"
+spec:
+  containers:
+  - name: app
+    image: docker://myapp:latest
+```
+
+Job files land in `/scratch/mygroup/<namespace>-<podUID>/`. Plugin metadata stays in `DataRootFolder/<namespace>-<podUID>/`.
+
+#### Preserving the job output directory on deletion
+
+By default, both the metadata directory and the job working directory are removed when the pod is deleted. Set `slurm-job.vk.io/no-clean-workdir: "true"` to keep the job working directory:
+
+```yaml
+metadata:
+  annotations:
+    slurm-job.vk.io/job-workdir: /scratch/mygroup
+    slurm-job.vk.io/no-clean-workdir: "true"
+```
+
+With this annotation the plugin only removes the metadata directory; `/scratch/mygroup/<namespace>-<podUID>/` is left intact.
+
+#### Path validation
+
+The annotation value must be an absolute path. Relative paths and paths containing `..` traversal elements are silently ignored and the default `DataRootFolder` is used instead.
+
 ### :gear: Explanation of the SLURM Config file
 
 Detailed explanation of the SLURM config file key values. Edit the config file before running the binary or before
