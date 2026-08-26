@@ -620,5 +620,66 @@ func TestDeleteContainerWithoutJID(t *testing.T) {
 	}
 	if _, statErr := os.Stat(podDir); !os.IsNotExist(statErr) {
 		t.Errorf("expected the pod directory to be removed, stat returned %v", statErr)
+// mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
+// its "$@". If job.sh is emitted on the following line instead of as that argument,
+// mesh.sh exits first and the workload runs outside the namespace: the job succeeds
+// but has no mesh connectivity, which is silent and hard to diagnose.
+func TestProduceSLURMScriptRunsWorkloadInsideMeshNetns(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mesh-pod",
+			Namespace: "default",
+			UID:       "11111111-2222-3333-4444-555555555555",
+			Annotations: map[string]string{
+				"slurm-job.vk.io/pre-exec": "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\nexec \"$@\"\nEOFMESH\n",
+			},
+		},
+	}
+
+	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
+	}
+
+	want := filepath.Join(workingDir, "mesh.sh") + " " + filepath.Join(workingDir, "job.sh")
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("job.sh must be passed to mesh.sh as its argument (%q)\n---\n%s", want, string(raw))
+	}
+}
+
+// Without mesh.sh the separator must stay a newline: with SHARED_FS=false the
+// prefix ends in a base64 heredoc end-marker, and gluing job.sh onto that line
+// makes bash swallow the rest of the script instead of ending the heredoc.
+func TestProduceSLURMScriptKeepsNewlineBeforeJobScriptWithoutMesh(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "plain-pod",
+			Namespace: "default",
+			UID:       "66666666-7777-8888-9999-000000000000",
+		},
+	}
+
+	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
+	}
+
+	jobScript := filepath.Join(workingDir, "job.sh")
+	if !strings.Contains(string(raw), "\n"+jobScript) {
+		t.Errorf("job.sh must start its own line when no mesh script is in play\n---\n%s", string(raw))
 	}
 }

@@ -1196,6 +1196,11 @@ func produceSLURMScript(
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
 
+	// mesh.sh sets up the mesh network in an unshared netns and then execs its "$@".
+	// The workload has to be that argument, so it must end up on the SAME line as
+	// mesh.sh; the default newline separator below would run it after mesh.sh had
+	// already exited, outside the netns.
+	meshDetected := false
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
 		// Check if pre-exec contains a heredoc that creates mesh.sh
 		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
@@ -1211,6 +1216,7 @@ func produceSLURMScript(
 					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
 					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
 					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
+					meshDetected = true
 				}
 
 				err = os.Chmod(path+"/mesh.sh", 0774)
@@ -1231,18 +1237,25 @@ func produceSLURMScript(
 		}
 	}
 
+	// NOTE: prefix is separated from f.Name() by a newline, not a space.  When
+	// SHARED_FS=false the prefix ends with a base64 heredoc end-marker (e.g.
+	// "VKDATA_abc").  If f.Name() were appended on the same line ("VKDATA_abc
+	// /path/to/job.sh") bash would not recognise it as the end-of-heredoc, consume
+	// the rest of the script into the heredoc, and never execute job.sh.
+	//
+	// A mesh prefix is the exception: there job.sh must be mesh.sh's argument. The
+	// mesh prefix never ends in a heredoc marker, so the two cases cannot collide.
+	separator := "\n"
+	if meshDetected {
+		separator = " "
+	}
+
 	sbatch_macros := "#!" + config.BashPath +
 		"\n#SBATCH --job-name=" + podUID +
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		// NOTE: prefix must be separated from f.Name() by a newline, not a
-		// space.  When SHARED_FS=false the prefix ends with a base64 heredoc
-		// end-marker (e.g. "VKDATA_abc").  If f.Name() were appended on the
-		// same line ("VKDATA_abc /path/to/job.sh") bash would not recognise
-		// it as the end-of-heredoc, consume the rest of the script into the
-		// heredoc, and never execute job.sh.
-		prefix + "\n" + f.Name() +
+		prefix + separator + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
