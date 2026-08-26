@@ -339,6 +339,58 @@ func TestRemoveJID(t *testing.T) {
 	}
 }
 
+func TestGetJobWorkDir(t *testing.T) {
+	config := SlurmConfig{
+		DataRootFolder: "/default/root/",
+	}
+	namespace := "mynamespace"
+	podUID := "abc-123"
+	defaultPath := config.DataRootFolder + namespace + "-" + podUID
+
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    string
+	}{
+		{
+			name:        "no annotation uses default",
+			annotations: map[string]string{},
+			expected:    defaultPath,
+		},
+		{
+			name:        "annotation overrides base dir",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/mygroup"},
+			expected:    "/scratch/mygroup/" + namespace + "-" + podUID,
+		},
+		{
+			name:        "annotation with trailing slash",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/mygroup/"},
+			expected:    "/scratch/mygroup/" + namespace + "-" + podUID,
+		},
+		{
+			name:        "empty annotation value uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": ""},
+			expected:    defaultPath,
+		},
+		{
+			name:        "relative path annotation is rejected, uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "relative/path"},
+			expected:    defaultPath,
+		},
+		{
+			name:        "path traversal annotation is rejected, uses default",
+			annotations: map[string]string{"slurm-job.vk.io/job-workdir": "/scratch/../etc"},
+			expected:    defaultPath,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getJobWorkDir(config, tt.annotations, namespace, podUID)
+			if result != tt.expected {
+				t.Errorf("getJobWorkDir() = %q, want %q", result, tt.expected)
+			}
+		})
 // TestPrepareMountsSimpleVolumeProjectedHeredoc verifies that when SHARED_FS is
 // not set (non-shared filesystem mode), multiline projected volume data (e.g. a
 // PEM certificate from kube-root-ca.crt) is written using a base64-encoded
