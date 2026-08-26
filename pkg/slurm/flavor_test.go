@@ -3,6 +3,7 @@ package slurm
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -222,6 +223,16 @@ func TestDeduplicateSlurmFlags(t *testing.T) {
 			flags: []string{"  --partition=cpu  ", "--mem=8G"},
 			want:  []string{"--partition=cpu", "--mem=8G"},
 		},
+		{
+			name:  "Short flag with separate value remains intact",
+			flags: []string{"--job-name=helloworld-pod", "-A geant4", "-p geant4"},
+			want:  []string{"--job-name=helloworld-pod", "-A geant4", "-p geant4"},
+		},
+		{
+			name:  "Short and long aliases deduplicate to last value",
+			flags: []string{"--partition=cpu", "-p geant4", "--account=old", "-A geant4"},
+			want:  []string{"-p geant4", "-A geant4"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -235,6 +246,39 @@ func TestDeduplicateSlurmFlags(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Errorf("deduplicateSlurmFlags()[%d] = %v, want %v", i, got[i], tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+func TestSplitSlurmFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "Mixed long and short flags",
+			input: "--job-name=helloworld-pod -A geant4 -p geant4",
+			want:  []string{"--job-name=helloworld-pod", "-A geant4", "-p geant4"},
+		},
+		{
+			name:  "Quoted values are preserved",
+			input: `--comment "hello world" -J test-job`,
+			want:  []string{"--comment hello world", "-J test-job"},
+		},
+		{
+			name:  "Long flags with separate values are grouped",
+			input: "--partition geant4 --time 01:00:00",
+			want:  []string{"--partition geant4", "--time 01:00:00"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitSlurmFlags(tt.input)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("splitSlurmFlags() = %v, want %v", got, tt.want)
 			}
 		})
 	}

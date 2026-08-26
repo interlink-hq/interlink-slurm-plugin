@@ -3,6 +3,7 @@ package slurm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"al.essio.dev/pkg/shellescape"
 	exec2 "github.com/alexellis/go-execute/pkg/v1"
@@ -291,6 +293,115 @@ func hasGPUInFlags(flags []string) bool {
 	return false
 }
 
+var slurmFlagAliases = map[string]string{
+	"-A": "--account",
+	"-C": "--constraint",
+	"-D": "--chdir",
+	"-G": "--gpus",
+	"-J": "--job-name",
+	"-N": "--nodes",
+	"-c": "--cpus-per-task",
+	"-n": "--ntasks",
+	"-o": "--output",
+	"-p": "--partition",
+	"-t": "--time",
+	"-w": "--nodelist",
+}
+
+func splitShellWords(input string) []string {
+	var (
+		tokens       []string
+		currentToken strings.Builder
+		inSingle     bool
+		inDouble     bool
+		escaping     bool
+		tokenStarted bool
+	)
+
+	flushToken := func() {
+		if tokenStarted {
+			tokens = append(tokens, currentToken.String())
+			currentToken.Reset()
+			tokenStarted = false
+		}
+	}
+
+	for _, r := range input {
+		switch {
+		case escaping:
+			currentToken.WriteRune(r)
+			escaping = false
+			tokenStarted = true
+		case r == '\\' && !inSingle:
+			escaping = true
+			tokenStarted = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+			tokenStarted = true
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+			tokenStarted = true
+		case unicode.IsSpace(r) && !inSingle && !inDouble:
+			flushToken()
+		default:
+			currentToken.WriteRune(r)
+			tokenStarted = true
+		}
+	}
+
+	if escaping {
+		currentToken.WriteRune('\\')
+	}
+	flushToken()
+
+	return tokens
+}
+
+func splitSlurmFlags(input string) []string {
+	tokens := splitShellWords(input)
+	flags := make([]string, 0, len(tokens))
+
+	for i := 0; i < len(tokens); i++ {
+		token := strings.TrimSpace(tokens[i])
+		if token == "" {
+			continue
+		}
+
+		if !strings.HasPrefix(token, "-") {
+			flags = append(flags, token)
+			continue
+		}
+
+		flagParts := []string{token}
+		for i+1 < len(tokens) && !strings.HasPrefix(tokens[i+1], "-") {
+			flagParts = append(flagParts, tokens[i+1])
+			i++
+		}
+
+		flags = append(flags, strings.Join(flagParts, " "))
+	}
+
+	return flags
+}
+
+func slurmFlagKey(flag string) string {
+	parts := splitShellWords(strings.TrimSpace(flag))
+	if len(parts) == 0 {
+		return ""
+	}
+
+	key := parts[0]
+	if strings.Contains(key, "=") {
+		key = strings.SplitN(key, "=", 2)[0]
+	}
+
+	if alias, ok := slurmFlagAliases[key]; ok {
+		return alias
+	}
+
+	return key
+}
+
 // deduplicateSlurmFlags removes duplicate SLURM flags, keeping the last occurrence
 // This implements proper priority: later flags override earlier ones
 func deduplicateSlurmFlags(flags []string) []string {
@@ -304,17 +415,9 @@ func deduplicateSlurmFlags(flags []string) []string {
 			continue
 		}
 
-		// Extract the flag key (e.g., "--partition" from "--partition=cpu")
-		key := flag
-		if strings.Contains(flag, "=") {
-			parts := strings.SplitN(flag, "=", 2)
-			key = parts[0]
-		} else if strings.HasPrefix(flag, "--") {
-			// Handle flags like "--flag value" (split on space)
-			parts := strings.Fields(flag)
-			if len(parts) > 0 {
-				key = parts[0]
-			}
+		key := slurmFlagKey(flag)
+		if key == "" {
+			continue
 		}
 
 		// If we haven't seen this key before, track its order
@@ -432,6 +535,27 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 		UID:           selectedFlavor.UID,
 		SlurmFlags:    selectedFlavor.SlurmFlags,
 	}, nil
+}
+
+
+// normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
+// literal backslash-n escape sequences (\n) to actual newline characters when the
+// string contains no real newlines. This handles a common misconfiguration where the
+// VK config has KubernetesApiCaCrt (or any PEM-like field) stored in unquoted YAML
+// without a block scalar (|), so the YAML parser never processes the \n escape.
+// The normalization is safe because:
+//   - If the string already contains real newlines, no change is made (correct YAML).
+//   - If the string contains only \n literals (no real newlines), all \n are replaced
+//     with real newlines. Legitimate content that intentionally contains \n without
+//     real newlines and should NOT be unescaped is extremely unusual in Kubernetes
+//     volume file values (all known cases are text or PEM certificates).
+func normalizeVolumeFileContent(s string) []byte {
+	// If there are already real newlines, or no literal \n sequences, return as-is.
+	if !strings.Contains(s, `\n`) || strings.ContainsRune(s, '\n') {
+		return []byte(s)
+	}
+	// The string has literal \n but no real newlines: unescape.
+	return []byte(strings.ReplaceAll(s, `\n`, "\n"))
 }
 
 // CreateDirectories is just a function to be sure directories exists at runtime
@@ -679,17 +803,35 @@ func prepareMountsSimpleVolume(
 		if os.Getenv("SHARED_FS") != "true" {
 			filePathSplitted := strings.Split(volumesHostToContainerPath, ":")
 			hostFilePath := filePathSplitted[0]
-			hostFilePathSplitted := strings.Split(hostFilePath, "/")
-			hostParentDir := filepath.Join(hostFilePathSplitted[:len(hostFilePathSplitted)-1]...)
+			// Use filepath.Dir to obtain the correct absolute parent directory.
+			// The previous approach (splitting on "/" and re-joining) discarded the
+			// leading empty component, producing a relative path such as
+			// "tmp/.interlink/…" instead of "/tmp/.interlink/…". With a relative
+			// mkdir -p the directory was created relative to the SLURM job's CWD,
+			// not at the absolute path used by the subsequent heredoc redirect, so
+			// the base64 -d write always failed in SHARED_FS=false mode.
+			hostParentDir := filepath.Dir(hostFilePath)
 
 			// Creates parent dir of the file, then create empty file.
-			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch " + hostFilePath
+			prefix += "\nmkdir -p \"" + hostParentDir + "\" && touch \"" + hostFilePath + "\""
 
-			// Puts content of the file thanks to env var. Note: the envVarNames has the same number and order that volumesHostToContainerPaths.
+			// Puts content of the file using a base64-encoded heredoc.
+			// Note: the envVarNames has the same number and order as volumesHostToContainerPaths.
+			// Using a heredoc with base64-encoded content preserves multiline strings (e.g. PEM
+			// certificates) because:
+			//   1. SLURM may strip newlines when exporting environment variables to compute nodes,
+			//      making echo "${VAR}" unreliable for multiline content.
+			//   2. Base64 output only uses [A-Za-z0-9+/=] characters, so the heredoc marker
+			//      (which contains an underscore) can never appear in the base64 payload,
+			//      completely eliminating the risk of premature heredoc termination.
 			envVarName := envVarNames[filePathIndex]
 			splittedEnvName := strings.Split(envVarName, "_")
-			log.G(Ctx).Info(splittedEnvName[len(splittedEnvName)-1])
-			prefix += "\necho \"${" + envVarName + "}\" > \"" + hostFilePath + "\""
+			uniqueVolumeID := splittedEnvName[len(splittedEnvName)-1]
+			log.G(Ctx).Info(uniqueVolumeID)
+			content := os.Getenv(envVarName)
+			b64Content := base64.StdEncoding.EncodeToString([]byte(content))
+			heredocMarker := "VKDATA_" + uniqueVolumeID
+			prefix += "\nbase64 -d <<'" + heredocMarker + "' > \"" + hostFilePath + "\"\n" + b64Content + "\n" + heredocMarker
 		}
 		switch config.ContainerRuntime {
 		case "singularity":
@@ -973,35 +1115,25 @@ func produceSLURMScript(
 
 	// Then process annotation flags (higher priority)
 	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-
-		reCpu := regexp.MustCompile(`--cpus-per-task(?:[ =]\S+)?`)
-		reRam := regexp.MustCompile(`--mem(?:[ =]\S+)?`)
-
-		// if isDefaultCPU is false, it means that the CPU limit is set in the pod spec, so we ignore the --cpus-per-task flag from annotations.
-		if !isDefaultCPU {
-			if reCpu.MatchString(slurmFlags) {
-				log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
-				slurmFlags = reCpu.ReplaceAllString(slurmFlags, "")
-			}
-		} else {
-			if reCpu.MatchString(slurmFlags) {
+		annotationFlags := splitSlurmFlags(slurmFlags)
+		for _, annotationFlag := range annotationFlags {
+			switch slurmFlagKey(annotationFlag) {
+			case "--cpus-per-task":
+				if !isDefaultCPU {
+					log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+					continue
+				}
 				cpuLimitSetFromFlags = true
-			}
-		}
-
-		if !isDefaultRam {
-			if reRam.MatchString(slurmFlags) {
-				log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
-				slurmFlags = reRam.ReplaceAllString(slurmFlags, "")
-			}
-		} else {
-			if reRam.MatchString(slurmFlags) {
+			case "--mem":
+				if !isDefaultRam {
+					log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+					continue
+				}
 				memoryLimitSetFromFlags = true
 			}
-		}
 
-		annotationFlags := strings.Split(slurmFlags, " ")
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlags...)
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlag)
+		}
 	}
 
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
@@ -1110,6 +1242,11 @@ func produceSLURMScript(
 		prefix += "\n" + wstunnelClientCommands + "\n"
 	}
 
+	// mesh.sh sets up the mesh network in an unshared netns and then execs its "$@".
+	// The workload has to be that argument, so it must end up on the SAME line as
+	// mesh.sh; the default newline separator below would run it after mesh.sh had
+	// already exited, outside the netns.
+	meshDetected := false
 	if preExecAnnotations, ok := metadata.Annotations["slurm-job.vk.io/pre-exec"]; ok {
 		// Check if pre-exec contains a heredoc that creates mesh.sh
 		if strings.Contains(preExecAnnotations, "cat <<'EOFMESH' > $TMPDIR/mesh.sh") {
@@ -1125,6 +1262,7 @@ func produceSLURMScript(
 					// wrote mesh.sh, now add pre-exec without the mesh.sh heredoc
 					preExecWithoutHeredoc := removeHeredoc(preExecAnnotations, "EOFMESH")
 					prefix += "\n" + preExecWithoutHeredoc + "\n" + fmt.Sprintf(" %s", meshPath)
+					meshDetected = true
 				}
 
 				err = os.Chmod(path+"/mesh.sh", 0774)
@@ -1145,12 +1283,25 @@ func produceSLURMScript(
 		}
 	}
 
+	// NOTE: prefix is separated from f.Name() by a newline, not a space.  When
+	// SHARED_FS=false the prefix ends with a base64 heredoc end-marker (e.g.
+	// "VKDATA_abc").  If f.Name() were appended on the same line ("VKDATA_abc
+	// /path/to/job.sh") bash would not recognise it as the end-of-heredoc, consume
+	// the rest of the script into the heredoc, and never execute job.sh.
+	//
+	// A mesh prefix is the exception: there job.sh must be mesh.sh's argument. The
+	// mesh prefix never ends in a heredoc marker, so the two cases cannot collide.
+	separator := "\n"
+	if meshDetected {
+		separator = " "
+	}
+
 	sbatch_macros := "#!" + config.BashPath +
 		"\n#SBATCH --job-name=" + podUID +
 		"\n#SBATCH --output=" + path + "/job.out" +
 		sbatchFlagsAsString +
 		"\n" +
-		prefix + " " + f.Name() +
+		prefix + separator + f.Name() +
 		"\n"
 
 	log.G(Ctx).Debug("--- Writing SLURM sbatch file")
@@ -1209,7 +1360,7 @@ runCtn() {
   ctn="$1"
   shift
   # This subshell below is NOT POSIX shell compatible, it needs for example bash.
-  time ( "$@" ) &> ${workingPath}/run-${ctn}.out &
+  time ( "$@" ) >> ${workingPath}/run-${ctn}.out 2>&1 &
   pid="$!"
   printf "%s\n" "$(date -Is --utc) Running in background ${ctn} pid ${pid}..."
   pidCtns="${pidCtns} ${pid}:${ctn}"
@@ -1290,6 +1441,11 @@ highestExitCode=0
 		}
 	}
 
+	// Inject SIGTERM trap for preStop lifecycle hooks if any container defines one.
+	if trapScript := generatePreStopTrap(config, commands); trapScript != "" {
+		stringToBeWritten.WriteString(trapScript)
+	}
+
 	for _, containerCommand := range commands {
 
 		stringToBeWritten.WriteString("\n")
@@ -1313,6 +1469,17 @@ highestExitCode=0
 		if containerCommand.isInitContainer {
 			stringToBeWritten.WriteString("runInitCtn ")
 		} else {
+			// Inject postStart lifecycle hook before launching the container.
+			// The hook runs synchronously so that side-effects (e.g. creating
+			// marker files) are visible to the container's entrypoint.
+			if postStartScript := generatePostStartScript(config, containerCommand); postStartScript != "" {
+				stringToBeWritten.WriteString(postStartScript)
+				// When a postStart hook is present, add a shared /tmp bind mount to
+				// the runtime command so the container sees files written by the hook.
+				// Both the hook exec (in generatePostStartScript) and the container
+				// use --bind "${workingPath}/hook-tmp:/tmp".
+				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
+			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
 		stringToBeWritten.WriteString(containerCommand.containerName)
@@ -1338,26 +1505,7 @@ highestExitCode=0
 
 		// Generate probe scripts if enabled and not an init container
 		if config.EnableProbes && !containerCommand.isInitContainer && (len(containerCommand.readinessProbes) > 0 || len(containerCommand.livenessProbes) > 0 || len(containerCommand.startupProbes) > 0) {
-			// Extract the image name from the singularity command
-			var imageName string
-			for i, arg := range containerCommand.runtimeCommand {
-				if strings.HasPrefix(arg, config.ImagePrefix) || strings.HasPrefix(arg, "/") {
-					imageName = arg
-					break
-				}
-				// Look for image after singularity run/exec command
-				if (arg == "run" || arg == "exec") && i+1 < len(containerCommand.runtimeCommand) {
-					// Skip any options and find the image
-					for j := i + 1; j < len(containerCommand.runtimeCommand); j++ {
-						nextArg := containerCommand.runtimeCommand[j]
-						if !strings.HasPrefix(nextArg, "-") && (strings.HasPrefix(nextArg, config.ImagePrefix) || strings.HasPrefix(nextArg, "/")) {
-							imageName = nextArg
-							break
-						}
-					}
-					break
-				}
-			}
+			imageName := containerCommand.containerImage
 
 			if imageName != "" {
 				// Store probe metadata for status checking
@@ -1538,8 +1686,11 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	var jid string
-	if entry, ok := (*JIDs)[podUID]; ok {
+	// Not every pod that reaches here has a job: sbatch may have been rejected, or
+	// the plugin may have restarted since submission. Both leave no JIDs entry, and
+	// dereferencing the nil *JidStruct panics the whole request handler.
+	jid := ""
+	if entry := (*JIDs)[podUID]; entry != nil {
 		jid = entry.JID
 	}
 	removeJID(podUID, JIDs)
@@ -1730,7 +1881,7 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			// Convert map of string to map of []byte
 			mountDataConfigMapsAsBytes := make(map[string][]byte)
 			for key := range retrievedDataObjectCasted.Data {
-				mountDataConfigMapsAsBytes[key] = []byte(retrievedDataObjectCasted.Data[key])
+				mountDataConfigMapsAsBytes[key] = normalizeVolumeFileContent(retrievedDataObjectCasted.Data[key])
 			}
 			fileMode := os.FileMode(*defaultMode)
 			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)
@@ -1911,12 +2062,17 @@ func prepareImage(Ctx context.Context, config SlurmConfig, metadata metav1.Objec
 
 	// If imagePrefix begins with "/", then it must be an absolute path instead of for example docker://some/image.
 	// The file should be one of https://docs.sylabs.io/guides/3.1/user-guide/cli/singularity_run.html#synopsis format.
+	// Check if the image already has a URI scheme (e.g., docker://, oras://, library://, shub://)
+	// to avoid double-prefixing (e.g., docker://oras://...).
+	hasScheme := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*://`).MatchString(image)
 	if strings.HasPrefix(image, "/") {
 		log.G(Ctx).Warningf("image set to %s is an absolute path. Prefix won't be added.", image)
-	} else if !strings.HasPrefix(image, imagePrefix) {
+	} else if hasScheme {
+		log.G(Ctx).Infof("image %s already has a URI scheme. Prefix won't be added.", image)
+	} else if imagePrefix != "" {
 		image = imagePrefix + containerImage
 	} else {
-		log.G(Ctx).Warningf("imagePrefix set to %s but already present in the image name %s. Prefix won't be added.", imagePrefix, image)
+		log.G(Ctx).Warningf("imagePrefix is empty and image %s has no URI scheme. Image will be used as-is.", image)
 	}
 	return image
 }

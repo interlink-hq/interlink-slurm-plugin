@@ -1,3 +1,5 @@
+# Dagger-based CI jobs are disabled. Use the K3s-based e2e workflow
+# .github/workflows/integration-test-k3s.yaml) instead.
 name: integration-tests
 
 on:
@@ -6,20 +8,9 @@ on:
   pull_request:
 
 jobs:
-  build:
-    name: build
+  placeholder:
+    name: dagger-disabled
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Get Repo Owner
-        id: get_repo_owner
-        run: echo ::set-output name=repo_owner::$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
-      - name: Integration Test
-        uses: dagger/dagger-for-github@v7
-        with:
-          workdir: ci
-          verb: call
-          args: -s test   --interlink-version latest  --src ../ --plugin-config ./manifests/plugin-config.yaml --manifests ./manifests
-          cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
-          version: "0.19.1"
+      - run: echo "Dagger-based integration tests are disabled. See integration-test-k3s.yaml."
