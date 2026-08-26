@@ -1627,7 +1627,13 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
 		}
 	}
-	jid := (*JIDs)[podUID].JID
+	// Not every pod that reaches here has a job: sbatch may have been rejected, or
+	// the plugin may have restarted since submission. Both leave no JIDs entry, and
+	// dereferencing the nil *JidStruct panics the whole request handler.
+	jid := ""
+	if entry := (*JIDs)[podUID]; entry != nil {
+		jid = entry.JID
+	}
 	removeJID(podUID, JIDs)
 
 	errFirstAttempt := os.RemoveAll(path)

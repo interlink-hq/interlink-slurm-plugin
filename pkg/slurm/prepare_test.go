@@ -603,6 +603,23 @@ t.Errorf("normalizeVolumeFileContent(%q) = %q, want %q", tc.input, got, tc.want)
 }
 }
 
+// TestDeleteContainerWithoutJID covers deleting a pod that never got a Slurm job:
+// sbatch may have been rejected, or the plugin may have restarted since submission.
+// Both leave no JIDs entry, and reading the JID unguarded panicked the handler.
+func TestDeleteContainerWithoutJID(t *testing.T) {
+	dir := t.TempDir()
+	podDir := filepath.Join(dir, "ns-11111111-2222-3333-4444-555555555555")
+	if err := os.MkdirAll(podDir, 0o755); err != nil {
+		t.Fatalf("failed to create pod dir: %v", err)
+	}
+
+	JIDs := map[string]*JidStruct{}
+	err := deleteContainer(context.Background(), SlurmConfig{}, "11111111-2222-3333-4444-555555555555", &JIDs, podDir)
+	if err != nil {
+		t.Fatalf("deleteContainer returned an error for a pod with no job: %v", err)
+	}
+	if _, statErr := os.Stat(podDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected the pod directory to be removed, stat returned %v", statErr)
 // mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
 // its "$@". If job.sh is emitted on the following line instead of as that argument,
 // mesh.sh exits first and the workload runs outside the namespace: the job succeeds
