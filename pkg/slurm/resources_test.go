@@ -585,5 +585,23 @@ t.Errorf("aggregated output has no parseable per-node numbers, got CPU=%s", resp
 func TestSinfoIsQueriedPerNode(t *testing.T) {
 if !strings.Contains(sinfoTextFormat, "%N") {
 t.Errorf("the format must ask for the node name so duplicates can be detected: %s", sinfoTextFormat)
+// TestSqueueStatusArgsAreSelfContained guards against reintroducing an argument
+// that only works because a shell splits it again.  The query used to pass "-j "
+// with a trailing space and the job id separately, which reached squeue correctly
+// only when bash rejoined them; a SqueuePath wrapper that quotes its arguments
+// made squeue see an empty job id and answer "Invalid job id", leaving the pod
+// reported as terminal while its job was still running.
+func TestSqueueStatusArgsAreSelfContained(t *testing.T) {
+args := squeueStatusArgs("227105")
+
+for _, arg := range args {
+if arg != strings.TrimSpace(arg) {
+t.Errorf("argument %q has surrounding whitespace and only works if a shell re-splits it", arg)
+}
+}
+
+joined := strings.Join(args, " ")
+if !strings.Contains(joined, "-j 227105") {
+t.Errorf("expected the job id to follow -j, got %q", joined)
 }
 }
