@@ -1,8 +1,6 @@
 module github.com/intertwin-eu/interlink-slurm-plugin
 
-go 1.24.0
-
-toolchain go1.24.8
+go 1.26.0
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.0
@@ -10,7 +8,7 @@ require (
 	github.com/containerd/containerd v1.7.6
 	github.com/goccy/go-yaml v1.18.0
 	github.com/google/uuid v1.6.0
-	github.com/interlink-hq/interlink v0.0.0-20250722085031-9ed14a4e89d5
+	github.com/interlink-hq/interlink v0.0.0-20261001064057-0629171af15a
 	github.com/sirupsen/logrus v1.9.3
 	github.com/virtual-kubelet/virtual-kubelet v1.11.0
 	go.opentelemetry.io/otel v1.36.0

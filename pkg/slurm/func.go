@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/kubernetes"
@@ -16,6 +18,21 @@ import (
 
 var SlurmConfigInst SlurmConfig
 var Clientset *kubernetes.Clientset
+
+// ComputeNodeFileName is the file, inside a pod's own directory, where the generated
+// batch script records the compute node the job is running on.
+const ComputeNodeFileName = "compute-node"
+
+// readComputeNode returns the compute node recorded for the job in podDir, or an
+// empty string if the job has not started yet. A missing file is the normal state
+// for a queued job, not an error.
+func readComputeNode(podDir string) string {
+	raw, err := os.ReadFile(filepath.Join(podDir, ComputeNodeFileName))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
 
 // TODO: implement factory design
 
