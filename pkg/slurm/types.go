@@ -99,6 +99,17 @@ type SlurmConfig struct {
 	// Example script output:
 	//   {"status":"ok","resources":{"cpu":"128","memory":"512Gi","pods":"1000"}}
 	ResourceScriptPath string `yaml:"ResourceScriptPath"`
+	// SocketDirRoot is an optional absolute directory, on a filesystem the job and
+	// ssh sessions on its compute node both see, under which every job creates a
+	// private 0700 directory for the pod's unix sockets. The job exports it as
+	// INTERLINK_SOCKET_DIR and the status reports it to interLink, which forwards
+	// the shadow's tunnels there. Put it where the plugin also sees it (inside the
+	// filesystem shared for DataRootFolder) so that deleting the pod removes the
+	// directory even when the job was killed before its exit trap ran. Empty
+	// disables the feature. Not for deployments
+	// where jobs run under more than one UID (DefaultUID, flavor UID or
+	// runAsUser): a job whose account cannot write the root fails at start.
+	SocketDirRoot string `yaml:"SocketDirRoot"`
 }
 
 type CreateStruct struct {

@@ -14,6 +14,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 )
@@ -279,6 +280,78 @@ func TestStatusReadsComputeNodeFromJobWorkDir(t *testing.T) {
 			}
 			if resp[0].NodeName != node {
 				t.Errorf("NodeName = %q, want %q (recorded in %s)", resp[0].NodeName, node, workDir)
+			}
+		})
+	}
+}
+
+// The job creates the socket directory before it records the compute node, so the
+// status reports the directory exactly when it reports a node.
+func TestStatusReportsSocketDirWithNodeName(t *testing.T) {
+	const node = "node007.hpc.example.org"
+
+	savedTimer, savedStatus := timer, cachedStatus
+	t.Cleanup(func() { timer, cachedStatus = savedTimer, savedStatus })
+
+	squeue := filepath.Join(t.TempDir(), "squeue")
+	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 R'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		uid     string
+		root    string
+		started bool // the job has recorded its compute node
+		want    string
+	}{
+		{name: "running job", uid: socketTestUID, root: socketTestRoot, started: true, want: socketTestDir},
+		{name: "queued job", uid: socketTestUID, root: socketTestRoot},
+		{name: "no SocketDirRoot", uid: socketTestUID, started: true},
+		{name: "UID too short", uid: socketTestShortUID, root: socketTestRoot, started: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataRoot := t.TempDir() + "/"
+			if tt.started {
+				podDir := dataRoot + metav1.NamespaceDefault + "-" + tt.uid
+				if err := os.MkdirAll(podDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(podDir, ComputeNodeFileName), []byte(node+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: socketTestPod, Namespace: metav1.NamespaceDefault, UID: types.UID(tt.uid)},
+				Spec:       v1.PodSpec{Containers: []v1.Container{{Name: "main"}}},
+			}
+			body, err := json.Marshal([]*v1.Pod{pod})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			jids := map[string]*JidStruct{}
+			h := &SidecarHandler{
+				Config: SlurmConfig{Squeuepath: squeue, DataRootFolder: dataRoot, SocketDirRoot: tt.root},
+				JIDs:   &jids,
+				Ctx:    context.Background(),
+			}
+			timer = time.Time{}
+			rec := httptest.NewRecorder()
+			h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
+
+			var resp []commonIL.PodStatus
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp) != 1 {
+				t.Fatalf("decode status: %v (code %d, body %q)", err, rec.Code, rec.Body.String())
+			}
+			if tt.started && resp[0].NodeName != node {
+				t.Errorf("NodeName = %q, want %q", resp[0].NodeName, node)
+			}
+			if resp[0].SocketDir != tt.want {
+				t.Errorf("SocketDir = %q, want %q", resp[0].SocketDir, tt.want)
 			}
 		})
 	}

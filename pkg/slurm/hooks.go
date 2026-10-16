@@ -339,3 +339,35 @@ func injectTmpBindMount(runtimeCmd []string) []string {
 	result = append(result, runtimeCmd[len(runtimeCmd)-1])
 	return result
 }
+
+// Flags that bind a host path into the container, per runtime.
+const (
+	singularityBindFlag = "--bind"
+	enrootMountFlag     = "--mount"
+)
+
+// injectSocketDir binds the pod's socket directory dir into the container at the
+// same path and sets INTERLINK_SOCKET_DIR to it, inserting both before the last
+// element (the image or container name) of a runtime command. runtime selects
+// the flag: "--mount" for enroot, "--bind" otherwise.
+//
+// It does not go through prepareMounts, which drops every mount of a container
+// with an unsupported volume type, nor through the env file, which exists only
+// for containers with Env or EnvFrom and which enroot ignores.
+func injectSocketDir(runtimeCmd []string, runtime, dir string) []string {
+	if dir == "" || len(runtimeCmd) == 0 {
+		return runtimeCmd
+	}
+	mountFlag := singularityBindFlag
+	if runtime == "enroot" {
+		mountFlag = enrootMountFlag
+	}
+	result := make([]string, 0, len(runtimeCmd)+4)
+	result = append(result, runtimeCmd[:len(runtimeCmd)-1]...)
+	result = append(result,
+		mountFlag, shellescape.Quote(dir+":"+dir),
+		"--env", shellescape.Quote("INTERLINK_SOCKET_DIR="+dir),
+	)
+	result = append(result, runtimeCmd[len(runtimeCmd)-1])
+	return result
+}

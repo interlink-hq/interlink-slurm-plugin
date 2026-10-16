@@ -585,3 +585,56 @@ func TestGeneratePostStartScript_CreatesHookTmpWhenNoTmpMount(t *testing.T) {
 		t.Errorf("expected hook-tmp bind mount, got:\n%s", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// injectSocketDir
+// ---------------------------------------------------------------------------
+
+// Image and runtime names shared by the socket directory tests.
+const (
+	busyboxImage       = "docker://busybox"
+	singularityRuntime = "singularity"
+	enrootRuntime      = "enroot"
+)
+
+func TestInjectSocketDir(t *testing.T) {
+	const mounts = "--bind /host/data:/data"
+	tests := []struct {
+		runtime string
+		cmd     []string
+		want    []string
+	}{
+		{
+			runtime: singularityRuntime,
+			cmd:     []string{singularityRuntime, "exec", mounts, busyboxImage},
+			want: []string{singularityRuntime, "exec", mounts,
+				"--bind", socketTestDir + ":" + socketTestDir, "--env", "INTERLINK_SOCKET_DIR=" + socketTestDir,
+				busyboxImage},
+		},
+		{
+			runtime: enrootRuntime,
+			cmd:     []string{enrootRuntime, "start", "--rw", "", "mainpod-uid"},
+			want: []string{enrootRuntime, "start", "--rw", "",
+				"--mount", socketTestDir + ":" + socketTestDir, "--env", "INTERLINK_SOCKET_DIR=" + socketTestDir,
+				"mainpod-uid"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.runtime, func(t *testing.T) {
+			got := injectSocketDir(tt.cmd, tt.runtime, socketTestDir)
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("injectSocketDir() =\n  %q\nwant\n  %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInjectSocketDir_NoDirectory(t *testing.T) {
+	cmd := []string{singularityRuntime, "exec", busyboxImage}
+	if got := injectSocketDir(cmd, singularityRuntime, ""); len(got) != len(cmd) {
+		t.Errorf("injectSocketDir() without a directory changed the command: %q", got)
+	}
+	if got := injectSocketDir(nil, singularityRuntime, socketTestDir); len(got) != 0 {
+		t.Errorf("injectSocketDir() on an empty command = %q, want it empty", got)
+	}
+}

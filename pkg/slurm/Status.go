@@ -487,13 +487,17 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		// Report which compute node each job landed on. The generated batch script
 		// records it in the job working directory as soon as the job starts, so this
 		// stays empty for as long as the job is queued. interLink uses it to point
-		// per-pod shadow tunnels at the right host.
+		// per-pod shadow tunnels at the right host. The script creates the socket
+		// directory before it records the node, so a node means the directory exists.
 		for i := range resp {
 			dir, ok := podDirs[resp[i].PodUID]
 			if !ok {
 				dir = h.Config.DataRootFolder + resp[i].PodNamespace + "-" + resp[i].PodUID
 			}
 			resp[i].NodeName = readComputeNode(dir)
+			if resp[i].NodeName != "" {
+				resp[i].SocketDir = socketDirFor(h.Config.SocketDirRoot, resp[i].PodUID)
+			}
 		}
 
 		cachedStatus = resp

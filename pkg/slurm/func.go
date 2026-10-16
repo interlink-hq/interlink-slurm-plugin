@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"go.opentelemetry.io/otel/trace"
@@ -32,6 +33,56 @@ func readComputeNode(podDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+// socketDirNameLen is how many hex digits of the pod UID name its socket
+// directory. They are random in a v4 UID, and short enough to leave room for
+// socket names within the 107 usable bytes of a unix socket path.
+const socketDirNameLen = 12
+
+// maxSocketDirRootLen is the longest SocketDirRoot that still fits the longest
+// socket path, <root>/<12 hex digits>/fwd-65535.sock, in 107 bytes.
+const maxSocketDirRootLen = 79
+
+// socketDirRootPattern keeps SocketDirRoot to characters that need no quoting in
+// shell and ssh arguments, and refuses elements that start with a dot.
+var socketDirRootPattern = regexp.MustCompile(`^(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$`)
+
+// socketDirFor returns the pod's socket directory under root, named after the
+// first hex digits of its UID. The path is computed, never read back from the
+// job, so it can be exported before submission and removed on delete. It is
+// empty when root is empty or the UID is too short to name a directory.
+func socketDirFor(root, uid string) string {
+	if root == "" {
+		return ""
+	}
+	digits := strings.ReplaceAll(uid, "-", "")
+	if len(digits) < socketDirNameLen {
+		return ""
+	}
+	name := digits[:socketDirNameLen]
+	if strings.Trim(name, "0123456789abcdefABCDEF") != "" {
+		return ""
+	}
+	return filepath.Join(root, name)
+}
+
+// validateSocketDirRoot returns root cleaned, or an error when it is not an
+// absolute path of plain characters short enough for unix socket paths.
+func validateSocketDirRoot(root string) (string, error) {
+	for _, elem := range strings.Split(root, string(filepath.Separator)) {
+		if elem == ".." {
+			return "", fmt.Errorf("SocketDirRoot %q must not contain \"..\"", root)
+		}
+	}
+	clean := filepath.Clean(root)
+	if !socketDirRootPattern.MatchString(clean) {
+		return "", fmt.Errorf("SocketDirRoot %q must be an absolute path of letters, digits, '.', '_' and '-', with no element starting with '.'", root)
+	}
+	if len(clean) > maxSocketDirRootLen {
+		return "", fmt.Errorf(`SocketDirRoot must be at most 79 bytes: 79 + "/" + 12 + "/fwd-65535.sock" = 107, the longest unix socket path (%q is %d)`, clean, len(clean))
+	}
+	return clean, nil
 }
 
 // TODO: implement factory design
@@ -184,6 +235,15 @@ func NewSlurmConfig() (SlurmConfig, error) {
 				return SlurmConfig{}, err
 			}
 			log.G(context.Background()).Infof("Default UID set to: %d (jobs will run as this user unless overridden by pod securityContext)", *SlurmConfigInst.DefaultUID)
+		}
+
+		if SlurmConfigInst.SocketDirRoot != "" {
+			SlurmConfigInst.SocketDirRoot, err = validateSocketDirRoot(SlurmConfigInst.SocketDirRoot)
+			if err != nil {
+				log.G(context.Background()).Error(err)
+				return SlurmConfig{}, err
+			}
+			log.G(context.Background()).Infof("Per-pod socket directories under: %s", SlurmConfigInst.SocketDirRoot)
 		}
 	}
 	return SlurmConfigInst, nil

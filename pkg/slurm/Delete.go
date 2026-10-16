@@ -77,6 +77,15 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The job's EXIT trap removes the socket directory, unless the job is killed
+	// first. Best-effort: the root may not be visible from here. The path is
+	// recomputed, never read from a file the job could have written.
+	if socketDir := socketDirFor(h.Config.SocketDirRoot, string(pod.UID)); socketDir != "" {
+		if rmErr := os.RemoveAll(socketDir); rmErr != nil {
+			log.G(h.Ctx).Warning("Unable to remove socket directory ", socketDir, ": ", rmErr)
+		}
+	}
+
 	if os.Getenv("SHARED_FS") != "true" && !noCleanWorkDir {
 		// deleteContainer already removed containerDeletePath (= workDir).
 		// When a separate metadata directory exists, remove it now.

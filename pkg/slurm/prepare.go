@@ -1369,6 +1369,18 @@ func produceSLURMScript(
 		prefix += "\n" + config.Commandprefix
 	}
 
+	// The pod's private directory for unix sockets, which the shadow tunnel connects
+	// to. The job creates it on the node as its own user; mkdir without -p refuses a
+	// directory somebody else created, and the job fails rather than adopt it. This
+	// runs before the compute node is recorded, so a reported node means the
+	// directory exists. The trap is set here and not in job.sh, which has its own.
+	if socketDir := socketDirFor(config.SocketDirRoot, podUID); socketDir != "" {
+		prefix += "\nINTERLINK_SOCKET_DIR=" + shellescape.Quote(socketDir) + "; export INTERLINK_SOCKET_DIR"
+		prefix += "\n(umask 077 && mkdir -p " + shellescape.Quote(config.SocketDirRoot) + `); rm -rf "$INTERLINK_SOCKET_DIR" 2>/dev/null`
+		prefix += "\n" + `(umask 077 && mkdir "$INTERLINK_SOCKET_DIR" && chmod 0700 "$INTERLINK_SOCKET_DIR") || { echo "interLink: cannot create a private $INTERLINK_SOCKET_DIR: SocketDirRoot must be on a filesystem shared with ssh sessions on the node and writable by this account only" >&2; exit 1; }`
+		prefix += "\n" + `trap 'rm -rf "$INTERLINK_SOCKET_DIR"' EXIT`
+	}
+
 	// Record the compute node the job landed on, for StatusHandler to report back to
 	// interLink. The generator knows the pod's directory, so nothing has to derive it
 	// at runtime. Best-effort: a failed write must never take the workload down.
