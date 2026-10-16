@@ -146,6 +146,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		podDirs := make(map[string]string, len(req))
 		for _, pod := range req {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
@@ -157,6 +158,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			if jid, ok := (*h.JIDs)[uid]; ok && jid.WorkDir != "" {
 				path = jid.WorkDir
 			}
+			podDirs[uid] = path
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
@@ -483,11 +485,15 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Report which compute node each job landed on. The generated batch script
-		// records it in the pod's own directory as soon as the job starts, so this
+		// records it in the job working directory as soon as the job starts, so this
 		// stays empty for as long as the job is queued. interLink uses it to point
 		// per-pod shadow tunnels at the right host.
 		for i := range resp {
-			resp[i].NodeName = readComputeNode(h.Config.DataRootFolder + resp[i].PodNamespace + "-" + resp[i].PodUID)
+			dir, ok := podDirs[resp[i].PodUID]
+			if !ok {
+				dir = h.Config.DataRootFolder + resp[i].PodNamespace + "-" + resp[i].PodUID
+			}
+			resp[i].NodeName = readComputeNode(dir)
 		}
 
 		cachedStatus = resp
