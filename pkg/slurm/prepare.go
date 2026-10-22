@@ -1370,10 +1370,14 @@ func produceSLURMScript(
 	}
 
 	// The pod's private directory for unix sockets, which the shadow tunnel connects
-	// to. The job creates it on the node as its own user; mkdir without -p refuses a
-	// directory somebody else created, and the job fails rather than adopt it. This
-	// runs before the compute node is recorded, so a reported node means the
-	// directory exists. The trap is set here and not in job.sh, which has its own.
+	// to. The job creates it on the node as its own user. rm -rf clears what an
+	// earlier run of the same pod left behind (a requeue, or a job killed before its
+	// trap ran); it cannot empty a directory another account created, so mkdir
+	// without -p then fails and the job fails rather than adopt it. Two jobs of the
+	// same pod at once would share this directory, as they already share the job
+	// directory. This runs before the compute node is recorded, so a reported node
+	// means the directory exists. The trap is set here and not in job.sh, which has
+	// its own.
 	if socketDir := socketDirFor(config.SocketDirRoot, podUID); socketDir != "" {
 		prefix += "\nINTERLINK_SOCKET_DIR=" + shellescape.Quote(socketDir) + "; export INTERLINK_SOCKET_DIR"
 		prefix += "\n(umask 077 && mkdir -p " + shellescape.Quote(config.SocketDirRoot) + `); rm -rf "$INTERLINK_SOCKET_DIR" 2>/dev/null`

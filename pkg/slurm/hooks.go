@@ -117,7 +117,7 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 				for _, opt := range config.SingularityDefaultOptions {
 					parts = append(parts, shellescape.Quote(opt))
 				}
-				parts = append(parts, shellescape.Quote(e.imageName), "timeout", "30")
+				parts = append(parts, socketDirExecArgs, shellescape.Quote(e.imageName), "timeout", "30")
 				parts = append(parts, quotedArgs...)
 				sb.WriteString(fmt.Sprintf("  %s >> %s 2>&1 || true\n",
 					strings.Join(parts, " "), outFile))
@@ -278,7 +278,7 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 			for _, opt := range config.SingularityDefaultOptions {
 				parts = append(parts, shellescape.Quote(opt))
 			}
-			parts = append(parts, "--bind", tmpBindArg)
+			parts = append(parts, "--bind", tmpBindArg, socketDirExecArgs)
 			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
 			parts = append(parts, quotedArgs...)
 			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
@@ -345,6 +345,12 @@ const (
 	singularityBindFlag = "--bind"
 	enrootMountFlag     = "--mount"
 )
+
+// socketDirExecArgs gives the singularity exec of a probe or lifecycle hook the
+// same socket directory as the container it checks, when the job has one, so that
+// a check can connect to the workload's unix socket. job.slurm exports
+// INTERLINK_SOCKET_DIR before it runs job.sh, where probes and hooks run.
+const socketDirExecArgs = `${INTERLINK_SOCKET_DIR:+--bind "$INTERLINK_SOCKET_DIR:$INTERLINK_SOCKET_DIR" --env "INTERLINK_SOCKET_DIR=$INTERLINK_SOCKET_DIR"}`
 
 // injectSocketDir binds the pod's socket directory dir into the container at the
 // same path and sets INTERLINK_SOCKET_DIR to it, inserting both before the last
