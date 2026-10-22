@@ -19,8 +19,8 @@ import (
 var SlurmConfigInst SlurmConfig
 var Clientset *kubernetes.Clientset
 
-// ComputeNodeFileName is the file, inside a pod's own directory, where the generated
-// batch script records the compute node the job is running on.
+// ComputeNodeFileName is the file, inside a pod's job working directory, where
+// the generated batch script records the compute node the job is running on.
 const ComputeNodeFileName = "compute-node"
 
 // readComputeNode returns the compute node recorded for the job in podDir, or an

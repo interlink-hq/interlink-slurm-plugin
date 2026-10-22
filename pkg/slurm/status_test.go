@@ -1,9 +1,21 @@
 package slurm
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 )
 
 // TestSlurmStateRegex validates that all expected SLURM state codes, including the
@@ -174,5 +186,100 @@ func TestTerminatedContainerStatusNoReason(t *testing.T) {
 	}
 	if term.ExitCode != 0 {
 		t.Errorf("ExitCode = %d, want 0", term.ExitCode)
+	}
+}
+
+// TestStatusReadsComputeNodeFromJobWorkDir covers pods that run in the directory
+// named by the slurm-job.vk.io/job-workdir annotation. job.slurm records the
+// compute node in the job working directory, so the status has to read it from
+// there and not from DataRootFolder, or NodeName is never reported for them.
+func TestStatusReadsComputeNodeFromJobWorkDir(t *testing.T) {
+	const (
+		namespace = "default"
+		podUID    = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		node      = "node042.hpc.example.org"
+	)
+
+	savedTimer, savedStatus := timer, cachedStatus
+	t.Cleanup(func() { timer, cachedStatus = savedTimer, savedStatus })
+
+	squeue := filepath.Join(t.TempDir(), "squeue")
+	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 R'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		annotate bool // the pod carries slurm-job.vk.io/job-workdir
+		cached   bool // the JIDs cache holds the job and its WorkDir
+	}{
+		{name: "default directory"},
+		{name: "job-workdir annotation", annotate: true},
+		{name: "job-workdir annotation and a running job", annotate: true, cached: true},
+		{name: "work directory known only to the JIDs cache", cached: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataRoot := t.TempDir() + "/"
+			base := t.TempDir()
+
+			workDir := dataRoot + namespace + "-" + podUID
+			var annotations map[string]string
+			jids := map[string]*JidStruct{}
+			if tt.annotate || tt.cached {
+				workDir = filepath.Join(base, namespace+"-"+podUID)
+			}
+			if tt.annotate {
+				annotations = map[string]string{"slurm-job.vk.io/job-workdir": base}
+			}
+			if tt.cached {
+				jids[podUID] = &JidStruct{JID: "1", PodUID: podUID, PodNamespace: namespace, WorkDir: workDir}
+			}
+
+			if err := os.MkdirAll(workDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workDir, ComputeNodeFileName), []byte(node+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "cn-pod",
+					Namespace:   namespace,
+					UID:         podUID,
+					Annotations: annotations,
+				},
+				Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main"}}},
+			}
+			body, err := json.Marshal([]*v1.Pod{pod})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			h := &SidecarHandler{
+				Config: SlurmConfig{Squeuepath: squeue, DataRootFolder: dataRoot},
+				JIDs:   &jids,
+				Ctx:    context.Background(),
+			}
+			timer = time.Time{}
+			rec := httptest.NewRecorder()
+			h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("StatusHandler() code = %d, body %q", rec.Code, rec.Body.String())
+			}
+			var resp []commonIL.PodStatus
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode status: %v (body %q)", err, rec.Body.String())
+			}
+			if len(resp) != 1 {
+				t.Fatalf("got %d pod statuses, want 1", len(resp))
+			}
+			if resp[0].NodeName != node {
+				t.Errorf("NodeName = %q, want %q (recorded in %s)", resp[0].NodeName, node, workDir)
+			}
+		})
 	}
 }
