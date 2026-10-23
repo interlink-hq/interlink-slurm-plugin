@@ -130,7 +130,8 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if timeNow.Sub(timer) >= time.Second*10 {
+	cached, stale := cachedStatuses(req, timeNow)
+	if len(stale) > 0 {
 		cmd := []string{"--me"}
 		shell := exec.ExecTask{
 			Command: h.Config.Squeuepath,
@@ -146,8 +147,8 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		podDirs := make(map[string]string, len(req))
-		for _, pod := range req {
+		podDirs := make(map[string]string, len(stale))
+		for _, pod := range stale {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
 			// Resolve the job working directory: prefer in-memory cache, then
@@ -500,12 +501,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		cachedStatus = resp
-		timer = time.Now()
-	} else {
-		log.G(h.Ctx).Debug(sessionContextMessage, "Cached status")
-		resp = cachedStatus
+		storeStatuses(resp, time.Now())
 	}
+	resp = inRequestOrder(req, cached, resp)
 
 	log.G(h.Ctx).Debug(resp)
 
