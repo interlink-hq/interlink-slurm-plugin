@@ -156,9 +156,9 @@ executeExecProbe() {
 	for _, opt := range config.SingularityDefaultOptions {
 		scriptBuilder.WriteString(fmt.Sprintf(` "%s"`, opt))
 	}
-	scriptBuilder.WriteString(fmt.Sprintf(` "%s" timeout "${timeout}" "${command[@]}"
+	scriptBuilder.WriteString(fmt.Sprintf(` %s "%s" timeout "${timeout}" "${command[@]}"
     return $?
-}`, imageName))
+}`, socketDirExecArgs, imageName))
 
 	scriptBuilder.WriteString(`
 runProbe() {

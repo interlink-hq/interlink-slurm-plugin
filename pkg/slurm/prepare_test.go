@@ -13,6 +13,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestStringToHex(t *testing.T) {
@@ -812,34 +813,55 @@ func TestDeleteContainerWithoutJID(t *testing.T) {
 // mesh.sh unshares a network namespace, sets the mesh up inside it and then execs
 // its "$@". If job.sh is emitted on the following line instead of as that argument,
 // mesh.sh exits first and the workload runs outside the namespace: the job succeeds
-// but has no mesh connectivity, which is silent and hard to diagnose.
+// but has no mesh connectivity, which is silent and hard to diagnose. The socket
+// directory lines go before the pre-exec, so they cannot come between the two.
 func TestProduceSLURMScriptRunsWorkloadInsideMeshNetns(t *testing.T) {
-	ctx := context.Background()
-	workingDir := t.TempDir()
-
-	pod := v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mesh-pod",
-			Namespace: "default",
-			UID:       "11111111-2222-3333-4444-555555555555",
-			Annotations: map[string]string{
-				"slurm-job.vk.io/pre-exec": "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\nexec \"$@\"\nEOFMESH\n",
-			},
-		},
+	tests := []struct {
+		name string
+		root string
+	}{
+		{name: "without a socket directory"},
+		{name: "with a socket directory", root: socketTestRoot},
 	}
 
-	if _, err := produceSLURMScript(ctx, SlurmConfig{BashPath: "/bin/bash"}, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
-		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			workingDir := t.TempDir()
 
-	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
-	if err != nil {
-		t.Fatalf("read job.slurm: %v", err)
-	}
+			pod := v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mesh-pod",
+					Namespace: "default",
+					UID:       "11111111-2222-3333-4444-555555555555",
+					Annotations: map[string]string{
+						"slurm-job.vk.io/pre-exec": "cat <<'EOFMESH' > $TMPDIR/mesh.sh\n#!/bin/bash\nexec \"$@\"\nEOFMESH\n",
+					},
+				},
+			}
 
-	want := filepath.Join(workingDir, "mesh.sh") + " " + filepath.Join(workingDir, "job.sh")
-	if !strings.Contains(string(raw), want) {
-		t.Errorf("job.sh must be passed to mesh.sh as its argument (%q)\n---\n%s", want, string(raw))
+			config := SlurmConfig{BashPath: "/bin/bash", SocketDirRoot: tt.root}
+			if _, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+				t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+			}
+
+			raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+			if err != nil {
+				t.Fatalf("read job.slurm: %v", err)
+			}
+			content := string(raw)
+
+			want := filepath.Join(workingDir, "mesh.sh") + " " + filepath.Join(workingDir, "job.sh")
+			if !strings.Contains(content, want) {
+				t.Errorf("job.sh must be passed to mesh.sh as its argument (%q)\n---\n%s", want, content)
+			}
+			if tt.root == "" {
+				return
+			}
+			if trap := strings.Index(content, "trap "); trap < 0 || trap > strings.Index(content, want) {
+				t.Errorf("the socket lines must precede mesh.sh\n---\n%s", content)
+			}
+		})
 	}
 }
 
@@ -1126,4 +1148,104 @@ func TestReadComputeNode(t *testing.T) {
 			t.Errorf("readComputeNode() = %q, want empty", got)
 		}
 	})
+}
+
+// A pod UID and a SocketDirRoot for the socket directory tests, and the directory
+// they give; a pod name, and a UID too short to name a directory.
+const (
+	socketTestUID      = "1b2c3d4e-5f60-4711-8899-aabbccddeeff"
+	socketTestRoot     = "/shared/il"
+	socketTestDir      = socketTestRoot + "/1b2c3d4e5f60"
+	socketTestPod      = "socket-pod"
+	socketTestShortUID = "uid-1"
+)
+
+// The job creates the pod's socket directory itself, before it records the compute
+// node, so the status can report the directory as soon as it reports a node. Pre-exec
+// code such as a reverse tunnel can already use it.
+func TestProduceSLURMScriptCreatesSocketDir(t *testing.T) {
+	const preExec = "echo pre-exec-marker"
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        socketTestPod,
+			Namespace:   metav1.NamespaceDefault,
+			UID:         socketTestUID,
+			Annotations: map[string]string{"slurm-job.vk.io/pre-exec": preExec},
+		},
+	}
+
+	config := SlurmConfig{BashPath: "/bin/bash", SocketDirRoot: socketTestRoot}
+	if _, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
+	}
+	content := string(raw)
+
+	// In script order; each must come before the next.
+	lines := []string{
+		"INTERLINK_SOCKET_DIR=" + socketTestDir + "; export INTERLINK_SOCKET_DIR",
+		"(umask 077 && mkdir -p " + socketTestRoot + `); rm -rf "$INTERLINK_SOCKET_DIR" 2>/dev/null`,
+		`(umask 077 && mkdir "$INTERLINK_SOCKET_DIR" && chmod 0700 "$INTERLINK_SOCKET_DIR") || {`,
+		`trap 'rm -rf "$INTERLINK_SOCKET_DIR"' EXIT`,
+		"hostname -f > " + filepath.Join(workingDir, ComputeNodeFileName),
+		preExec,
+		filepath.Join(workingDir, "job.sh"),
+	}
+	last := -1
+	for _, line := range lines {
+		at := strings.Index(content, line)
+		if at < 0 {
+			t.Fatalf("job.slurm lacks %q\n---\n%s", line, content)
+		}
+		if at < last {
+			t.Errorf("%q is out of order\n---\n%s", line, content)
+		}
+		last = at
+	}
+
+	// mkdir -p would adopt a directory somebody else created first.
+	if strings.Contains(content, `mkdir -p "$INTERLINK_SOCKET_DIR"`) {
+		t.Errorf("the socket directory must be created without -p\n---\n%s", content)
+	}
+	if !strings.Contains(content, "exit 1; }") {
+		t.Errorf("the job must stop when it cannot create the socket directory\n---\n%s", content)
+	}
+}
+
+// Without SocketDirRoot, or for a UID too short to name a directory, job.slurm has
+// no socket lines at all.
+func TestProduceSLURMScriptWithoutSocketDir(t *testing.T) {
+	tests := []struct {
+		name string
+		root string
+		uid  string
+	}{
+		{name: "root unset", uid: socketTestUID},
+		{name: "short UID", root: socketTestRoot, uid: socketTestShortUID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workingDir := t.TempDir()
+			pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: socketTestPod, Namespace: metav1.NamespaceDefault, UID: types.UID(tt.uid)}}
+
+			config := SlurmConfig{BashPath: "/bin/bash", SocketDirRoot: tt.root}
+			if _, err := produceSLURMScript(context.Background(), config, pod, workingDir, pod.ObjectMeta, nil, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+				t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+			}
+			raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+			if err != nil {
+				t.Fatalf("read job.slurm: %v", err)
+			}
+			if strings.Contains(string(raw), "INTERLINK_SOCKET_DIR") {
+				t.Errorf("job.slurm must not set up a socket directory\n---\n%s", raw)
+			}
+		})
+	}
 }

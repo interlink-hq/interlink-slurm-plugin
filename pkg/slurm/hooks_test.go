@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -194,6 +195,9 @@ func TestGeneratePreStopTrap_ExecHook_WithRuntime(t *testing.T) {
 	if !strings.Contains(got, "exec") {
 		t.Error("expected 'exec' subcommand in singularity invocation")
 	}
+	if !strings.Contains(got, socketDirExecArgs) {
+		t.Error("expected the socket directory bind in the exec hook invocation")
+	}
 	// Exec hook must include a timeout
 	if !strings.Contains(got, "timeout") {
 		t.Error("expected 'timeout' in exec hook invocation")
@@ -363,6 +367,9 @@ func TestGeneratePostStartScript_ExecHook_WithRuntime(t *testing.T) {
 	}
 	if !strings.Contains(got, "timeout") {
 		t.Error("expected 'timeout' in exec hook invocation")
+	}
+	if !strings.Contains(got, socketDirExecArgs) {
+		t.Error("expected the socket directory bind in the postStart exec hook")
 	}
 	if !strings.Contains(got, "/bin/sh") {
 		t.Error("expected exec command '/bin/sh' in output")
@@ -583,5 +590,77 @@ func TestGeneratePostStartScript_CreatesHookTmpWhenNoTmpMount(t *testing.T) {
 	}
 	if !strings.Contains(got, "hook-tmp") {
 		t.Errorf("expected hook-tmp bind mount, got:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// injectSocketDir
+// ---------------------------------------------------------------------------
+
+// Image and runtime names shared by the socket directory tests.
+const (
+	busyboxImage       = "docker://busybox"
+	singularityRuntime = "singularity"
+	enrootRuntime      = "enroot"
+)
+
+func TestInjectSocketDir(t *testing.T) {
+	const mounts = "--bind /host/data:/data"
+	tests := []struct {
+		runtime string
+		cmd     []string
+		want    []string
+	}{
+		{
+			runtime: singularityRuntime,
+			cmd:     []string{singularityRuntime, "exec", mounts, busyboxImage},
+			want: []string{singularityRuntime, "exec", mounts,
+				"--bind", socketTestDir + ":" + socketTestDir, "--env", "INTERLINK_SOCKET_DIR=" + socketTestDir,
+				busyboxImage},
+		},
+		{
+			runtime: enrootRuntime,
+			cmd:     []string{enrootRuntime, "start", "--rw", "", "mainpod-uid"},
+			want: []string{enrootRuntime, "start", "--rw", "",
+				"--mount", socketTestDir + ":" + socketTestDir, "--env", "INTERLINK_SOCKET_DIR=" + socketTestDir,
+				"mainpod-uid"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.runtime, func(t *testing.T) {
+			got := injectSocketDir(tt.cmd, tt.runtime, socketTestDir)
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("injectSocketDir() =\n  %q\nwant\n  %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInjectSocketDir_NoDirectory(t *testing.T) {
+	cmd := []string{singularityRuntime, "exec", busyboxImage}
+	if got := injectSocketDir(cmd, singularityRuntime, ""); len(got) != len(cmd) {
+		t.Errorf("injectSocketDir() without a directory changed the command: %q", got)
+	}
+	if got := injectSocketDir(nil, singularityRuntime, socketTestDir); len(got) != 0 {
+		t.Errorf("injectSocketDir() on an empty command = %q, want it empty", got)
+	}
+}
+
+func TestSocketDirExecArgsExpandOnlyWithADirectory(t *testing.T) {
+	run := func(env ...string) string {
+		cmd := exec.Command("bash", "-c", `set -- `+socketDirExecArgs+`; for a; do printf '%s\n' "$a"; done`)
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("bash: %v", err)
+		}
+		return string(out)
+	}
+	if got := run(); got != "" {
+		t.Errorf("without INTERLINK_SOCKET_DIR: got %q, want no arguments", got)
+	}
+	want := "--bind\n/s/1b2c:/s/1b2c\n--env\nINTERLINK_SOCKET_DIR=/s/1b2c\n"
+	if got := run("INTERLINK_SOCKET_DIR=/s/1b2c"); got != want {
+		t.Errorf("with INTERLINK_SOCKET_DIR: got %q, want %q", got, want)
 	}
 }

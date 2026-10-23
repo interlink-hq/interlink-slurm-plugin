@@ -1,6 +1,6 @@
 module github.com/intertwin-eu/interlink-slurm-plugin
 
-go 1.26.0
+go 1.27.0
 
 require (
 	al.essio.dev/pkg/shellescape v1.5.0
@@ -68,3 +68,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.6.0 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
+
+replace github.com/interlink-hq/interlink => github.com/matbun/interLink v0.0.0-20261016183354-032bf3d58946

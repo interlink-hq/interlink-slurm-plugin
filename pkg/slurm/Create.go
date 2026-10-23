@@ -57,6 +57,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	metadata := data.Pod.ObjectMeta
 	filesPath := h.Config.DataRootFolder + data.Pod.Namespace + "-" + string(data.Pod.UID)
 	workDir := getJobWorkDir(h.Config, metadata.Annotations, data.Pod.Namespace, string(data.Pod.UID))
+	socketDir := socketDirFor(h.Config.SocketDirRoot, string(data.Pod.UID))
 
 	if err = os.MkdirAll(filesPath, 0o755); err != nil {
 		statusCode = http.StatusInternalServerError
@@ -158,6 +159,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			runtime_command = append(runtime_command, mounts)
 			runtime_command = append(runtime_command, containerName)
 		}
+		runtime_command = injectSocketDir(runtime_command, h.Config.ContainerRuntime, socketDir)
 
 		isInit := false
 

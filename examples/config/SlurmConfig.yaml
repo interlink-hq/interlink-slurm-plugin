@@ -18,6 +18,14 @@ VerboseLogging: true
 ErrorsOnlyLogging: false
 EnableProbes: true
 
+# Per-pod socket directories for interLink's shadow tunnel: each job creates
+# <SocketDirRoot>/<12 hex digits of the pod UID>, mode 0700, and exports it as
+# INTERLINK_SOCKET_DIR. Use a shared filesystem that ssh sessions on the compute
+# node also see (not a node-local /tmp), at most 79 bytes, writable by this
+# account only. Leave it unset when jobs run under more than one UID
+# (DefaultUID, flavor UID or runAsUser): a job that cannot write the root fails.
+# SocketDirRoot: "/shared/interlink/sockets"
+
 # UID (User ID) configuration - set the user ID for SLURM jobs
 # RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
 # DefaultUID: 1000                # Optional: Set a default UID for all jobs
