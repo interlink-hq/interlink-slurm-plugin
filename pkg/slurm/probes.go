@@ -210,20 +210,12 @@ runProbe() {
             consecutive_failures=0
             
             if [ $consecutive_successes -ge $success_threshold ]; then
-		            if [ $probe_name = "readiness" ]; then
-                     printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} for ${success_threshold} times. Container is healthy."
-		            elif [ $probe_name = "liveness" ]; then
-		                 # Print message only if probe was previously not ready
-								     if [ "$probe_ready" = false ]; then
-										       printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} for ${success_threshold} times. Container is alive."
-		                 fi
-		            fi
+                # Print message only on the transition to passing
+                if [ "$probe_ready" = false ]; then
+                    printf "%s\n" "$(date -Is --utc) ${probe_name} probe succeeded for ${container_name} for ${success_threshold} times."
+                fi
                 echo "SUCCESS" > "$probe_status_file"
                 probe_ready=true
-		            if [ "$probe_name" = "readiness" ]; then
-									# For readiness probes, once successful, we can exit the loop
-									return 0
-								fi
             fi
         else
             consecutive_failures=$((consecutive_failures + 1))
@@ -234,13 +226,11 @@ runProbe() {
             echo "FAILURE" > "$probe_status_file"
             probe_ready=false
             
+            # As in Kubernetes, a readiness failure only marks the container not ready:
+            # the probe keeps running and the container is left alone.
             if [ $consecutive_failures -ge $failure_threshold ]; then
                 printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts" >&2
                 echo "FAILED_THRESHOLD" > "$probe_status_file"
-		            if [ "$probe_name" = "readiness" ]; then
-										# For readiness probes, on failure threshold, exit with error
-										exit 1
-		            fi
             fi
         fi
         
@@ -397,10 +387,9 @@ echo "No startup probes defined, starting readiness/liveness probes directly."
 `)
 	}
 
-	// Wait for readiness probes to complete if startup probes are defined
-	// else start liveness probes directly if any
+	// Readiness and liveness probes start together once the startup probes pass, as
+	// in Kubernetes: readiness does not gate liveness.
 	if len(readinessProbes) > 0 {
-
 		// Generate readiness probe calls
 		for i, probe := range readinessProbes {
 			probeArgs := buildProbeArgs(probe)
@@ -413,17 +402,6 @@ echo "No startup probes defined, starting readiness/liveness probes directly."
 				probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold, i, probeArgs, containerVarName, i))
 		}
 
-		scriptBuilder.WriteString(fmt.Sprintf(`
-      # Wait for readiness probes to complete
-		  waitForProbes "readiness" "%s" %d
-		  if [ $? -eq 0 ]; then
-`, containerName, len(readinessProbes)))
-	} else {
-		// If no readiness probes start liveness directly
-		scriptBuilder.WriteString(`
-			echo "No readiness probes defined, starting liveness probes directly."
-			if true; then
-`)
 	}
 
 	// If len of livenessProbes > 0, generate liveness probes inside the conditional block
@@ -447,11 +425,6 @@ echo "No startup probes defined, starting readiness/liveness probes directly."
 	}
 
 	scriptBuilder.WriteString(`
-		  else
-				printf "%s\n" "$(date -Is --utc) Readiness probes failed - not starting liveness probes" >&2
-        shutDownContainersOnProbeFail
-				exit 1
-			fi
 		else
 			    printf "%s\n" "$(date -Is --utc) Startup probes failed - not starting readiness probes" >&2
 			    shutDownContainersOnProbeFail
