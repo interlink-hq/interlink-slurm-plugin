@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,8 +364,9 @@ func TestStatusCacheIsPerPod(t *testing.T) {
 	t.Cleanup(resetStatusCache)
 	resetStatusCache()
 
+	calls := filepath.Join(t.TempDir(), "calls")
 	squeue := filepath.Join(t.TempDir(), "squeue")
-	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 PD'\n"), 0o700); err != nil { //nolint:gosec // the fake squeue must be executable
+	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho \"$*\" >> "+calls+"\necho '0:0 PD'\n"), 0o700); err != nil { //nolint:gosec // the fake squeue must be executable
 		t.Fatal(err)
 	}
 	jids := map[string]*JidStruct{
@@ -405,5 +407,17 @@ func TestStatusCacheIsPerPod(t *testing.T) {
 	// Asked again within the lifetime, uid-a is answered from the cache.
 	if got := ask(podA); len(got) != 1 || got[0].PodUID != podA {
 		t.Fatalf("cached request: got %+v, want the status of uid-a", got)
+	}
+
+	// The account-wide check ran once for both pods; each pod got its own job query.
+	ran, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(ran), "--me"); n != 1 {
+		t.Errorf("squeue --me ran %d times for two pods, want 1:\n%s", n, ran)
+	}
+	if n := strings.Count(string(ran), "\n"); n != 3 {
+		t.Errorf("squeue ran %d times, want 3 (one check, one query per pod):\n%s", n, ran)
 	}
 }

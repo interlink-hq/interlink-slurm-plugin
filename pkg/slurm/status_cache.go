@@ -24,6 +24,25 @@ var (
 	statusCache   = map[string]cachedPodStatus{}
 )
 
+// squeue --me only checks that Slurm answers before the per-job queries, so it runs
+// at most once per statusCacheTTL, however many pods are polled one by one.
+var (
+	accountCheckMu   sync.Mutex
+	lastAccountCheck time.Time
+)
+
+func accountCheckDue(now time.Time) bool {
+	accountCheckMu.Lock()
+	defer accountCheckMu.Unlock()
+	return now.Sub(lastAccountCheck) >= statusCacheTTL
+}
+
+func accountCheckPassed(now time.Time) {
+	accountCheckMu.Lock()
+	defer accountCheckMu.Unlock()
+	lastAccountCheck = now
+}
+
 // cachedStatuses splits the requested pods into those with a status younger than
 // statusCacheTTL, returned by UID, and those squeue must be asked about.
 func cachedStatuses(req []*v1.Pod, now time.Time) (map[string]commonIL.PodStatus, []*v1.Pod) {
@@ -82,4 +101,8 @@ func resetStatusCache() {
 	statusCacheMu.Lock()
 	defer statusCacheMu.Unlock()
 	statusCache = map[string]cachedPodStatus{}
+
+	accountCheckMu.Lock()
+	defer accountCheckMu.Unlock()
+	lastAccountCheck = time.Time{}
 }

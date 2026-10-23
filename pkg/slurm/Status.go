@@ -132,19 +132,22 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	cached, stale := cachedStatuses(req, timeNow)
 	if len(stale) > 0 {
-		cmd := []string{"--me"}
-		shell := exec.ExecTask{
-			Command: h.Config.Squeuepath,
-			Args:    cmd,
-			Shell:   true,
-		}
-		execReturn, _ := shell.Execute()
-		execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
+		if accountCheckDue(timeNow) {
+			cmd := []string{"--me"}
+			shell := exec.ExecTask{
+				Command: h.Config.Squeuepath,
+				Args:    cmd,
+				Shell:   true,
+			}
+			execReturn, _ := shell.Execute()
+			execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
 
-		if execReturn.Stderr != "" {
-			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
-			return
+			if execReturn.Stderr != "" {
+				statusCode = http.StatusInternalServerError
+				h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
+				return
+			}
+			accountCheckPassed(timeNow)
 		}
 
 		podDirs := make(map[string]string, len(stale))
