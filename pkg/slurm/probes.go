@@ -222,15 +222,19 @@ runProbe() {
             consecutive_successes=0
             printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} (${consecutive_failures}/${failure_threshold})"
             
-            # Always write failure status immediately
-            echo "FAILURE" > "$probe_status_file"
-            probe_ready=false
+            # As in Kubernetes, a ready container stays ready until failure_threshold
+            # consecutive failures
+            if [ "$probe_name" != "readiness" ] || [ "$probe_ready" = false ]; then
+                echo "FAILURE" > "$probe_status_file"
+                probe_ready=false
+            fi
             
             # As in Kubernetes, a readiness failure only marks the container not ready:
             # the probe keeps running and the container is left alone.
             if [ $consecutive_failures -ge $failure_threshold ]; then
                 printf "%s\n" "$(date -Is --utc) ${probe_name} probe failed for ${container_name} after ${failure_threshold} attempts" >&2
                 echo "FAILED_THRESHOLD" > "$probe_status_file"
+                probe_ready=false
             fi
         fi
         
