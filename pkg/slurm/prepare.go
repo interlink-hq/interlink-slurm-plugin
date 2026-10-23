@@ -2096,8 +2096,22 @@ func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid stri
 	}
 }
 
+// failedJobExitCode gives the exit code to report for a container whose status
+// file is missing when the job ended in a failure state, where Slurm's own exit
+// code can still read 0. OOM gets 137, as an OOM-killed container in Kubernetes.
+func failedJobExitCode(state string) (int32, bool) {
+	switch state {
+	case "OOM":
+		return 137, true
+	case "F", "TO", "PR":
+		return 1, true
+	default:
+		return 0, false
+	}
+}
+
 // getExitCode returns the exit code read from the .status file of a specific container and returns it as an int32 number
-func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, sessionContextMessage string) (int32, error) {
+func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch string, state string, sessionContextMessage string) (int32, error) {
 	statusFilePath := path + "/run-" + ctName + ".status"
 	exitCode, err := os.ReadFile(statusFilePath)
 	if err != nil {
@@ -2114,7 +2128,12 @@ func getExitCode(ctx context.Context, path string, ctName string, exitCodeMatch 
 					log.G(ctx).Error(errWithContext)
 					return 11, errWithContext
 				}
-				errWriteFile := os.WriteFile(statusFilePath, []byte(exitCodeMatch), 0644)
+				// A job that ended in a failure state never succeeded, whatever its exit code says.
+				if code, failed := failedJobExitCode(state); failed && exitCodeInt == 0 {
+					log.G(ctx).Warning(sessionContextMessage, "job state ", state, " with exit code 0: reporting ", code)
+					exitCodeInt = int(code)
+				}
+				errWriteFile := os.WriteFile(statusFilePath, []byte(strconv.Itoa(exitCodeInt)), 0o600)
 				if errWriteFile != nil {
 					errWithContext := fmt.Errorf(sessionContextMessage+"error during WriteFile() of getExitCode() of file %s error: %s %w", statusFilePath, fmt.Sprintf("%#v", errWriteFile), errWriteFile)
 					log.G(ctx).Error(errWithContext)

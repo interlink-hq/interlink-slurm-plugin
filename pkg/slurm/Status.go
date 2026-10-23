@@ -250,7 +250,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -303,7 +303,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -330,7 +330,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -396,7 +396,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -421,7 +421,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); reporting containers as terminated",
 							sessionContextMessage, (*h.JIDs)[uid].JID, pod.Namespace, pod.Name)
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -442,7 +442,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -463,7 +463,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
