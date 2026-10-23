@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,8 +202,7 @@ func TestStatusReadsComputeNodeFromJobWorkDir(t *testing.T) {
 		node      = "node042.hpc.example.org"
 	)
 
-	savedTimer, savedStatus := timer, cachedStatus
-	t.Cleanup(func() { timer, cachedStatus = savedTimer, savedStatus })
+	t.Cleanup(resetStatusCache)
 
 	squeue := filepath.Join(t.TempDir(), "squeue")
 	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 R'\n"), 0o755); err != nil {
@@ -264,7 +264,7 @@ func TestStatusReadsComputeNodeFromJobWorkDir(t *testing.T) {
 				JIDs:   &jids,
 				Ctx:    context.Background(),
 			}
-			timer = time.Time{}
+			resetStatusCache()
 			rec := httptest.NewRecorder()
 			h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
 
@@ -290,8 +290,7 @@ func TestStatusReadsComputeNodeFromJobWorkDir(t *testing.T) {
 func TestStatusReportsSocketDirWithNodeName(t *testing.T) {
 	const node = "node007.hpc.example.org"
 
-	savedTimer, savedStatus := timer, cachedStatus
-	t.Cleanup(func() { timer, cachedStatus = savedTimer, savedStatus })
+	t.Cleanup(resetStatusCache)
 
 	squeue := filepath.Join(t.TempDir(), "squeue")
 	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 R'\n"), 0o755); err != nil {
@@ -339,7 +338,7 @@ func TestStatusReportsSocketDirWithNodeName(t *testing.T) {
 				JIDs:   &jids,
 				Ctx:    context.Background(),
 			}
-			timer = time.Time{}
+			resetStatusCache()
 			rec := httptest.NewRecorder()
 			h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
 
@@ -354,5 +353,71 @@ func TestStatusReportsSocketDirWithNodeName(t *testing.T) {
 				t.Errorf("SocketDir = %q, want %q", resp[0].SocketDir, tt.want)
 			}
 		})
+	}
+}
+
+// TestStatusCacheIsPerPod reproduces two pods on one virtual kubelet, which asks
+// about one pod per request: the second request, within the cache lifetime, must
+// get its own pod's status, not the first pod's cached answer.
+func TestStatusCacheIsPerPod(t *testing.T) {
+	const podA, podB, ns = "uid-a", "uid-b", "default"
+	t.Cleanup(resetStatusCache)
+	resetStatusCache()
+
+	calls := filepath.Join(t.TempDir(), "calls")
+	squeue := filepath.Join(t.TempDir(), "squeue")
+	if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho \"$*\" >> "+calls+"\necho '0:0 PD'\n"), 0o700); err != nil { //nolint:gosec // the fake squeue must be executable
+		t.Fatal(err)
+	}
+	jids := map[string]*JidStruct{
+		podA: {JID: "1", PodUID: podA, PodNamespace: ns},
+		podB: {JID: "2", PodUID: podB, PodNamespace: ns},
+	}
+	h := &SidecarHandler{
+		Config: SlurmConfig{Squeuepath: squeue, DataRootFolder: t.TempDir() + "/"},
+		JIDs:   &jids,
+		Ctx:    context.Background(),
+	}
+	ask := func(uid string) []commonIL.PodStatus {
+		t.Helper()
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-" + uid, Namespace: ns, UID: types.UID(uid)},
+			Spec:       v1.PodSpec{Containers: []v1.Container{{Name: "main"}}},
+		}
+		body, err := json.Marshal([]*v1.Pod{pod})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
+		var resp []commonIL.PodStatus
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode status: %v (body %q)", err, rec.Body.String())
+		}
+		return resp
+	}
+
+	if got := ask(podA); len(got) != 1 || got[0].PodUID != podA {
+		t.Fatalf("first request: got %+v, want the status of uid-a", got)
+	}
+	got := ask(podB)
+	if len(got) != 1 || got[0].PodUID != podB {
+		t.Fatalf("second request within the cache lifetime: got %+v, want the status of uid-b", got)
+	}
+	// Asked again within the lifetime, uid-a is answered from the cache.
+	if got := ask(podA); len(got) != 1 || got[0].PodUID != podA {
+		t.Fatalf("cached request: got %+v, want the status of uid-a", got)
+	}
+
+	// The account-wide check ran once for both pods; each pod got its own job query.
+	ran, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(ran), "--me"); n != 1 {
+		t.Errorf("squeue --me ran %d times for two pods, want 1:\n%s", n, ran)
+	}
+	if n := strings.Count(string(ran), "\n"); n != 3 {
+		t.Errorf("squeue ran %d times, want 3 (one check, one query per pod):\n%s", n, ran)
 	}
 }

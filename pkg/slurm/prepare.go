@@ -38,9 +38,7 @@ type SidecarHandler struct {
 }
 
 var (
-	prefix       string
-	timer        time.Time
-	cachedStatus []commonIL.PodStatus
+	prefix string
 )
 
 type JidStruct struct {

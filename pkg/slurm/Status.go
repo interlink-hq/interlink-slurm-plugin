@@ -130,24 +130,28 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if timeNow.Sub(timer) >= time.Second*10 {
-		cmd := []string{"--me"}
-		shell := exec.ExecTask{
-			Command: h.Config.Squeuepath,
-			Args:    cmd,
-			Shell:   true,
-		}
-		execReturn, _ := shell.Execute()
-		execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
+	cached, stale := cachedStatuses(req, timeNow)
+	if len(stale) > 0 {
+		if accountCheckDue(timeNow) {
+			cmd := []string{"--me"}
+			shell := exec.ExecTask{
+				Command: h.Config.Squeuepath,
+				Args:    cmd,
+				Shell:   true,
+			}
+			execReturn, _ := shell.Execute()
+			execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
 
-		if execReturn.Stderr != "" {
-			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
-			return
+			if execReturn.Stderr != "" {
+				statusCode = http.StatusInternalServerError
+				h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
+				return
+			}
+			accountCheckPassed(timeNow)
 		}
 
-		podDirs := make(map[string]string, len(req))
-		for _, pod := range req {
+		podDirs := make(map[string]string, len(stale))
+		for _, pod := range stale {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
 			// Resolve the job working directory: prefer in-memory cache, then
@@ -500,12 +504,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		cachedStatus = resp
-		timer = time.Now()
-	} else {
-		log.G(h.Ctx).Debug(sessionContextMessage, "Cached status")
-		resp = cachedStatus
+		storeStatuses(resp, time.Now())
 	}
+	resp = inRequestOrder(req, cached, resp)
 
 	log.G(h.Ctx).Debug(resp)
 
