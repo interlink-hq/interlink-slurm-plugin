@@ -1093,8 +1093,10 @@ func prepareMounts(
 			}
 
 		default:
-			log.G(Ctx).Warningf("Silently ignoring unknown volume type of volume: %s in pod %s", volume.Name, podName)
-			return "", nil
+			// A PersistentVolumeClaim, for one, has nothing to mount on the remote side.
+			// Skip only this volume: returning here dropped every other mount of the container.
+			log.G(Ctx).Warningf("Ignoring volume %s in pod %s: its type cannot be mounted remotely", volume.Name, podName)
+			continue
 		}
 	}
 

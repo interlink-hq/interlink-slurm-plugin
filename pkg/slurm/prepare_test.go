@@ -1249,3 +1249,41 @@ func TestProduceSLURMScriptWithoutSocketDir(t *testing.T) {
 		})
 	}
 }
+
+// TestPrepareMountsSkipsPersistentVolumeClaim checks that a volume type the plugin
+// cannot mount is skipped alone: before, it made the container lose all its mounts.
+func TestPrepareMountsSkipsPersistentVolumeClaim(t *testing.T) {
+	const testPVCContainer, testPVC = "main", "workspace"
+
+	hostDir := t.TempDir()
+	dirOrCreate := v1.HostPathDirectoryOrCreate
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "nb", Namespace: "alice"},
+		Spec: v1.PodSpec{
+			Volumes: []v1.Volume{
+				{Name: testPVC, VolumeSource: v1.VolumeSource{PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{ClaimName: testPVC}}},
+				{Name: "data", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: hostDir, Type: &dirOrCreate}}},
+			},
+			Containers: []v1.Container{{
+				Name: testPVCContainer,
+				VolumeMounts: []v1.VolumeMount{
+					{Name: testPVC, MountPath: "/home/jovyan"},
+					{Name: "data", MountPath: "/data"},
+				},
+			}},
+		},
+	}
+	podData := &commonIL.RetrievedPodData{Pod: pod, Containers: []commonIL.RetrievedContainer{{Name: testPVCContainer}}}
+
+	mounts, err := prepareMounts(context.Background(), SlurmConfig{ContainerRuntime: "singularity"}, podData, &pod.Spec.Containers[0], t.TempDir())
+
+	if err != nil {
+		t.Fatalf("prepareMounts: %v", err)
+	}
+	if !strings.Contains(mounts, "--bind "+hostDir+":/data") {
+		t.Errorf("hostPath mount missing, got %q", mounts)
+	}
+	if strings.Contains(mounts, "/home/jovyan") {
+		t.Errorf("PVC mount should be skipped, got %q", mounts)
+	}
+}
