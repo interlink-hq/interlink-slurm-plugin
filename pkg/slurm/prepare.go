@@ -2051,6 +2051,14 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 			if volume.EmptyDir != nil {
 				log.G(Ctx).Debugf("in mountData() volume found: %s type: emptyDir", volumeMount.Name)
 
+				// The container already sees the node's /dev/shm, which is memory. A directory
+				// of the job (a shared filesystem) mounted there instead breaks what must be
+				// memory, e.g. RDMA registration of NCCL's and Ray's shared buffers.
+				if volume.EmptyDir.Medium == v1.StorageMediumMemory && filepath.Clean(volumeMount.MountPath) == "/dev/shm" {
+					log.G(Ctx).Infof("-- EmptyDir %s in memory at /dev/shm: the node's /dev/shm is used", volume.Name)
+					return nil, nil, nil
+				}
+
 				var edPath string
 				edPath = filepath.Join(path, "emptyDirs", volume.Name)
 				log.G(Ctx).Info("-- Creating EmptyDir in ", edPath)
