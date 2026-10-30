@@ -668,10 +668,15 @@ func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
 	return resp, nil
 }
 
+// CapabilityPodGroup is listed in the ping answer when the pods of one Kueue pod
+// group (label kueue.x-k8s.io/pod-group-name, annotation
+// kueue.x-k8s.io/pod-group-total-count), created one by one, run as one job.
+const CapabilityPodGroup = "pod-group"
+
 // pluginCapabilities lists what the ping answer advertises.
 func pluginCapabilities(config SlurmConfig) []string {
 	if config.GangSchedulingEnabled {
-		return []string{CapabilityPodGroupCreate}
+		return []string{CapabilityPodGroup, CapabilityPodGroupCreate}
 	}
 	return nil
 }

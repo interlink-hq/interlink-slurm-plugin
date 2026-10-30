@@ -53,3 +53,41 @@ func TestStopHandlerRemovesSocketDir(t *testing.T) {
 		}
 	}
 }
+
+// /delete of a gang member still in the buffer drops it: the group forgets it, its
+// directory goes, nothing is cancelled, and the next members form the group afresh.
+func TestStopHandlerDropsBufferedGangMember(t *testing.T) {
+	h, dataRoot, scancelCount, sbatchCount := newPodGroupHandler(t, "echo 'Submitted batch job 42'")
+	first := kueueMemberPod("uid-g0", "group", 0, 2)
+	rec := submitPod(t, h, first)
+	var created CreateStruct
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); rec.Code != http.StatusOK || err != nil || created.PodJID != "" {
+		t.Fatalf("buffered member: %d %q", rec.Code, rec.Body.String())
+	}
+
+	if err := deletePod(h, first); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := h.GangTable[gangKey(testNamespace, "group")]; ok {
+		t.Fatalf("the group still holds the deleted member: %+v", e.Members)
+	}
+	if _, err := os.Stat(memberDir(dataRoot, "uid-g0")); !os.IsNotExist(err) {
+		t.Fatalf("the deleted member's directory is left: %v", err)
+	}
+	if n := scancelCalls(t, scancelCount); n != 0 {
+		t.Fatalf("scancel ran %d times for a member that had no job", n)
+	}
+
+	// The members sent again make one job of two, not one of three.
+	for i, uid := range []string{"uid-h0", "uid-h1"} {
+		if rec := submitPod(t, h, kueueMemberPod(uid, "group", i, 2)); rec.Code != http.StatusOK {
+			t.Fatalf("member %s: %d %q", uid, rec.Code, rec.Body.String())
+		}
+	}
+	if n := countLines(t, sbatchCount); n != 1 {
+		t.Fatalf("sbatch ran %d times, want once", n)
+	}
+	if n := len(h.GangTable[gangKey(testNamespace, "group")].Members); n != 2 {
+		t.Fatalf("the job holds %d members, want 2", n)
+	}
+}

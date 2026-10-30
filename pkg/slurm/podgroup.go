@@ -3,7 +3,8 @@ package slurm
 // Pod group create.
 //
 // /createPodGroup takes the pods of one pod group in one call and submits them as one
-// `sbatch --nodes=N` job, the gang job of gang.go.
+// `sbatch --nodes=N` job, the gang job of gang.go, without buffering the members
+// until the last one arrives, as /create does.
 
 import (
 	"context"
@@ -106,6 +107,9 @@ func (h *SidecarHandler) createPodGroup(ctx context.Context, req PodGroupCreateR
 		if data.Pod.UID == "" || seen[data.Pod.UID] {
 			return refuse(http.StatusBadRequest, "pod %s has no UID, or the UID of another pod", data.Pod.Name)
 		}
+		if group := gangNameFromMeta(data.Pod.ObjectMeta); group != "" && group != name {
+			return refuse(http.StatusBadRequest, "pod %s belongs to group %s, not %s", data.Pod.Name, group, name)
+		}
 		seen[data.Pod.UID] = true
 		pods = append(pods, data)
 	}
@@ -119,12 +123,25 @@ func (h *SidecarHandler) createPodGroup(ctx context.Context, req PodGroupCreateR
 	if h.GangTable == nil {
 		h.GangTable = make(map[string]*GangEntry)
 	}
+	h.sweepGangsLocked(ctx)
 
 	if jid := h.sharedJobLocked(pods); jid != "" {
 		log.G(ctx).Infof("Group '%s': already submitted as SLURM job %s", name, jid)
 		return groupCreated(pods, jid), nil
 	}
-	if entry, ok := h.GangTable[name]; ok {
+	// /create keys the same group by its pods' namespace too (gangKey).
+	keys := []string{name}
+	for _, data := range pods {
+		keys = append(keys, gangKey(data.Pod.Namespace, name))
+	}
+	for _, key := range keys {
+		entry, ok := h.GangTable[key]
+		if !ok {
+			continue
+		}
+		if entry.Buffering {
+			return refuse(http.StatusServiceUnavailable, "group %s is being created pod by pod (%d/%d)", name, len(entry.Members), entry.Size)
+		}
 		if !entry.Submitted {
 			// sbatch ran, but its job ID was not recorded: the job may run. The
 			// entry goes with the /delete of its pods, the last of which cancels
@@ -134,7 +151,7 @@ func (h *SidecarHandler) createPodGroup(ctx context.Context, req PodGroupCreateR
 		if !gangJobIsGone(ctx, h.Config, entry.JID) {
 			return refuse(http.StatusServiceUnavailable, "group %s still runs as job %s", name, entry.JID)
 		}
-		delete(h.GangTable, name)
+		delete(h.GangTable, key)
 	}
 
 	entry := &GangEntry{
