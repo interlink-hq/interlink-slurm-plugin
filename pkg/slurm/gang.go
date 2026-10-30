@@ -8,17 +8,22 @@ package slurm
 // renders it (its own dir and job.sh); the gang job runs every member's job.sh
 // on its own node, or the site launcher the head pod names (launcher.go).
 //
-// Groups arrive whole through /createPodGroup (podgroup.go), only when
-// Config.GangSchedulingEnabled is set; /create keeps one job per pod.
+// Groups arrive whole through /createPodGroup (podgroup.go), or pod by pod
+// through /create, which buffers the pods that carry a group's keys until the
+// group is complete (bufferGangMember). Both only when
+// Config.GangSchedulingEnabled is set; every other pod is one job, as before.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	exec "github.com/alexellis/go-execute/pkg/v1"
 	"github.com/containerd/containerd/log"
@@ -40,6 +45,156 @@ const gangCoordinationPort = 6379
 
 // preExecAnnotation is shell the job script runs before the workload.
 const preExecAnnotation = "slurm-job.vk.io/pre-exec"
+
+// isGangPod reports whether /create buffers this pod: the feature must be
+// enabled AND the pod must name its group (gangNameFromMeta).
+func isGangPod(config SlurmConfig, metadata metav1.ObjectMeta) bool {
+	if !config.GangSchedulingEnabled {
+		return false
+	}
+	return gangNameFromMeta(metadata) != ""
+}
+
+// gangNameFromMeta returns the pod group name: Kueue's label, else interlink.eu/gang-name.
+func gangNameFromMeta(metadata metav1.ObjectMeta) string {
+	if name := strings.TrimSpace(metadata.Labels[PodGroupNameLabel]); name != "" {
+		return name
+	}
+	return strings.TrimSpace(metadata.Annotations[GangNameAnnotation])
+}
+
+// gangKey is the GangTable key of a group /create buffers. A pod-group name is
+// unique only in its namespace, as Kueue's Workload is, so the key holds both.
+func gangKey(namespace, name string) string {
+	return namespace + "/" + name
+}
+
+// gangSizeFromMeta parses the group's size: Kueue's total count, else
+// interlink.eu/gang-size. It is required and must be a positive integer.
+func gangSizeFromMeta(metadata metav1.ObjectMeta) (int, error) {
+	key := PodGroupTotalCountAnnotation
+	raw := metadata.Annotations[key]
+	if strings.TrimSpace(raw) == "" {
+		key = GangSizeAnnotation
+		raw = metadata.Annotations[key]
+	}
+	if strings.TrimSpace(raw) == "" {
+		return 0, fmt.Errorf("gang pod is missing required annotation %s", PodGroupTotalCountAnnotation)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s=%q: %w", key, raw, err)
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("invalid %s=%q: must be >= 1", key, raw)
+	}
+	return n, nil
+}
+
+// gangRoleFromMeta returns the normalized role (head or worker; default worker).
+func gangRoleFromMeta(metadata metav1.ObjectMeta) string {
+	role := strings.ToLower(strings.TrimSpace(metadata.Annotations[GangRoleAnnotation]))
+	// The Ray head, and the launcher of an MPI JobSet, coordinate the others.
+	if role == GangRoleHead || metadata.Labels[RayNodeTypeLabel] == GangRoleHead ||
+		metadata.Labels[JobSetReplicatedJobLabel] == "launcher" {
+		return GangRoleHead
+	}
+	return GangRoleWorker
+}
+
+// gangGuaranteeTimeout returns the configured gang buffering timeout. When gang
+// scheduling is enabled, NewSlurmConfig has already validated GangTimeout as a
+// positive duration, so this returns exactly that value. The 10m fallback is
+// defensive for the unset / programmatically-constructed-config cases; it uses
+// the SAME predicate the config validation rejects on (unparseable or <=0), so
+// the two never disagree on a value that reached this point.
+func gangGuaranteeTimeout(config SlurmConfig) time.Duration {
+	if strings.TrimSpace(config.GangTimeout) == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(config.GangTimeout))
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
+}
+
+// assignRanks assigns a deterministic rank 0..N-1 to every buffered member:
+//   - the head (role==head) is ALWAYS rank 0,
+//   - members that carry an explicit interlink.eu/gang-rank, or else a Job
+//     completion index, keep it if free,
+//   - everyone else is filled into the remaining ranks in UID order.
+//
+// It mutates each BufferedMember.Rank and returns the members ordered by rank.
+// This runs only at submission time (last arrival), so all members are present.
+func assignRanks(members map[string]*BufferedMember) []*BufferedMember {
+	// PodUID is not time-ordered, so members without a rank are ordered by UID
+	// for determinism. The head is forced to rank 0 regardless.
+	all := make([]*BufferedMember, 0, len(members))
+	for _, m := range members {
+		all = append(all, m)
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		return all[i].PodUID < all[j].PodUID
+	})
+
+	size := len(all)
+	taken := make([]bool, size)
+	assigned := make(map[string]bool, size)
+
+	// 1) Head is pinned to rank 0.
+	for _, m := range all {
+		if m.Role == GangRoleHead {
+			m.Rank = 0
+			taken[0] = true
+			assigned[m.PodUID] = true
+			break // only the first head wins rank 0
+		}
+	}
+
+	// 2) Honor explicit ranks that are in range and still free.
+	for _, m := range all {
+		if assigned[m.PodUID] {
+			continue
+		}
+		raw, ok := m.Pod.Annotations[GangRankAnnotation]
+		if !ok {
+			raw, ok = m.Pod.Labels[JobCompletionIndexLabel]
+		}
+		if ok {
+			if r, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && r >= 0 && r < size && !taken[r] {
+				m.Rank = r
+				taken[r] = true
+				assigned[m.PodUID] = true
+			}
+		}
+	}
+
+	// 3) Fill everyone else into the lowest remaining free ranks, in UID order.
+	next := 0
+	for _, m := range all {
+		if assigned[m.PodUID] {
+			continue
+		}
+		for next < size && taken[next] {
+			next++
+		}
+		if next >= size {
+			break // defensive; shouldn't happen when size == len(members)
+		}
+		m.Rank = next
+		taken[next] = true
+		assigned[m.PodUID] = true
+	}
+
+	// Return ordered by rank.
+	ordered := make([]*BufferedMember, 0, len(all))
+	ordered = append(ordered, all...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Rank < ordered[j].Rank
+	})
+	return ordered
+}
 
 // produceGangSLURMScript renders ONE co-scheduled sbatch script for the whole
 // gang into headMember.WorkDir/job.slurm and returns its path:
@@ -653,6 +808,135 @@ func stampJID(ctx context.Context, jids *map[string]*JidStruct, uid, ns, jid, di
 	return nil
 }
 
+// newGangBuffer is the entry of a group whose first pod /create just received.
+func newGangBuffer(name string, size int) *GangEntry {
+	return &GangEntry{
+		Name:      name,
+		Size:      size,
+		Members:   make(map[string]*BufferedMember),
+		Buffering: true,
+		CreatedAt: time.Now(),
+	}
+}
+
+// removeMemberDirs removes the directories renderPod wrote for a member.
+func removeMemberDirs(m *BufferedMember) {
+	os.RemoveAll(m.FilesPath)
+	if m.WorkDir != m.FilesPath {
+		os.RemoveAll(m.WorkDir)
+	}
+}
+
+// bufferGangMember buffers one rendered member of a group that /create receives
+// pod by pod and, if this arrival completes the group, submits ONE sbatch for the
+// whole group through submitGang, as /createPodGroup does. It returns
+// (jid, submitted, cerr):
+//   - submitted=false, jid="" : buffered, gang not yet complete -> caller responds
+//     200 with an empty PodJID (pod stays Pending until Status sees its JID).
+//   - submitted=true,  jid=<gangJID> : gang complete and submitted; caller responds
+//     200 with PodJID=jid for THIS pod (siblings reconcile via Status re-poll).
+//
+// A member the group does not keep has its directories removed here. The
+// caller MUST hold h.GangMu, from before it rendered the member, which also
+// guards the JIDs writes.
+func (h *SidecarHandler) bufferGangMember(ctx context.Context, member *BufferedMember, size int) (string, bool, *createError) {
+	gangName := gangNameFromMeta(member.Pod.ObjectMeta)
+	key := gangKey(member.Namespace, gangName)
+
+	if h.GangTable == nil {
+		h.GangTable = make(map[string]*GangEntry)
+	}
+	entry, ok := h.GangTable[key]
+	if !ok {
+		entry = newGangBuffer(gangName, size)
+		h.GangTable[key] = entry
+		log.G(ctx).Infof("Gang '%s': created buffer, size=%d", key, size)
+	}
+
+	// Idempotency / re-Create safety: if this UID is already buffered, or the gang
+	// is already submitted, do not double-count.
+	if entry.Submitted {
+		// A re-Create of a UID that WAS part of the submitted gang: idempotently
+		// re-stamp and report the shared JID. No squeue probe here - the pod
+		// belongs to THIS generation whatever state its job is in (Status.go owns
+		// the terminal reporting).
+		if _, known := entry.Members[member.PodUID]; known {
+			if err := stampJID(ctx, h.JIDs, member.PodUID, member.Namespace, entry.JID, member.FilesPath, member.WorkDir); err != nil {
+				return "", false, submitFailure(err)
+			}
+			log.G(ctx).Infof("Gang '%s': already submitted, returning shared JID %s for re-Created member %s", key, entry.JID, member.PodUID)
+			return entry.JID, true, nil
+		}
+
+		// A pod UID we have NEVER seen arrives for an already-submitted gang. Two
+		// legitimate causes, distinguished by asking SLURM about the entry's JID:
+		//   - the job is still ALIVE -> this is a replacement pod (the operator
+		//     recreated one member while the allocation lives on); bind it to the
+		//     live shared JID, never resubmit over a running gang;
+		//   - the job is GONE (ran and aged out of the controller - the squeue
+		//     probe echoes "Invalid job id") -> the whole workload was deleted and
+		//     recreated under the same group name; the entry is STALE. Handing out
+		//     the dead JID would pin every new pod Pending forever (seen on a real
+		//     site). Drop the entry and buffer this member as the first of a FRESH
+		//     generation.
+		// The probe costs one squeue round-trip under GangMu, only on this rare
+		// path (never on first-generation Creates), which also serializes
+		// concurrent new-generation arrivals so exactly one of them rebuilds the
+		// entry.
+		if !gangJobIsGone(ctx, h.Config, entry.JID) {
+			if err := stampJID(ctx, h.JIDs, member.PodUID, member.Namespace, entry.JID, member.FilesPath, member.WorkDir); err != nil {
+				removeMemberDirs(member)
+				return "", false, submitFailure(err)
+			}
+			entry.Members[member.PodUID] = member
+			log.G(ctx).Warningf("Gang '%s': new pod %s joined an already-submitted LIVE gang (JID %s); binding as replacement", key, member.PodUID, entry.JID)
+			return entry.JID, true, nil
+		}
+		log.G(ctx).Warningf("Gang '%s': submitted JID %s is gone from SLURM; dropping the stale entry and starting a fresh generation with pod %s", key, entry.JID, member.PodUID)
+		entry = newGangBuffer(gangName, size)
+		h.GangTable[key] = entry
+	}
+	if !entry.Buffering {
+		// sbatch ran for this group, but its job was not recorded: the job may run.
+		// The entry goes with the /delete of its pods, the last of which cancels
+		// the job if sbatch printed its ID.
+		if _, known := entry.Members[member.PodUID]; !known {
+			removeMemberDirs(member)
+		}
+		return "", false, &createError{code: http.StatusServiceUnavailable, err: fmt.Errorf("group %s: sbatch ran but its job was not recorded (%d of %d pods not deleted yet)", gangName, len(entry.Members), entry.Size)}
+	}
+
+	entry.Members[member.PodUID] = member
+
+	if len(entry.Members) < entry.Size {
+		log.G(ctx).Infof("Gang '%s': buffered pod %s (%d/%d), waiting for quorum", key, member.PodUID, len(entry.Members), entry.Size)
+		return "", false, nil
+	}
+
+	// Quorum reached: this is the last arrival. Submit ONE sbatch for the group.
+	log.G(ctx).Infof("Gang '%s': quorum reached (%d/%d), submitting single co-scheduled sbatch", key, len(entry.Members), entry.Size)
+
+	ordered := assignRanks(entry.Members)
+	jid, err := h.submitGang(ctx, entry, ordered)
+	if err != nil && !errors.Is(err, errGangSubmitted) {
+		// This member's create fails and its controller replaces it; the others stay
+		// buffered, so the replacement completes the quorum again instead of making
+		// the gang larger than its size.
+		delete(entry.Members, member.PodUID)
+		removeMemberDirs(member)
+		if len(entry.Members) == 0 {
+			delete(h.GangTable, key)
+		}
+		return "", false, submitFailure(err)
+	}
+	// sbatch ran: from here on the entry goes with the /delete of its pods.
+	entry.Buffering = false
+	if err != nil {
+		return "", false, submitFailure(err)
+	}
+	return jid, true, nil
+}
+
 // errGangSubmitted marks a failure after the gang's sbatch ran: its job may run.
 var errGangSubmitted = errors.New("sbatch ran")
 
@@ -722,6 +1006,55 @@ func (h *SidecarHandler) removeGangMemberOnDelete(ctx context.Context, uid strin
 			log.G(ctx).Infof("Gang '%s': entry dropped (empty)", name)
 		}
 	}
+}
+
+// sweepGangsLocked abandons any group /create has buffered for longer than the
+// configured timeout: it removes every buffered member's dirs and drops the
+// entry. A group whose sbatch ran is never swept: it goes with the /delete of its
+// pods. Caller MUST hold h.GangMu.
+func (h *SidecarHandler) sweepGangsLocked(ctx context.Context) {
+	if h.GangTable == nil {
+		return
+	}
+	timeout := gangGuaranteeTimeout(h.Config)
+	for name, entry := range h.GangTable {
+		if !entry.Buffering || time.Since(entry.CreatedAt) <= timeout {
+			continue
+		}
+		log.G(ctx).Warningf("Gang '%s' timed out %d/%d after %s; abandoning buffered members", name, len(entry.Members), entry.Size, timeout)
+		for _, m := range entry.Members {
+			removeMemberDirs(m)
+		}
+		delete(h.GangTable, name)
+	}
+}
+
+// StartGangSweeper launches a background goroutine that periodically abandons
+// timed-out incomplete gangs. Started from main.go only when gang scheduling is
+// enabled. It exits when ctx is cancelled.
+func (h *SidecarHandler) StartGangSweeper(ctx context.Context) {
+	timeout := gangGuaranteeTimeout(h.Config)
+	// Sweep a few times per timeout window; never faster than every 30s.
+	interval := timeout / 4
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		log.G(ctx).Infof("Gang sweeper started (timeout=%s, interval=%s)", timeout, interval)
+		for {
+			select {
+			case <-ctx.Done():
+				log.G(ctx).Info("Gang sweeper stopping")
+				return
+			case <-ticker.C:
+				h.GangMu.Lock()
+				h.sweepGangsLocked(ctx)
+				h.GangMu.Unlock()
+			}
+		}
+	}()
 }
 
 // parseJIDFromSubmit extracts the numeric SLURM job ID from sbatch output.

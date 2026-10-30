@@ -3,6 +3,7 @@ package slurm
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 )
@@ -115,10 +116,16 @@ type SlurmConfig struct {
 
 	// Gang scheduling. When GangSchedulingEnabled is false (the default)
 	// /createPodGroup refuses every group and the plugin behaves exactly as
-	// before: 1 Pod = 1 sbatch. When enabled, the pods of a group sent in one
-	// /createPodGroup call are submitted together as a single co-scheduled
-	// `sbatch --nodes=N` job. /create is unchanged either way.
+	// before: 1 Pod = 1 sbatch. When enabled, the pods of a group are submitted
+	// together as a single co-scheduled `sbatch --nodes=N` job: those sent in one
+	// /createPodGroup call, and those /create receives with Kueue's pod-group keys,
+	// which it buffers until the group is complete. Pods without the keys take
+	// the single-pod path either way.
 	GangSchedulingEnabled bool `yaml:"GangSchedulingEnabled"` // default false
+	// GangTimeout is how long /create buffers an incomplete group before
+	// abandoning it (its buffered members' dirs removed and the entry dropped).
+	// Parsed as a Go duration string (e.g. "10m", "30s"). Empty => 10m.
+	GangTimeout string `yaml:"GangTimeout"`
 	// SiteScriptPath is the site file (typically a mounted ConfigMap): its top level
 	// runs at the start of every gang job and its `<name>-launcher` functions start
 	// gangs whose head pod carries interlink.eu/launcher: <name>. Read at each gang
@@ -139,8 +146,34 @@ type CreateStruct struct {
 	PodJID string `json:"PodJID"`
 }
 
-// Gang keys.
+// Gang keys. A gang that /create receives pod by pod is a Kueue pod group: label
+// kueue.x-k8s.io/pod-group-name and annotation kueue.x-k8s.io/pod-group-total-count,
+// so the group Kueue admits whole is the group submitted as one job. Rank and role
+// come from the labels the controllers already set (Job completion index, Ray node
+// type, JobSet launcher). The interlink.eu/gang-* keys are still read when the
+// Kueue ones are absent.
 const (
+	PodGroupNameLabel            = "kueue.x-k8s.io/pod-group-name"
+	PodGroupTotalCountAnnotation = "kueue.x-k8s.io/pod-group-total-count"
+	JobCompletionIndexLabel      = "batch.kubernetes.io/job-completion-index"
+	RayNodeTypeLabel             = "ray.io/node-type"
+	JobSetReplicatedJobLabel     = "jobset.sigs.k8s.io/replicatedjob-name"
+
+	// GangNameAnnotation names the group when PodGroupNameLabel is absent: all
+	// pods sharing the same value are buffered and submitted as ONE
+	// `sbatch --nodes=N` job.
+	GangNameAnnotation = "interlink.eu/gang-name"
+	// GangSizeAnnotation is the integer N when PodGroupTotalCountAnnotation is
+	// absent: both the buffering quorum and the `#SBATCH --nodes=N`.
+	GangSizeAnnotation = "interlink.eu/gang-size"
+	// GangRoleAnnotation is "head" or "worker" (default "worker"). role=head is
+	// forced to rank 0.
+	GangRoleAnnotation = "interlink.eu/gang-role"
+	// GangRankAnnotation is an optional explicit rank in 0..N-1. When absent,
+	// the Job completion index is the rank, else the lowest free one in UID
+	// order (with head pinned to rank 0).
+	GangRankAnnotation = "interlink.eu/gang-rank"
+
 	// GangRoleHead / GangRoleWorker are the two roles of a gang member; the
 	// head is rank 0.
 	GangRoleHead   = "head"
@@ -172,13 +205,19 @@ type BufferedMember struct {
 }
 
 // GangEntry is one gang (keyed by its name in GangTable): its members, and the
-// ONE sbatch submitted for all of them.
+// ONE sbatch submitted for all of them. A group that /create receives pod by pod
+// is keyed by gangKey instead, and buffered in its entry until
+// len(Members) == Size.
 type GangEntry struct {
 	Name      string
 	Size      int
 	Members   map[string]*BufferedMember // keyed by PodUID
 	JID       string                     // the shared SLURM job ID once submitted
 	Submitted bool
+	// Buffering is set while /create collects the members and no sbatch has run
+	// for them; CreatedAt is when the first one arrived.
+	Buffering bool
+	CreatedAt time.Time
 }
 
 type ProbeType string

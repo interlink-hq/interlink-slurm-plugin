@@ -150,11 +150,14 @@ func TestCreatePodGroupRefusals(t *testing.T) {
 	noUID.Pods[1].Pod.UID = ""
 	noGroup := podGroupRequest(2)
 	noGroup.GroupUID = ""
+	otherGroup := podGroupRequest(2)
+	otherGroup.Pods[1].Pod.Labels = map[string]string{PodGroupNameLabel: "other"}
 
 	tests := []struct {
 		name    string
 		req     PodGroupCreateRequest
 		gangOff bool
+		buffer  bool
 		want    int
 	}{
 		{name: "gang scheduling off", req: podGroupRequest(2), gangOff: true, want: http.StatusBadRequest},
@@ -162,13 +165,24 @@ func TestCreatePodGroupRefusals(t *testing.T) {
 		{name: "no pods", req: PodGroupCreateRequest{GroupUID: testGroup}, want: http.StatusBadRequest},
 		{name: "two pods with one UID", req: sameUID, want: http.StatusBadRequest},
 		{name: "pod without UID", req: noUID, want: http.StatusBadRequest},
+		{name: "pod of another group", req: otherGroup, want: http.StatusBadRequest},
+		{name: "group buffered by /create", req: podGroupRequest(2), buffer: true, want: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h, _, _, sbatchCount := newPodGroupHandler(t, "echo 'Submitted batch job 42'")
 			h.Config.GangSchedulingEnabled = !tt.gangOff
-			if rec := postPodGroup(t, h, tt.req); rec.Code != tt.want {
+			if tt.buffer {
+				if rec := submitPod(t, h, kueueMemberPod("uid-a", testGroup, 0, 2)); rec.Code != http.StatusOK {
+					t.Fatalf("buffer: code %d, body %q", rec.Code, rec.Body.String())
+				}
+			}
+			rec := postPodGroup(t, h, tt.req)
+			if rec.Code != tt.want {
 				t.Fatalf("code %d, want %d; body %q", rec.Code, tt.want, rec.Body.String())
+			}
+			if tt.buffer && !strings.Contains(rec.Body.String(), "pod by pod") {
+				t.Fatalf("body %q, want the group named as being created pod by pod", rec.Body.String())
 			}
 			if n := countLines(t, sbatchCount); n != 0 {
 				t.Fatalf("sbatch ran %d times", n)

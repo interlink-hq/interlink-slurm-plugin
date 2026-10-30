@@ -423,8 +423,8 @@ func TestStatusCacheIsPerPod(t *testing.T) {
 	}
 }
 
-// The ping answer, /status with no pods, lists pod-group-create exactly when gangs
-// are enabled, whatever the resource script says.
+// The ping answer, /status with no pods, lists pod-group and pod-group-create
+// exactly when gangs are enabled, whatever the resource script says.
 func TestPingListsCapabilities(t *testing.T) {
 	for _, gangs := range []bool{true, false} {
 		t.Run("GangSchedulingEnabled="+strconv.FormatBool(gangs), func(t *testing.T) {
@@ -443,7 +443,7 @@ echo '{"status":"ok","resources":{"cpu":"8"},"capabilities":["something-else"]}'
 			}
 			want := `{"status":"ok","resources":{"cpu":"8"}}`
 			if gangs {
-				want = `{"status":"ok","resources":{"cpu":"8"},"capabilities":["pod-group-create"]}`
+				want = `{"status":"ok","resources":{"cpu":"8"},"capabilities":["pod-group","pod-group-create"]}`
 			}
 			if got := rec.Body.String(); got != want {
 				t.Fatalf("ping = %s, want %s", got, want)

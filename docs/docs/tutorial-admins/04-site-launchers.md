@@ -10,10 +10,10 @@ JobSet) can start as **one** Slurm job: all of them together on N nodes, or none
 ## Turning it on
 
 Set `GangSchedulingEnabled: true` in the plugin configuration, or
-`GANGSCHEDULINGENABLED=true` in its environment. The plugin then lists the capability
-`pod-group-create` in its ping answer, so a caller knows it can send groups. Off (the
-default), `/createPodGroup` refuses every group with 400. `/create` is the same either
-way: one pod, one job.
+`GANGSCHEDULINGENABLED=true` in its environment. The plugin then lists the capabilities
+`pod-group` and `pod-group-create` in its ping answer, so a caller knows it can send
+groups, pod by pod or whole. Off (the default), `/createPodGroup` refuses every group
+with 400 and `/create` makes one job of every pod.
 
 ## How a group arrives: `POST /createPodGroup`
 
@@ -41,6 +41,30 @@ afresh once the old job has ended, and refused with 503 while it runs. A refusal
 `sbatch` answers 503 when trying again later can work (ssh to the site failed, a limit on
 submitted jobs, a busy controller) and 400 otherwise (an invalid account, partition or
 QOS), with `sbatch`'s text; the pods' files are removed.
+
+## Which pods form a gang
+
+A group can also reach the plugin pod by pod, through `/create`, as the virtual kubelet
+sends every pod; the virtual kubelet knows nothing about groups. The plugin reads
+Kueue's pod-group keys, whoever writes them (Kueue, a policy engine, the user):
+
+| Key | Kind | Meaning |
+|---|---|---|
+| `kueue.x-k8s.io/pod-group-name` | label | name of the group, unique in its namespace |
+| `kueue.x-k8s.io/pod-group-total-count` | annotation | number of pods in the group |
+
+The rank comes from `batch.kubernetes.io/job-completion-index`; the head is the pod with
+`ray.io/node-type: head` or the JobSet replicated job `launcher`. `/create` buffers the
+members until the group is complete, answering every member before the last with no job
+ID, then submits the same job as `/createPodGroup`; the pods answered without the job ID
+follow the job's state at their next status. A pod that names its group without its size
+is refused with 400.
+
+A group still incomplete after `GangTimeout` (or `GANGTIMEOUT`; default `10m`) is
+abandoned: the files of its buffered pods are removed. The delete of a buffered pod drops
+it from its group. While `/create` buffers a group, `/createPodGroup` refuses with 503 the
+pods of the same namespace sent as the same `groupUID`, and it refuses with 400 a pod
+whose `kueue.x-k8s.io/pod-group-name` is not its `groupUID`.
 
 ## How the job starts: the site file
 

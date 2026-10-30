@@ -54,7 +54,8 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	// interLink /delete is per-pod, so the N members of a gang arrive as N
 	// separate deletes. Each is removed from the entry, which is dropped once
 	// empty; the shared JID is refcounted below and scancelled only on the last
-	// member. A no-op for non-gang pods.
+	// member. A member still buffered by /create has no JID: nothing is
+	// cancelled. A no-op for non-gang pods.
 	h.removeGangMemberOnDelete(spanCtx, string(pod.UID))
 	// Resolve the job working directory.
 	// Priority: 1) in-memory JIDs cache  2) pod annotation (handles wiped cache)
@@ -83,7 +84,7 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	// scancel decision (refcount read + scancel + removeJID), and RELEASED before
 	// the slow filesystem cleanup (RemoveAll, which can sleep 5s in follow mode).
 	// Holding GangMu across that sleep would stall every concurrent gang
-	// Create/Delete. Under the narrow lock exactly one delete sees the JID
+	// Create/Delete/sweeper. Under the narrow lock exactly one delete sees the JID
 	// refcount reach 1 and issues the single scancel.
 	h.GangMu.Lock()
 	jid, scancelErr := scancelDecideAndRemoveJID(spanCtx, h.Config, string(pod.UID), h.JIDs)

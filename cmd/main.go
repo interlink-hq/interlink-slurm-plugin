@@ -190,10 +190,16 @@ func main() {
 		Config: slurmConfig,
 		JIDs:   &JobIDs,
 		Ctx:    ctx,
-		// GangTable holds the pod groups submitted as one job (see
-		// pkg/slurm/gang.go). Always initialized; only populated when gang
-		// scheduling is enabled and groups arrive through /createPodGroup.
+		// GangTable holds the pod groups submitted as one job, and those /create
+		// buffers until they are complete (see pkg/slurm/gang.go). Always
+		// initialized; only populated when gang scheduling is enabled.
 		GangTable: make(map[string]*slurm.GangEntry),
+	}
+
+	// Start the background sweeper that abandons timed-out incomplete gangs. Only
+	// meaningful (and only started) when gang scheduling is enabled.
+	if slurmConfig.GangSchedulingEnabled {
+		SidecarAPIs.StartGangSweeper(ctx)
 	}
 
 	mutex := http.NewServeMux()

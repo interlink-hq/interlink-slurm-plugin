@@ -91,15 +91,58 @@ type renderedPod struct {
 	flavor          *FlavorResolution
 }
 
-// createPod renders the pod's job script and submits it as one job.
+// createPod renders the pod's job script and submits it as one job, or buffers
+// the pod when it is a member of a group (isGangPod). A buffered member gets an
+// empty PodJID until the last member of its group arrives.
 func (h *SidecarHandler) createPod(spanCtx context.Context, data commonIL.RetrievedPodData) (CreateStruct, *createError) {
 	span := trace.SpanFromContext(spanCtx)
+
+	// Gang-scheduling branch: when the feature is enabled AND the pod names its
+	// group, the pod is rendered as any other, then buffered instead of submitted;
+	// only the arrival that completes the group submits ONE `sbatch --nodes=N` for
+	// all of its members and back-fills every member's JID. A pod without the
+	// group's keys (or with the feature off) takes the unchanged single-pod path.
+	gang := isGangPod(h.Config, data.Pod.ObjectMeta)
+	size := 0
+	if gang {
+		var err error
+		if size, err = gangSizeFromMeta(data.Pod.ObjectMeta); err != nil {
+			return CreateStruct{}, &createError{code: http.StatusBadRequest, err: err}
+		}
+		// The member is rendered under h.GangMu, after the sweep, as /createPodGroup
+		// renders its pods: no sweep can then remove the files of a pod sent again
+		// to a group that timed out while it is being rendered.
+		h.GangMu.Lock()
+		defer h.GangMu.Unlock()
+		h.sweepGangsLocked(spanCtx)
+	}
 
 	rendered, cerr := h.renderPod(spanCtx, data)
 	if cerr != nil {
 		return CreateStruct{}, cerr
 	}
 	filesPath, workDir, path := rendered.filesPath, rendered.workDir, rendered.scriptPath
+
+	if gang {
+		member := gangMemberFromCreate(data.Pod, filesPath, workDir, rendered.runtimeCommands, rendered.resourceLimits, rendered.isDefaultCPU, rendered.isDefaultRAM, rendered.flavor)
+		member.Role = gangRoleFromMeta(data.Pod.ObjectMeta)
+		gangJID, submitted, gerr := h.bufferGangMember(spanCtx, member, size)
+		if gerr != nil {
+			span.AddEvent("Failed to submit the gang SLURM Job")
+			return CreateStruct{}, gerr
+		}
+		// Respond 200 either way:
+		//   - not yet submitted -> empty PodJID; the pod stays Pending until Status
+		//     sees this UID's JID appear.
+		//   - submitted -> the shared gang JID for THIS pod; siblings reconcile via
+		//     their own Status re-polls.
+		if submitted {
+			span.AddEvent("Gang SLURM Job successfully submitted with ID " + gangJID)
+		} else {
+			span.AddEvent("Gang member buffered, awaiting quorum")
+		}
+		return CreateStruct{PodUID: string(data.Pod.UID), PodJID: gangJID}, nil
+	}
 
 	out, err := SLURMBatchSubmit(h.Ctx, h.Config, path)
 	if err != nil {
