@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -419,5 +420,34 @@ func TestStatusCacheIsPerPod(t *testing.T) {
 	}
 	if n := strings.Count(string(ran), "\n"); n != 3 {
 		t.Errorf("squeue ran %d times, want 3 (one check, one query per pod):\n%s", n, ran)
+	}
+}
+
+// The ping answer, /status with no pods, lists pod-group-create exactly when gangs
+// are enabled, whatever the resource script says.
+func TestPingListsCapabilities(t *testing.T) {
+	for _, gangs := range []bool{true, false} {
+		t.Run("GangSchedulingEnabled="+strconv.FormatBool(gangs), func(t *testing.T) {
+			script := filepath.Join(t.TempDir(), "resources")
+			if err := os.WriteFile(script, []byte(`#!/bin/sh
+echo '{"status":"ok","resources":{"cpu":"8"},"capabilities":["something-else"]}'
+`), 0o700); err != nil { //nolint:gosec // the fake script must be executable
+				t.Fatal(err)
+			}
+			jids := map[string]*JidStruct{}
+			h := &SidecarHandler{Config: SlurmConfig{ResourceScriptPath: script, GangSchedulingEnabled: gangs}, JIDs: &jids, Ctx: context.Background()}
+			rec := httptest.NewRecorder()
+			h.StatusHandler(rec, httptest.NewRequest(http.MethodGet, "/status", strings.NewReader("[]")))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code = %d, body %q", rec.Code, rec.Body.String())
+			}
+			want := `{"status":"ok","resources":{"cpu":"8"}}`
+			if gangs {
+				want = `{"status":"ok","resources":{"cpu":"8"},"capabilities":["pod-group-create"]}`
+			}
+			if got := rec.Body.String(); got != want {
+				t.Fatalf("ping = %s, want %s", got, want)
+			}
+		})
 	}
 }

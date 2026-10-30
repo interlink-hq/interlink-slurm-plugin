@@ -190,14 +190,20 @@ func main() {
 		Config: slurmConfig,
 		JIDs:   &JobIDs,
 		Ctx:    ctx,
+		// GangTable holds the pod groups submitted as one job (see
+		// pkg/slurm/gang.go). Always initialized; only populated when gang
+		// scheduling is enabled and groups arrive through /createPodGroup.
+		GangTable: make(map[string]*slurm.GangEntry),
 	}
 
 	mutex := http.NewServeMux()
 	mutex.HandleFunc("/status", SidecarAPIs.StatusHandler)
 	mutex.HandleFunc("/create", SidecarAPIs.SubmitHandler)
+	mutex.HandleFunc("/createPodGroup", SidecarAPIs.CreatePodGroupHandler)
 	mutex.HandleFunc("/delete", SidecarAPIs.StopHandler)
 	mutex.HandleFunc("/getLogs", SidecarAPIs.GetLogsHandler)
 	mutex.HandleFunc("/system-info", SidecarAPIs.SystemInfoHandler)
+	mutex.HandleFunc("/estimate", SidecarAPIs.EstimateHandler)
 
 	SidecarAPIs.CreateDirectories()
 	SidecarAPIs.LoadJIDs()

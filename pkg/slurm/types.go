@@ -3,6 +3,8 @@ package slurm
 import (
 	"fmt"
 	"strings"
+
+	v1 "k8s.io/api/core/v1"
 )
 
 // FlavorConfig holds the configuration for a specific flavor
@@ -110,11 +112,73 @@ type SlurmConfig struct {
 	// where jobs run under more than one UID (DefaultUID, flavor UID or
 	// runAsUser): a job whose account cannot write the root fails at start.
 	SocketDirRoot string `yaml:"SocketDirRoot"`
+
+	// Gang scheduling. When GangSchedulingEnabled is false (the default)
+	// /createPodGroup refuses every group and the plugin behaves exactly as
+	// before: 1 Pod = 1 sbatch. When enabled, the pods of a group sent in one
+	// /createPodGroup call are submitted together as a single co-scheduled
+	// `sbatch --nodes=N` job. /create is unchanged either way.
+	GangSchedulingEnabled bool `yaml:"GangSchedulingEnabled"` // default false
+	// SiteScriptPath is the site file (typically a mounted ConfigMap): its top level
+	// runs at the start of every gang job and its `<name>-launcher` functions start
+	// gangs whose head pod carries interlink.eu/launcher: <name>. Read at each gang
+	// submission, so an edit applies to the next job. Empty => /etc/interlink/site/site.sh.
+	SiteScriptPath string `yaml:"SiteScriptPath"`
+	// GPUFlag is how this site's Slurm takes the GPUs a pod requests
+	// (nvidia.com/gpu, amd.com/gpu): "gres" (--gres=gpu:N, the default),
+	// "gpus-per-node" (--gpus-per-node=N) or "gpus" (--gpus=N).
+	GPUFlag string `yaml:"GPUFlag"`
+	// SiteTimeZone is the IANA time zone Slurm prints its times in (e.g.
+	// "Europe/Paris"), used to read `sbatch --test-only` estimates. Empty => the
+	// plugin's own time zone.
+	SiteTimeZone string `yaml:"SiteTimeZone"`
 }
 
 type CreateStruct struct {
 	PodUID string `json:"PodUID"`
 	PodJID string `json:"PodJID"`
+}
+
+// Gang keys.
+const (
+	// GangRoleHead / GangRoleWorker are the two roles of a gang member; the
+	// head is rank 0.
+	GangRoleHead   = "head"
+	GangRoleWorker = "worker"
+
+	// LauncherAnnotation names the site launcher that starts the gang: the
+	// `<name>-launcher` function of the site file (SlurmConfig.SiteScriptPath).
+	// Without it, each pod runs its own command on its own node.
+	LauncherAnnotation = "interlink.eu/launcher"
+)
+
+// BufferedMember holds everything produceGangSLURMScript needs to render one
+// gang member's own rank line (its already-rendered singularity/enroot runtime
+// command, its per-pod job dir for isolated logs, its role/rank, and the pod
+// itself for command/args). One BufferedMember == one rank on one node.
+type BufferedMember struct {
+	PodUID          string
+	Namespace       string
+	FilesPath       string // per-pod dir (DataRootFolder + ns + "-" + uid): JobID.jid and the other bookkeeping files
+	WorkDir         string // the pod's job dir, as /create's: job.sh, logs, status files; FilesPath unless slurm-job.vk.io/job-workdir is set
+	Role            string // GangRoleHead or GangRoleWorker
+	Rank            int    // 0..N-1; head is always 0
+	Pod             v1.Pod
+	RuntimeCommands []ContainerCommand // this member's own rendered container commands
+	ResourceLimits  ResourceLimits
+	IsDefaultCPU    bool
+	IsDefaultRAM    bool
+	Flavor          *FlavorResolution
+}
+
+// GangEntry is one gang (keyed by its name in GangTable): its members, and the
+// ONE sbatch submitted for all of them.
+type GangEntry struct {
+	Name      string
+	Size      int
+	Members   map[string]*BufferedMember // keyed by PodUID
+	JID       string                     // the shared SLURM job ID once submitted
+	Submitted bool
 }
 
 type ProbeType string
@@ -166,7 +230,7 @@ type LifecycleHTTPGetSpec struct {
 // in a runtime-agnostic form.
 type LifecycleHookSpec struct {
 	Type        LifecycleHookType
-	ExecCommand []string           // populated when Type == LifecycleHookTypeExec
+	ExecCommand []string              // populated when Type == LifecycleHookTypeExec
 	HTTPGet     *LifecycleHTTPGetSpec // populated when Type == LifecycleHookTypeHTTPGet
 }
 
@@ -216,6 +280,10 @@ type PingResponse struct {
 	// node.  When present (even as an empty slice), all non-system taints on the node
 	// are replaced with this list.  When absent, existing taints are left unchanged.
 	Taints *[]TaintConfig `json:"taints,omitempty"`
+	// Capabilities lists what the plugin offers beyond one job per pod, such as
+	// "pod-group-create". interLink's PingResponse has no such field yet; a decoder
+	// that does not know it ignores it.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ResourcesResponse carries Kubernetes-quantity strings for each resource dimension.
@@ -255,3 +323,10 @@ type slurmJSONNode struct {
 	FreeMemory  int64 `json:"free_memory"`  // MB
 	AllocMemory int64 `json:"alloc_memory"` // MB
 }
+
+// SlurmConfig.GPUFlag values.
+const (
+	GPUFlagGres        = "gres"
+	GPUFlagGPUsPerNode = "gpus-per-node"
+	GPUFlagGPUs        = "gpus"
+)

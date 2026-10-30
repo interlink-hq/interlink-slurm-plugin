@@ -429,6 +429,10 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | Flavors | Map of flavor configurations. Each flavor can specify CPUDefault, MemoryDefault, UID, and SlurmFlags. See Flavor System and UID Configuration sections for details |
 | DefaultFlavor | Name of the default flavor to use when no explicit flavor is specified and no auto-detection applies |
 | SocketDirRoot | Optional; empty (the default) turns it off. Every job creates `<SocketDirRoot>/<first 12 hex digits of the pod UID>`, mode 0700, for the pod's unix sockets and exports it as `INTERLINK_SOCKET_DIR`; every container gets it bound at the same path, with that variable set. The plugin reports it to interLink once the job runs, so the shadow tunnel can forward to sockets in it. Requirements: a shared filesystem that the job and ssh sessions on the compute node both see, never a node-local `/tmp`; an absolute path of at most 79 bytes, so that the longest socket path, `<SocketDirRoot>/<12 hex digits>/fwd-65535.sock`, fits in the 107 bytes of a unix socket path; owned by the account the jobs run as, mode 0700, never writable by other accounts. A job that cannot create its directory itself fails rather than use one somebody else created. The job removes its directory when it exits, and the plugin removes it again when the pod is deleted, which only works if the plugin sees the root at the same path: put it inside the filesystem the plugin shares with the site for `DataRootFolder`, or a job killed before its exit trap runs leaves its directory behind. Not for deployments where jobs run under more than one UID (`DefaultUID`, a flavor `UID` or a pod's `runAsUser`): a job whose account cannot write the root fails at start, so leave `SocketDirRoot` empty there |
+| GangSchedulingEnabled | true or false (the default). When true, `POST /createPodGroup` submits the pods of a group as one `sbatch --nodes=N` job and the ping answer lists the capability `pod-group-create`. `/create` is unchanged. See [Multi-pod jobs and site launchers](docs/docs/tutorial-admins/04-site-launchers.md) |
+| SiteScriptPath | The site file of multi-pod jobs: its top level runs at the start of every one, its `<name>-launcher` functions start them. Default `/etc/interlink/site/site.sh` |
+| GPUFlag | How a pod's GPU request reaches Slurm: `gres` (`--gres=gpu:N`, the default), `gpus-per-node` or `gpus` |
+| SiteTimeZone | IANA time zone Slurm prints its times in, used by `POST /estimate` to read `sbatch --test-only`. Empty: the plugin's own time zone |
 
 ### :wrench: Environment Variables list
 
@@ -445,6 +449,9 @@ within the SLURM config file.
 | CUSTOMKUBECONF | path to a service account kubeconfig |
 | TSOCKS | true or false, to use tsocks library allowing proxy networking. Working on Slurm sidecar at the moment. Overwrites Tsocks. |
 | TSOCKSPATH | path to your tsocks library. Overwrites TsocksPath. |
+| GANGSCHEDULINGENABLED | true or false. Overwrites GangSchedulingEnabled. |
+| SITESCRIPTPATH | path to the site file. Overwrites SiteScriptPath. |
+| GPUFLAG | `gres`, `gpus-per-node` or `gpus`. Overwrites GPUFlag. |
 
 
 ### :storage: HostPath Volume Support
