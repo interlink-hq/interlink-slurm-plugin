@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -35,10 +36,28 @@ type SidecarHandler struct {
 	Config SlurmConfig
 	JIDs   *map[string]*JidStruct
 	Ctx    context.Context
+
+	// Gang scheduling. GangTable holds the pod groups submitted as a single
+	// sbatch for the whole group, keyed by the group's name.
+	//
+	// GangMu serializes gang-scheduling operations against each other: gang-Create
+	// vs gang-Create (submission of a group) and gang-Create vs Delete
+	// (the refcount/last-holder decision). It does NOT make the JIDs map fully
+	// race-free: JIDs is also written by the pre-existing lockless writers in
+	// Status.go (StartTime/EndTime updates) and by the single-pod
+	// handleJidAndPodUid, neither of which takes GangMu. That pre-existing map
+	// raciness predates this change and is out of scope here; GangMu only ensures
+	// the gang code's own reads/writes and its scancel decision are consistent
+	// with one another.
+	GangTable map[string]*GangEntry
+	GangMu    sync.Mutex
 }
 
 var (
 	prefix string
+	// jidSubmitRe extracts the numeric SLURM job ID from sbatch output. Shared by
+	// handleJidAndPodUid (single-pod) and parseJIDFromSubmit (gang).
+	jidSubmitRe = regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
 )
 
 type JidStruct struct {
@@ -48,6 +67,13 @@ type JidStruct struct {
 	StartTime    time.Time `json:"StartTime"`
 	EndTime      time.Time `json:"EndTime"`
 	WorkDir      string    `json:"WorkDir"`
+	// Gang is true when this pod is a member of a co-scheduled gang (several
+	// pods sharing one SLURM job ID). It is set at back-fill time (stampJID) and
+	// rehydrated at startup by LoadJIDs from the per-pod gang.marker file, so it
+	// survives a plugin restart. It is used ONLY by the gang-only status
+	// divergence in Status.go; single-pod jobs leave it false and keep their
+	// exact previous status behaviour.
+	Gang bool `json:"Gang"`
 }
 
 // isValidWorkDir reports whether workDir is safe to use as a filesystem path.
@@ -578,7 +604,6 @@ func resolveFlavor(Ctx context.Context, config SlurmConfig, metadata metav1.Obje
 	}, nil
 }
 
-
 // normalizeVolumeFileContent converts a volume file string value to bytes, normalizing
 // literal backslash-n escape sequences (\n) to actual newline characters when the
 // string contains no real newlines. This handles a common misconfiguration where the
@@ -676,7 +701,16 @@ func (h *SidecarHandler) LoadJIDs() error {
 					log.G(h.Ctx).Debug(err)
 				}
 			}
-			JIDEntry := JidStruct{PodUID: string(podUID), PodNamespace: string(podNamespace), JID: string(JID), StartTime: StartedAt, EndTime: FinishedAt}
+			// Rehydrate the gang flag from the per-pod gang.marker written by
+			// stampJID, so gang members recovered after a restart still get the
+			// gang-only per-rank status divergence. Absent marker => single-pod
+			// (Gang=false), behaviour unchanged.
+			isGang := false
+			if _, err := os.Stat(path + entry.Name() + "/" + gangMarkerFile); err == nil {
+				isGang = true
+			}
+
+			JIDEntry := JidStruct{PodUID: string(podUID), PodNamespace: string(podNamespace), JID: string(JID), StartTime: StartedAt, EndTime: FinishedAt, Gang: isGang}
 			workDirBytes, err := os.ReadFile(path + entry.Name() + "/" + "WorkDir.path")
 			if err == nil && len(workDirBytes) > 0 {
 				workDir := strings.TrimSpace(string(workDirBytes))
@@ -1118,6 +1152,161 @@ func prepareMounts(
 	return mountedData, nil
 }
 
+// buildSbatchFlags assembles the deduplicated list of #SBATCH flags (without the
+// leading "#SBATCH ") from, in increasing priority: flavor flags, the
+// slurm-job.vk.io/flags annotation, the resolved UID, and the pod-spec CPU/memory
+// resources. It was extracted verbatim from produceSLURMScript so both the
+// single-pod path and the gang path (produceGangSLURMScript) share one source of
+// truth; the mpi-flags handling, which changes the commands and not the flags,
+// stays there. The only new behavior is suppressDefaultMem: when true (gang path on
+// sites that reject an explicit --mem), the fallback "--mem=1" is NOT
+// emitted when RAM is unset. Passing false reproduces the original behavior
+// exactly.
+func buildSbatchFlags(
+	Ctx context.Context,
+	config SlurmConfig,
+	pod v1.Pod,
+	metadata metav1.ObjectMeta,
+	resourceLimits ResourceLimits,
+	isDefaultCPU bool,
+	isDefaultRam bool,
+	flavor *FlavorResolution,
+	suppressDefaultMem bool,
+) []string {
+	cpuLimitSetFromFlags := false
+	memoryLimitSetFromFlags := false
+
+	var sbatchFlagsFromArgo []string
+
+	// Add flavor SLURM flags first (lowest priority)
+	if flavor != nil && len(flavor.SlurmFlags) > 0 {
+		log.G(Ctx).Infof("Applying %d SLURM flag(s) from flavor '%s'", len(flavor.SlurmFlags), flavor.FlavorName)
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, flavor.SlurmFlags...)
+	}
+
+	// Then process annotation flags (higher priority)
+	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
+		annotationFlags := splitSlurmFlags(slurmFlags)
+		for _, annotationFlag := range annotationFlags {
+			switch slurmFlagKey(annotationFlag) {
+			case "--cpus-per-task":
+				if !isDefaultCPU {
+					log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
+					continue
+				}
+				cpuLimitSetFromFlags = true
+			case "--mem":
+				if !isDefaultRam {
+					log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
+					continue
+				}
+				memoryLimitSetFromFlags = true
+			}
+
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlag)
+		}
+	}
+
+	// Process UID configuration with priority: pod securityContext > flavor > default
+	// RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
+	var uidValue *int64
+
+	// Start with default UID from global config
+	if config.DefaultUID != nil {
+		uidValue = config.DefaultUID
+		log.G(Ctx).Debugf("Using default UID: %d", *uidValue)
+	}
+
+	// Override with flavor UID if available
+	if flavor != nil && flavor.UID != nil {
+		uidValue = flavor.UID
+		log.G(Ctx).Infof("Using UID %d from flavor '%s'", *uidValue, flavor.FlavorName)
+	}
+
+	// Override with pod securityContext.runAsUser if present (Kubernetes standard)
+	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil {
+		runAsUser := *pod.Spec.SecurityContext.RunAsUser
+		if runAsUser < 0 {
+			log.G(Ctx).Warningf("Invalid RunAsUser '%d' in pod securityContext (must be non-negative), ignoring", runAsUser)
+		} else {
+			uidValue = &runAsUser
+			log.G(Ctx).Infof("Using UID %d from pod spec.securityContext.runAsUser", runAsUser)
+		}
+	}
+
+	// Add UID flag to sbatch if configured
+	if uidValue != nil {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, fmt.Sprintf("--uid=%d", *uidValue))
+		log.G(Ctx).Infof("Setting job UID to %d", *uidValue)
+	}
+
+	// Add CPU/memory limits as flags (highest priority)
+	if !isDefaultCPU {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
+		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
+	} else {
+		log.G(Ctx).Info("Using default CPU limit of 1")
+		if !cpuLimitSetFromFlags {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
+		}
+	}
+
+	if !isDefaultRam {
+		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
+	} else {
+		log.G(Ctx).Info("Using default Memory limit of 1MB")
+		// Gang path suppresses the --mem=1 fallback: some sites reject an
+		// explicit --mem.
+		if !memoryLimitSetFromFlags && !suppressDefaultMem {
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
+		}
+	}
+
+	// Map GPU resources from the pod spec (nvidia.com/gpu, amd.com/gpu) to the
+	// site's GPU flag (config GPUFlag, --gres by default). An explicit GPU request
+	// coming from the flavor or from the annotation flags always wins: it can name a
+	// specific model (--gres gpu:nvidia-h100:2), which the pod spec cannot express.
+	if gpuCount := detectGPUResources(Ctx, pod.Spec.Containers); gpuCount > 0 {
+		gpuGres := "gpu:" + strconv.FormatInt(gpuCount, 10)
+
+		switch {
+		case slices.ContainsFunc(sbatchFlagsFromArgo, declaresGPUs):
+			log.G(Ctx).Infof("Ignoring the %d GPU(s) requested in the pod resources, GPUs are already requested through SLURM flags", gpuCount)
+		case config.GPUFlag == GPUFlagGPUsPerNode || config.GPUFlag == GPUFlagGPUs:
+			flag := "--" + config.GPUFlag + "=" + strconv.FormatInt(gpuCount, 10)
+			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, flag)
+			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with %s", gpuCount, flag)
+		default:
+			// Merge into an existing non-GPU --gres (e.g. --gres=lscratch:10) instead
+			// of appending a second one, since deduplication keeps only one per flag.
+			merged := false
+			for i, slurmFlag := range sbatchFlagsFromArgo {
+				if slurmFlagKey(slurmFlag) != "--gres" {
+					continue
+				}
+				if existing := slurmFlagValue(slurmFlag); existing != "" {
+					sbatchFlagsFromArgo[i] = "--gres=" + existing + "," + gpuGres
+				} else {
+					sbatchFlagsFromArgo[i] = "--gres=" + gpuGres
+				}
+				merged = true
+				break
+			}
+			if !merged {
+				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--gres="+gpuGres)
+			}
+			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with --gres=%s", gpuCount, gpuGres)
+		}
+	}
+
+	// Deduplicate flags - later flags override earlier ones
+	// Priority order: flavor flags < annotation flags < pod spec resource flags
+	sbatchFlagsFromArgo = deduplicateSlurmFlags(sbatchFlagsFromArgo)
+	log.G(Ctx).Debugf("Final deduplicated SLURM flags: %v", sbatchFlagsFromArgo)
+
+	return sbatchFlagsFromArgo
+}
+
 // produceSLURMScript generates a SLURM script according to data collected.
 // It must be called after ENVS and mounts are already set up since
 // it relies on "prefix" variable being populated with needed data and ENVS passed in the commands parameter.
@@ -1200,40 +1389,7 @@ func produceSLURMScript(
 		log.G(Ctx).Debug("--- Created with correct permission file ", path, "/job.sh")
 	}
 
-	cpuLimitSetFromFlags := false
-	memoryLimitSetFromFlags := false
-
-	var sbatchFlagsFromArgo []string
 	sbatchFlagsAsString := ""
-
-	// Add flavor SLURM flags first (lowest priority)
-	if flavor != nil && len(flavor.SlurmFlags) > 0 {
-		log.G(Ctx).Infof("Applying %d SLURM flag(s) from flavor '%s'", len(flavor.SlurmFlags), flavor.FlavorName)
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, flavor.SlurmFlags...)
-	}
-
-	// Then process annotation flags (higher priority)
-	if slurmFlags, ok := metadata.Annotations["slurm-job.vk.io/flags"]; ok {
-		annotationFlags := splitSlurmFlags(slurmFlags)
-		for _, annotationFlag := range annotationFlags {
-			switch slurmFlagKey(annotationFlag) {
-			case "--cpus-per-task":
-				if !isDefaultCPU {
-					log.G(Ctx).Info("Ignoring --cpus-per-task flag from annotations, since it is set already")
-					continue
-				}
-				cpuLimitSetFromFlags = true
-			case "--mem":
-				if !isDefaultRam {
-					log.G(Ctx).Info("Ignoring --mem flag from annotations, since it is set already")
-					continue
-				}
-				memoryLimitSetFromFlags = true
-			}
-
-			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, annotationFlag)
-		}
-	}
 
 	if mpiFlags, ok := metadata.Annotations["slurm-job.vk.io/mpi-flags"]; ok {
 		if mpiFlags != "true" {
@@ -1244,95 +1400,11 @@ func produceSLURMScript(
 		}
 	}
 
-	// Process UID configuration with priority: pod securityContext > flavor > default
-	// RFC: https://github.com/interlink-hq/interlink-slurm-plugin/discussions/58
-	var uidValue *int64
-
-	// Start with default UID from global config
-	if config.DefaultUID != nil {
-		uidValue = config.DefaultUID
-		log.G(Ctx).Debugf("Using default UID: %d", *uidValue)
-	}
-
-	// Override with flavor UID if available
-	if flavor != nil && flavor.UID != nil {
-		uidValue = flavor.UID
-		log.G(Ctx).Infof("Using UID %d from flavor '%s'", *uidValue, flavor.FlavorName)
-	}
-
-	// Override with pod securityContext.runAsUser if present (Kubernetes standard)
-	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.RunAsUser != nil {
-		runAsUser := *pod.Spec.SecurityContext.RunAsUser
-		if runAsUser < 0 {
-			log.G(Ctx).Warningf("Invalid RunAsUser '%d' in pod securityContext (must be non-negative), ignoring", runAsUser)
-		} else {
-			uidValue = &runAsUser
-			log.G(Ctx).Infof("Using UID %d from pod spec.securityContext.runAsUser", runAsUser)
-		}
-	}
-
-	// Add UID flag to sbatch if configured
-	if uidValue != nil {
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, fmt.Sprintf("--uid=%d", *uidValue))
-		log.G(Ctx).Infof("Setting job UID to %d", *uidValue)
-	}
-
-	// Add CPU/memory limits as flags (highest priority)
-	if !isDefaultCPU {
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task="+strconv.FormatInt(resourceLimits.CPU, 10))
-		log.G(Ctx).Info("Using CPU limit of " + strconv.FormatInt(resourceLimits.CPU, 10))
-	} else {
-		log.G(Ctx).Info("Using default CPU limit of 1")
-		if !cpuLimitSetFromFlags {
-			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--cpus-per-task=1")
-		}
-	}
-
-	if !isDefaultRam {
-		sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem="+strconv.FormatInt(resourceLimits.Memory/1024/1024, 10))
-	} else {
-		log.G(Ctx).Info("Using default Memory limit of 1MB")
-		if !memoryLimitSetFromFlags {
-			sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--mem=1")
-		}
-	}
-
-	// Map GPU resources from the pod spec (nvidia.com/gpu, amd.com/gpu) to --gres.
-	// An explicit GPU request coming from the flavor or from the annotation flags
-	// always wins: it can name a specific model (--gres gpu:nvidia-h100:2), which
-	// the pod spec cannot express.
-	if gpuCount := detectGPUResources(Ctx, pod.Spec.Containers); gpuCount > 0 {
-		gpuGres := "gpu:" + strconv.FormatInt(gpuCount, 10)
-
-		if slices.ContainsFunc(sbatchFlagsFromArgo, declaresGPUs) {
-			log.G(Ctx).Infof("Ignoring the %d GPU(s) requested in the pod resources, GPUs are already requested through SLURM flags", gpuCount)
-		} else {
-			// Merge into an existing non-GPU --gres (e.g. --gres=lscratch:10) instead
-			// of appending a second one, since deduplication keeps only one per flag.
-			merged := false
-			for i, slurmFlag := range sbatchFlagsFromArgo {
-				if slurmFlagKey(slurmFlag) != "--gres" {
-					continue
-				}
-				if existing := slurmFlagValue(slurmFlag); existing != "" {
-					sbatchFlagsFromArgo[i] = "--gres=" + existing + "," + gpuGres
-				} else {
-					sbatchFlagsFromArgo[i] = "--gres=" + gpuGres
-				}
-				merged = true
-				break
-			}
-			if !merged {
-				sbatchFlagsFromArgo = append(sbatchFlagsFromArgo, "--gres="+gpuGres)
-			}
-			log.G(Ctx).Infof("Requesting %d GPU(s) from the pod resources with --gres=%s", gpuCount, gpuGres)
-		}
-	}
-
-	// Deduplicate flags - later flags override earlier ones
-	// Priority order: flavor flags < annotation flags < pod spec resource flags
-	sbatchFlagsFromArgo = deduplicateSlurmFlags(sbatchFlagsFromArgo)
-	log.G(Ctx).Debugf("Final deduplicated SLURM flags: %v", sbatchFlagsFromArgo)
+	// Assemble the #SBATCH flags (flavor < annotations < pod-spec resources).
+	// Extracted into buildSbatchFlags so the gang path can reuse the identical
+	// assembly. suppressDefaultMem=false here keeps single-pod output byte-for-byte
+	// identical to the pre-refactor behavior.
+	sbatchFlagsFromArgo := buildSbatchFlags(Ctx, config, pod, metadata, resourceLimits, isDefaultCPU, isDefaultRam, flavor, false)
 
 	for _, slurmFlag := range sbatchFlagsFromArgo {
 		if slurmFlag != "" {
@@ -1743,12 +1815,21 @@ func SLURMBatchSubmit(Ctx context.Context, config SlurmConfig, path string) (str
 
 	if execReturn.Stderr != "" {
 		log.G(Ctx).Error("Could not run sbatch: " + execReturn.Stderr)
-		return "", errors.New(execReturn.Stderr)
+		return "", &SbatchError{Stderr: execReturn.Stderr, ExitCode: execReturn.ExitCode}
 	} else {
 		log.G(Ctx).Debug("Job submitted")
 	}
 	return string(execReturn.Stdout), nil
 }
+
+// SbatchError is an sbatch that wrote to stderr. Its text is what sbatch wrote.
+// ExitCode is 255 when ssh, not sbatch, failed.
+type SbatchError struct {
+	Stderr   string
+	ExitCode int
+}
+
+func (e *SbatchError) Error() string { return e.Stderr }
 
 // handleJidAndPodUid creates a JID file to store the Job ID of the submitted job.
 // The output parameter must be the output of SLURMBatchSubmit function and the path
@@ -1761,8 +1842,7 @@ func handleJidAndPodUid(Ctx context.Context, pod v1.Pod, JIDs *map[string]*JidSt
 	if err := os.MkdirAll(filesPath, 0o755); err != nil {
 		return "", err
 	}
-	r := regexp.MustCompile(`Submitted batch job (?P<jid>\d+)`)
-	jid := r.FindStringSubmatch(output)
+	jid := jidSubmitRe.FindStringSubmatch(output)
 	fJID, err := os.Create(filesPath + "/JobID.jid")
 	if err != nil {
 		log.G(Ctx).Error("Can't create jid_file")
@@ -1823,30 +1903,73 @@ func removeJID(podUID string, JIDs *map[string]*JidStruct) {
 	delete(*JIDs, podUID)
 }
 
-// deleteContainer checks if a Job has not yet been deleted and, in case, calls the scancel command to abort the job execution.
-// It then removes the JID from the main JIDs structure and all the related files on the disk.
-// Returns the first encountered error.
-func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JIDs *map[string]*JidStruct, path string) error {
-	log.G(Ctx).Info("- Deleting Job for pod " + podUID)
-	span := trace.SpanFromContext(Ctx)
-	if checkIfJidExists(Ctx, JIDs, podUID) {
-		_, err := exec.Command(config.Scancelpath, (*JIDs)[podUID].JID).Output()
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return err
-		} else {
-			log.G(Ctx).Info("- Deleted Job ", (*JIDs)[podUID].JID)
+// countJIDReferences returns how many JIDs entries currently carry the given
+// SLURM job ID. For a single-pod job that is always 1 (so scancel proceeds
+// normally). For a gang, N members share one JID, so the count decreases as
+// each member is deleted; scancel is deferred until only the last remains.
+// An empty jid returns 0 (never scancel an empty ID).
+func countJIDReferences(jids *map[string]*JidStruct, jid string) int {
+	if jid == "" {
+		return 0
+	}
+	n := 0
+	for _, entry := range *jids {
+		if entry != nil && entry.JID == jid {
+			n++
 		}
 	}
+	return n
+}
+
+// scancelDecideAndRemoveJID performs ONLY the fast, must-be-consistent part of a
+// delete: read the pod's JID (if any), decide whether this delete is the
+// last-holder that should scancel the (possibly gang-shared) job, run scancel in
+// that case, and drop the JID from the map. It does NOT touch the filesystem, so
+// callers can hold a lock (h.GangMu) across it without stalling on RemoveAll/sleep.
+//
+// Gang refcount: several pods may share one SLURM job ID. scancel only when this
+// is the LAST pod still referencing that JID; otherwise cancelling would kill the
+// whole co-allocated gang while siblings are still live. countJIDReferences
+// returns 1 for the ordinary single-pod case, so non-gang behaviour (always
+// scancel) is unchanged. Because this runs under the same lock as the gang
+// back-fill and every other delete's decision, exactly one delete sees count==1
+// and issues the single scancel (no double scancel, no missed scancel).
+//
+// Returns the captured jid (empty if the pod had no JID entry) and an error if
+// scancel failed.
+func scancelDecideAndRemoveJID(ctx context.Context, config SlurmConfig, podUID string, jids *map[string]*JidStruct) (string, error) {
 	// Not every pod that reaches here has a job: sbatch may have been rejected, or
-	// the plugin may have restarted since submission. Both leave no JIDs entry, and
+	// the plugin may have restarted since submission. Both leave no jids entry, and
 	// dereferencing the nil *JidStruct panics the whole request handler.
 	jid := ""
-	if entry := (*JIDs)[podUID]; entry != nil {
+	if entry := (*jids)[podUID]; entry != nil {
 		jid = entry.JID
+		if countJIDReferences(jids, jid) <= 1 {
+			if err := scancelJob(ctx, config, jid); err != nil {
+				return jid, err
+			}
+		} else {
+			log.G(ctx).Infof("- Skipping scancel of shared gang Job %s: other pods still reference it", jid)
+		}
 	}
-	removeJID(podUID, JIDs)
+	removeJID(podUID, jids)
+	return jid, nil
+}
 
+// scancelJob cancels a SLURM job.
+func scancelJob(ctx context.Context, config SlurmConfig, jid string) error {
+	if _, err := exec.Command(config.Scancelpath, jid).Output(); err != nil { //nolint:gosec // scancel from the site config, jid is the numeric job ID
+		log.G(ctx).Error(err)
+		return err
+	}
+	log.G(ctx).Info("- Deleted Job ", jid)
+	return nil
+}
+
+// removeJobFilesWithRetry removes a pod's on-disk dir, retrying once after a
+// short sleep because logs may still be open in follow mode. This is the SLOW
+// part of a delete (it can sleep 5s) and MUST run without any lock held.
+func removeJobFilesWithRetry(ctx context.Context, span trace.Span, podUID, jid, path string) error {
 	errFirstAttempt := os.RemoveAll(path)
 	span.SetAttributes(
 		attribute.String("delete.pod.uid", podUID),
@@ -1854,25 +1977,43 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 	)
 
 	if errFirstAttempt != nil {
-		log.G(Ctx).Debug("Attempt 1 of deletion failed, not really an error! Probably log file still opened, waiting for close... Error: ", errFirstAttempt)
+		log.G(ctx).Debug("Attempt 1 of deletion failed, not really an error! Probably log file still opened, waiting for close... Error: ", errFirstAttempt)
 		// We expect first rm of directory to possibly fail, in case for eg logs are in follow mode, so opened. The removeJID will end the follow loop,
 		// maximum after the loop period of 4s. So we ignore the error and attempt a second time after being sure the loop has ended.
 		time.Sleep(5 * time.Second)
 
 		errSecondAttempt := os.RemoveAll(path)
 		if errSecondAttempt != nil {
-			log.G(Ctx).Error("Attempt 2 of deletion failed: ", errSecondAttempt)
+			log.G(ctx).Error("Attempt 2 of deletion failed: ", errSecondAttempt)
 			span.AddEvent("Failed to delete SLURM Job " + jid + " for Pod " + podUID)
 			return errSecondAttempt
-		} else {
-			log.G(Ctx).Info("Attempt 2 of deletion succeeded!")
 		}
+		log.G(ctx).Info("Attempt 2 of deletion succeeded!")
 	}
 	span.AddEvent("SLURM Job " + jid + " for Pod " + podUID + " successfully deleted")
 
 	// We ignore the deletion error because it is already logged, and because InterLink can still be opening files (eg logs in follow mode).
 	// Once InterLink will not use files, all files will be deleted then.
 	return nil
+}
+
+// deleteContainer checks if a Job has not yet been deleted and, in case, calls the scancel command to abort the job execution.
+// It then removes the JID from the main JIDs structure and all the related files on the disk.
+// Returns the first encountered error.
+//
+// This self-contained form is used by the single-pod Create.go error-recovery
+// path, where no lock is held and the pod is not part of a gang. The per-pod
+// Delete handler instead calls the two halves separately (scancelDecideAndRemoveJID
+// under h.GangMu, then removeJobFilesWithRetry unlocked) so the 5s retry sleep
+// never stalls concurrent gang operations.
+func deleteContainer(ctx context.Context, config SlurmConfig, podUID string, jids *map[string]*JidStruct, path string) error {
+	log.G(ctx).Info("- Deleting Job for pod " + podUID)
+	span := trace.SpanFromContext(ctx)
+	jid, err := scancelDecideAndRemoveJID(ctx, config, podUID, jids)
+	if err != nil {
+		return err
+	}
+	return removeJobFilesWithRetry(ctx, span, podUID, jid, path)
 }
 
 // For simple volume type like configMap, secret, projectedVolumeMap.
@@ -2117,7 +2258,7 @@ func checkIfJidExists(ctx context.Context, JIDs *map[string]*JidStruct, uid stri
 // code can still read 0. OOM gets 137, as an OOM-killed container in Kubernetes.
 func failedJobExitCode(state string) (int32, bool) {
 	switch state {
-	case "OOM":
+	case slurmStateOOM:
 		return 137, true
 	case "F", "TO", "PR":
 		return 1, true

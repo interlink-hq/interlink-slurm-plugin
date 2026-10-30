@@ -50,12 +50,23 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
+	// Drop this pod from its gang entry (if any) before deleting the container.
+	// interLink /delete is per-pod, so the N members of a gang arrive as N
+	// separate deletes. Each is removed from the entry, which is dropped once
+	// empty; the shared JID is refcounted below and scancelled only on the last
+	// member. A member still buffered by /create has no JID: nothing is
+	// cancelled. A no-op for non-gang pods.
+	h.removeGangMemberOnDelete(spanCtx, string(pod.UID))
 	// Resolve the job working directory.
 	// Priority: 1) in-memory JIDs cache  2) pod annotation (handles wiped cache)
 	workDir := getJobWorkDir(h.Config, pod.Annotations, pod.Namespace, string(pod.UID))
+	// Under GangMu: the deletes of a gang's members arrive together and remove
+	// their JIDs entries under it.
+	h.GangMu.Lock()
 	if jid, ok := (*h.JIDs)[string(pod.UID)]; ok && jid.WorkDir != "" {
 		workDir = jid.WorkDir
 	}
+	h.GangMu.Unlock()
 
 	// When the annotation "slurm-job.vk.io/no-clean-workdir" is "true" and a
 	// custom workdir is in use, preserve the job output directory after deletion.
@@ -69,8 +80,23 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		containerDeletePath = filesPath
 	}
 
-	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, containerDeletePath)
+	// Split the delete so GangMu is held ONLY for the fast, must-be-consistent
+	// scancel decision (refcount read + scancel + removeJID), and RELEASED before
+	// the slow filesystem cleanup (RemoveAll, which can sleep 5s in follow mode).
+	// Holding GangMu across that sleep would stall every concurrent gang
+	// Create/Delete/sweeper. Under the narrow lock exactly one delete sees the JID
+	// refcount reach 1 and issues the single scancel.
+	h.GangMu.Lock()
+	jid, scancelErr := scancelDecideAndRemoveJID(spanCtx, h.Config, string(pod.UID), h.JIDs)
+	h.GangMu.Unlock()
+	if scancelErr != nil {
+		statusCode = http.StatusInternalServerError
+		h.handleError(spanCtx, w, statusCode, scancelErr)
+		return
+	}
 
+	// Filesystem cleanup runs unlocked.
+	err = removeJobFilesWithRetry(spanCtx, span, string(pod.UID), jid, containerDeletePath)
 	if err != nil {
 		statusCode = http.StatusInternalServerError
 		h.handleError(spanCtx, w, statusCode, err)

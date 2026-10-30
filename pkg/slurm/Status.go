@@ -275,6 +275,25 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
+							// Gang-only per-rank divergence (see the R branch for the full
+							// rationale): while the shared job is CG, a member whose own
+							// container already ended is reported Terminated on its own pod.
+							// Non-gang pods skip this and keep the unchanged Running report.
+							if (*h.JIDs)[uid].Gang {
+								if exitCode, terminated, rerr := readMemberContainerExitCode(path, ct.Name); rerr == nil && terminated {
+									containerStatuses = append(containerStatuses, v1.ContainerStatus{
+										Name: ct.Name,
+										State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{
+											StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
+											FinishedAt: metav1.Time{Time: timeNow},
+											ExitCode:   exitCode,
+										}},
+										Ready: false,
+									})
+									continue
+								}
+							}
+
 							// Check probe status for container readiness
 							readinessCount, _, startupCount, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
@@ -355,6 +374,33 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
+							// Gang-only per-rank divergence: the shared squeue JID is R
+							// (Running) for the whole co-scheduled job, but each gang member
+							// runs its OWN container on its OWN node and writes its OWN
+							// run-<ctn>.status when that container ends. If THIS member's
+							// container has already terminated, report it Terminated on this
+							// pod alone (Failed if non-zero) even though the gang job is still
+							// R, so a dead rank becomes visible on its own pod without any
+							// scancel. Non-gang pods (Gang=false) never enter this block, so
+							// the single-pod Running behaviour below is byte-for-byte unchanged.
+							if (*h.JIDs)[uid].Gang {
+								if exitCode, terminated, rerr := readMemberContainerExitCode(path, ct.Name); rerr == nil && terminated {
+									if (*h.JIDs)[uid].StartTime.IsZero() {
+										(*h.JIDs)[uid].StartTime = timeNow
+									}
+									containerStatuses = append(containerStatuses, v1.ContainerStatus{
+										Name: ct.Name,
+										State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{
+											StartedAt:  metav1.Time{Time: (*h.JIDs)[uid].StartTime},
+											FinishedAt: metav1.Time{Time: timeNow},
+											ExitCode:   exitCode,
+										}},
+										Ready: false,
+									})
+									continue
+								}
+							}
+
 							// Check probe status for container readiness
 							readinessCount, livenessCount, startupCount, err := loadProbeMetadata(path, ct.Name)
 							isReady := false
@@ -616,8 +662,23 @@ func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
 		copy(taints, h.Config.Taints)
 		resp.Taints = &taints
 	}
+	// What the plugin offers follows its configuration, not the script.
+	resp.Capabilities = pluginCapabilities(h.Config)
 
 	return resp, nil
+}
+
+// CapabilityPodGroup is listed in the ping answer when the pods of one Kueue pod
+// group (label kueue.x-k8s.io/pod-group-name, annotation
+// kueue.x-k8s.io/pod-group-total-count), created one by one, run as one job.
+const CapabilityPodGroup = "pod-group"
+
+// pluginCapabilities lists what the ping answer advertises.
+func pluginCapabilities(config SlurmConfig) []string {
+	if config.GangSchedulingEnabled {
+		return []string{CapabilityPodGroup, CapabilityPodGroupCreate}
+	}
+	return nil
 }
 
 // getClusterResourcesFromScript executes the custom script at
