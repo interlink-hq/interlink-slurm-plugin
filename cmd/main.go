@@ -24,7 +24,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	slurm "github.com/intertwin-eu/interlink-slurm-plugin/pkg/slurm"
+	slurm "github.com/interlink-hq/interlink-slurm-plugin/pkg/slurm"
 
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
 	"github.com/virtual-kubelet/virtual-kubelet/trace/opentelemetry"

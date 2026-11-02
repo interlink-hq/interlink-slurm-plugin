@@ -24,53 +24,11 @@ import (
 	trace "go.opentelemetry.io/otel/trace"
 )
 
-// Reason and message strings surfaced in ContainerStateTerminated for SLURM-specific
-// termination causes.  Defining them as constants lets tests reference the actual values
-// used at runtime rather than independently-maintained string literals.
-const (
-	// ReasonSlurmJobTimeout is set on every container when the SLURM job was cancelled
-	// because it reached its configured time limit (state "TO").  The Virtual Kubelet
-	// propagates this reason to the pod status, setting the pod phase to Failed so that
-	// the pod's restart policy or owning controller (Deployment, Job, …) can act on it.
-	ReasonSlurmJobTimeout  = "SlurmJobTimeout"
-	MessageSlurmJobTimeout = "SLURM job reached its time limit and was terminated"
-
-	// ReasonOOMKilled matches the Kubernetes convention for out-of-memory terminations
-	// (state "OOM") so that existing tooling can identify OOM-killed containers.
-	ReasonOOMKilled  = "OOMKilled"
-	MessageOOMKilled = "SLURM job was killed due to out-of-memory condition"
-
-	// SlurmStatePattern is the regex alternation used to extract the SLURM job state
-	// from a squeue output line.  Longer alternatives (e.g. ST, OOM) are listed before
-	// shorter prefixes (S) so the regex engine picks the correct token.
-	SlurmStatePattern = `(CD|CG|F|OOM|PD|PR|R|ST|S|TO)`
-
-	// SlurmExitCodePattern is the regex used to extract the numeric exit/signal code
-	// from a squeue output line (format "<exit>:<signal>  <state>").
-	SlurmExitCodePattern = `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
-)
-
-// terminatedContainerStatus builds a ContainerStatus with a Terminated state for a
-// container that has finished (successfully or otherwise).  reason and message are
-// surfaced verbatim in ContainerStateTerminated; pass empty strings when no
-// named reason is needed (e.g. for ordinary CD/F/ST/default cases).
-func terminatedContainerStatus(ctName string, startTime, finishTime time.Time, exitCode int32, reason, message string) v1.ContainerStatus {
-	return v1.ContainerStatus{
-		Name: ctName,
-		State: v1.ContainerState{
-			Terminated: &v1.ContainerStateTerminated{
-				StartedAt:  metav1.Time{Time: startTime},
-				FinishedAt: metav1.Time{Time: finishTime},
-				ExitCode:   exitCode,
-				Reason:     reason,
-				Message:    message,
-			},
-		},
-		Ready: false,
-	}
-}
-
-// StatusHandler performs a squeue --me and uses regular expressions to get the running Jobs' status
+// StatusHandler is the HTTP handler for pod status queries. It executes 'squeue --me' to retrieve
+// SLURM job states and translates them into Kubernetes pod/container statuses. The handler maps
+// SLURM states (R, PD, CD, F, etc.) to Kubernetes states (Running, Waiting, Terminated) and tracks
+// container readiness based on probe results. Status is cached for 10 seconds to reduce SLURM load.
+// If no pods are requested, it returns 'sinfo -s' output for cluster information.
 func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UnixMicro()
 	tracer := otel.Tracer("interlink-API")
@@ -104,71 +62,53 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If no pods are requested, return cluster resource availability as JSON.
-	// This path is triggered by the interlink-api ping call so that the virtual
-	// kubelet can update the node's advertised capacity from the SLURM cluster state.
+	// If no pods are requested, return sinfo -s output
 	if len(req) == 0 {
-		resources, err := h.getClusterResources()
+		sinfoOutput, err := h.getSinfoSummary()
 		if err != nil {
-			log.G(h.Ctx).Warning("Failed to query SLURM cluster resources: ", err)
+			log.G(h.Ctx).Warning("Failed to execute sinfo command: ", err)
 			statusCode = http.StatusInternalServerError
 			h.handleError(spanCtx, w, statusCode, err)
 			return
 		}
 
-		resourceBytes, err := json.Marshal(resources)
-		if err != nil {
-			statusCode = http.StatusInternalServerError
-			h.handleError(spanCtx, w, statusCode, err)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
+		// Return sinfo output as plain text
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		w.Write(resourceBytes)
-		log.G(h.Ctx).Info("Returned PingResponse with cluster resource availability (ping path)")
+		w.Write([]byte(sinfoOutput))
+		log.G(h.Ctx).Info("Returned sinfo -s output for empty pod list")
 		return
 	}
 
-	cached, stale := cachedStatuses(req, timeNow)
-	if len(stale) > 0 {
-		if accountCheckDue(timeNow) {
-			cmd := []string{"--me"}
-			shell := exec.ExecTask{
-				Command: h.Config.Squeuepath,
-				Args:    cmd,
-				Shell:   true,
-			}
-			execReturn, _ := shell.Execute()
-			execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
+	if timeNow.Sub(timer) >= time.Second*10 {
+		cmd := []string{"--me"}
+		shell := exec.ExecTask{
+			Command: h.Config.Squeuepath,
+			Args:    cmd,
+			Shell:   true,
+		}
+		execReturn, _ := shell.Execute()
+		execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
 
-			if execReturn.Stderr != "" {
-				statusCode = http.StatusInternalServerError
-				h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
-				return
-			}
-			accountCheckPassed(timeNow)
+		if execReturn.Stderr != "" {
+			statusCode = http.StatusInternalServerError
+			h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
+			return
 		}
 
-		podDirs := make(map[string]string, len(stale))
-		for _, pod := range stale {
+		for _, pod := range req {
 			containerStatuses := []v1.ContainerStatus{}
 			uid := string(pod.UID)
-			// Resolve the job working directory: prefer in-memory cache, then
-			// fall back to the pod annotation so the path is correct even when
-			// the JIDs cache was wiped (e.g. after a sidecar restart where
-			// LoadJIDs failed or the WorkDir.path file was missing on disk).
-			path := getJobWorkDir(h.Config, pod.Annotations, pod.Namespace, uid)
-			if jid, ok := (*h.JIDs)[uid]; ok && jid.WorkDir != "" {
-				path = jid.WorkDir
-			}
-			podDirs[uid] = path
+			path := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
 			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
+				// With test, exit_code is better than DerivedEC, because for canceled jobs, it gives 15 while DerivedEC gives 0.
+				// states=all or else some jobs are hidden, then it is impossible to get job exit code.
+				cmd := []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j ", (*h.JIDs)[uid].JID}
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
-					Args:    squeueStatusArgs((*h.JIDs)[uid].JID),
+					Args:    cmd,
 					// true to be able to add prefix to squeue, but this is ugly
 					Shell: true,
 				}
@@ -223,7 +163,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 
 					resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
 				} else {
-					statePattern := SlurmStatePattern
+					statePattern := `(CD|CG|F|PD|PR|R|S|ST)`
 					stateRe := regexp.MustCompile(statePattern)
 					stateMatch := stateRe.FindString(execReturn.Stdout)
 
@@ -231,7 +171,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					// Magic REGEX that matches any number from 0 to 255 included. Eg: match 2, 255, does not match 256, 02, -1.
 					// Adds whitespace because otherwise it will take too few letter. Eg: for "123", it will take only "1". With \s, it will take "123 ".
 					// Then we only keep the number part, not the last space.
-					exitCodePattern := SlurmExitCodePattern
+					exitCodePattern := `([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\s`
 					exitCodeRe := regexp.MustCompile(exitCodePattern)
 					// Eg: exitCodeMatchSlice = "123 "
 					exitCodeMatchSlice := exitCodeRe.FindStringSubmatch(execReturn.Stdout)
@@ -254,7 +194,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -276,17 +216,12 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, _, startupCount, err := loadProbeMetadata(path, ct.Name)
+							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
 							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
 							} else {
-								// Container is ready only if:
-								// 1. Startup probes have completed (or none configured), AND
-								// 2. Readiness probes have succeeded (or none configured)
-								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
-								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
-								isReady = startupComplete && readinessOK
+								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
 							}
 
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
@@ -307,7 +242,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -334,7 +269,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -356,29 +291,15 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
-							readinessCount, livenessCount, startupCount, err := loadProbeMetadata(path, ct.Name)
-							isReady := false
+							readinessCount, _, _, err := loadProbeMetadata(path, ct.Name)
+							isReady := true
 							if err != nil {
 								log.G(h.Ctx).Debug("Failed to load probe metadata for container ", ct.Name, ": ", err)
 							} else {
-								// Container is ready only if:
-								// 1. Startup probes have completed (or none configured), AND
-								// 2. Readiness probes have succeeded (or none configured)
-								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
-								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
-								livenessOK := checkContainerLiveness(spanCtx, h.Config, path, ct.Name, livenessCount)
-								isReady = startupComplete && readinessOK && livenessOK
-
-								log.G(h.Ctx).Debugf("%sContainer %s: startupComplete=%v, readinessOK=%v, liveneessOK=%v, isReady=%v", sessionContextMessage, ct.Name, startupComplete, readinessOK, livenessOK, isReady)
+								isReady = checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
 							}
 
-							var containerStatus v1.ContainerStatus
-
-							if isReady {
-								containerStatus = v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
-							} else {
-								containerStatus = v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Waiting: &v1.ContainerStateWaiting{Reason: "Waiting for probes to be ready."}}, Ready: isReady}
-							}
+							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}}}, Ready: isReady}
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
@@ -400,58 +321,12 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
 							}
 							containerStatus := v1.ContainerStatus{Name: ct.Name, State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{StartedAt: metav1.Time{Time: (*h.JIDs)[uid].StartTime}, FinishedAt: metav1.Time{Time: (*h.JIDs)[uid].EndTime}, ExitCode: exitCode}}, Ready: false}
-							containerStatuses = append(containerStatuses, containerStatus)
-						}
-						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
-					case "TO":
-						// SLURM job reached its time limit. Report containers as Terminated with
-						// reason SlurmJobTimeout so the Virtual Kubelet sets the pod phase to Failed
-						// and the pod's restart/owning-controller policy handles resubmission.
-						if (*h.JIDs)[uid].EndTime.IsZero() {
-							(*h.JIDs)[uid].EndTime = timeNow
-							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
-							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
-							}
-						}
-						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); reporting containers as terminated",
-							sessionContextMessage, (*h.JIDs)[uid].JID, pod.Namespace, pod.Name)
-						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
-							if err != nil {
-								log.G(h.Ctx).Error(err)
-								continue
-							}
-							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonSlurmJobTimeout, MessageSlurmJobTimeout)
-							containerStatuses = append(containerStatuses, containerStatus)
-						}
-						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
-					case "OOM":
-						// SLURM job was killed due to an out-of-memory condition.
-						if (*h.JIDs)[uid].EndTime.IsZero() {
-							(*h.JIDs)[uid].EndTime = timeNow
-							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
-							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
-							}
-						}
-						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
-							if err != nil {
-								log.G(h.Ctx).Error(err)
-								continue
-							}
-							containerStatus := terminatedContainerStatus(ct.Name, (*h.JIDs)[uid].StartTime, (*h.JIDs)[uid].EndTime, exitCode, ReasonOOMKilled, MessageOOMKilled)
 							containerStatuses = append(containerStatuses, containerStatus)
 						}
 						resp = append(resp, commonIL.PodStatus{PodName: pod.Name, PodUID: string(pod.UID), PodNamespace: pod.Namespace, Containers: containerStatuses})
@@ -467,7 +342,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
-							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
+							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, sessionContextMessage)
 							if err != nil {
 								log.G(h.Ctx).Error(err)
 								continue
@@ -487,26 +362,12 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 		}
-
-		// Report which compute node each job landed on. The generated batch script
-		// records it in the job working directory as soon as the job starts, so this
-		// stays empty for as long as the job is queued. interLink uses it to point
-		// per-pod shadow tunnels at the right host. The script creates the socket
-		// directory before it records the node, so a node means the directory exists.
-		for i := range resp {
-			dir, ok := podDirs[resp[i].PodUID]
-			if !ok {
-				dir = h.Config.DataRootFolder + resp[i].PodNamespace + "-" + resp[i].PodUID
-			}
-			resp[i].NodeName = readComputeNode(dir)
-			if resp[i].NodeName != "" {
-				resp[i].SocketDir = socketDirFor(h.Config.SocketDirRoot, resp[i].PodUID)
-			}
-		}
-
-		storeStatuses(resp, time.Now())
+		cachedStatus = resp
+		timer = time.Now()
+	} else {
+		log.G(h.Ctx).Debug(sessionContextMessage, "Cached status")
+		resp = cachedStatus
 	}
-	resp = inRequestOrder(req, cached, resp)
 
 	log.G(h.Ctx).Debug(resp)
 
@@ -523,23 +384,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// squeueStatusArgs builds the per-job status query.
-//
-// Every argument has to stand on its own.  Shell: true joins them for bash, which
-// splits them again, so "-j " with a trailing space used to reach squeue as
-// "-j <jid>" by accident.  A SqueuePath wrapper that forwards its arguments
-// faithfully - which any correctly quoting ssh shim does - passes "-j " through
-// intact instead, squeue sees an empty job id, and the poll fails with
-// "Invalid job id".
-//
-// exit_code is preferred over DerivedEC: a cancelled job reports 15 there and 0 in
-// DerivedEC.  --states=all is needed or terminal jobs are hidden and the exit code
-// cannot be read back.
-func squeueStatusArgs(jid string) []string {
-	return []string{"--noheader", "-a", "--states=all", "-O", "exit_code,StateCompact", "-j", jid}
-}
-
-// getSinfoSummary executes 'sinfo -s' command and returns the output
+// getSinfoSummary executes 'sinfo -s' to retrieve a summary of SLURM cluster partition information.
+// This provides visibility into node states, availability, and partition configuration.
+// Returns the command output as a string and any error encountered.
 func (h *SidecarHandler) getSinfoSummary() (string, error) {
 	cmd := []string{"-s"}
 	shell := exec.ExecTask{
@@ -554,249 +401,4 @@ func (h *SidecarHandler) getSinfoSummary() (string, error) {
 	}
 
 	return execReturn.Stdout, nil
-}
-
-// sinfoTextSeparator separates the fields of sinfoTextFormat.  It must not be a
-// shell metacharacter: see getClusterResourcesFromText.
-const sinfoTextSeparator = ","
-
-// sinfoTextFormat asks sinfo for the node name, CPUs, real memory and free memory.
-// The node name is what makes -N output usable: a node in two partitions is listed
-// once per partition, and counting it twice inflates the reported capacity.
-const sinfoTextFormat = "--format=%N" + sinfoTextSeparator + "%c" +
-	sinfoTextSeparator + "%m" + sinfoTextSeparator + "%e"
-
-// getClusterResources queries SLURM for the current resource usage of the cluster and
-// returns a PingResponse aligned with interlink-hq/interLink#516.
-//
-// Resolution order:
-//  1. If SlurmConfig.ResourceScriptPath is set, run that script and parse its JSON
-//     stdout as a PingResponse.  The script has full control over "resources" and
-//     "taints"; see ResourceScriptPath for the expected output format.
-//  2. Otherwise, try `sinfo --json` (SLURM ≥ 20.11) for accurate per-node
-//     allocation data.
-//  3. If that fails, fall back to `sinfo --noheader --format=…` text parsing.
-//
-// In all cases, taints declared in SlurmConfig.Taints are merged into the response
-// (overriding any taints returned by the custom script) so that static taints
-// configured by the operator are always applied.
-func (h *SidecarHandler) getClusterResources() (PingResponse, error) {
-	var resp PingResponse
-	var err error
-
-	if h.Config.ResourceScriptPath != "" {
-		resp, err = h.getClusterResourcesFromScript()
-		if err != nil {
-			log.G(h.Ctx).Warnf("ResourceScriptPath %q failed (%v), falling back to sinfo", h.Config.ResourceScriptPath, err)
-			// Fall through to sinfo-based logic below.
-			resp, err = h.getClusterResourcesFromJSON()
-			if err != nil {
-				log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
-				resp, err = h.getClusterResourcesFromText()
-				if err != nil {
-					return resp, err
-				}
-			}
-		}
-	} else {
-		resp, err = h.getClusterResourcesFromJSON()
-		if err != nil {
-			log.G(h.Ctx).Debugf("sinfo --json unavailable (%v), falling back to text parsing", err)
-			resp, err = h.getClusterResourcesFromText()
-			if err != nil {
-				return resp, err
-			}
-		}
-	}
-
-	// Static taints from SlurmConfig.Taints always win — they override any taints
-	// returned by the custom script so that operator-configured taints are applied.
-	if len(h.Config.Taints) > 0 {
-		taints := make([]TaintConfig, len(h.Config.Taints))
-		copy(taints, h.Config.Taints)
-		resp.Taints = &taints
-	}
-
-	return resp, nil
-}
-
-// getClusterResourcesFromScript executes the custom script at
-// SlurmConfig.ResourceScriptPath and parses its stdout as a PingResponse JSON.
-// The script is invoked with no arguments; operators should embed all required
-// logic (squeue calls, SSH tunnels, etc.) inside the script itself.
-func (h *SidecarHandler) getClusterResourcesFromScript() (PingResponse, error) {
-	shell := exec.ExecTask{
-		Command: h.Config.ResourceScriptPath,
-		Args:    []string{},
-		Shell:   true,
-	}
-	execReturn, err := shell.Execute()
-	if err != nil {
-		return PingResponse{}, fmt.Errorf("resource script %q execution failed: %w", h.Config.ResourceScriptPath, err)
-	}
-	if execReturn.ExitCode != 0 {
-		return PingResponse{}, fmt.Errorf("resource script %q exited with code %d: %s", h.Config.ResourceScriptPath, execReturn.ExitCode, execReturn.Stderr)
-	}
-	stdout := strings.TrimSpace(execReturn.Stdout)
-	if stdout == "" {
-		return PingResponse{}, fmt.Errorf("resource script %q produced no output", h.Config.ResourceScriptPath)
-	}
-	var resp PingResponse
-	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
-		return PingResponse{}, fmt.Errorf("resource script %q output is not valid PingResponse JSON: %w", h.Config.ResourceScriptPath, err)
-	}
-	if resp.Status == "" {
-		resp.Status = "ok"
-	}
-	if resp.Resources != nil {
-		log.G(h.Ctx).Debugf("resource script %q returned: cpu=%s memory=%s", h.Config.ResourceScriptPath, resp.Resources.CPU, resp.Resources.Memory)
-	}
-	return resp, nil
-}
-
-// getClusterResourcesFromJSON uses `sinfo --json` to obtain per-node resource data.
-func (h *SidecarHandler) getClusterResourcesFromJSON() (PingResponse, error) {
-	shell := exec.ExecTask{
-		Command: h.Config.Sinfopath,
-		Args:    []string{"--json"},
-		Shell:   true,
-	}
-	execReturn, err := shell.Execute()
-	if err != nil {
-		return PingResponse{}, fmt.Errorf("sinfo --json execution failed: %w", err)
-	}
-	if execReturn.Stderr != "" {
-		return PingResponse{}, fmt.Errorf("sinfo --json stderr: %s", execReturn.Stderr)
-	}
-	return parseClusterResourcesFromJSON(execReturn.Stdout)
-}
-
-// getClusterResourcesFromText uses `sinfo --noheader --format=…` to obtain per-node
-// resource totals.  Because plain-text sinfo output does not expose per-node allocated
-// CPU counts, the CPU field reflects the total installed CPUs.
-func (h *SidecarHandler) getClusterResourcesFromText() (PingResponse, error) {
-	// %c = CPUs on node, %m = real memory (MB), %e = free memory (MB).
-	// The separator has to survive a shell: Shell below means bash re-parses the
-	// whole command line, and any wrapper around SinfoPath that forwards to a login
-	// node hands it to a second shell there.  A comma is literal to both; a pipe
-	// turns the format into a three-stage pipeline.
-	shell := exec.ExecTask{
-		// -N is required: without it sinfo summarises per partition and prints
-		// ranges and "+" suffixes ("24+,191024+,184251-N/A") that are not numbers.
-		Args:    []string{"--noheader", "-N", sinfoTextFormat},
-		Command: h.Config.Sinfopath,
-		Shell:   true,
-	}
-	execReturn, err := shell.Execute()
-	if err != nil {
-		return PingResponse{}, fmt.Errorf("sinfo execution failed: %w", err)
-	}
-	if execReturn.Stderr != "" {
-		return PingResponse{}, fmt.Errorf("sinfo stderr: %s", execReturn.Stderr)
-	}
-	return parseClusterResourcesFromText(execReturn.Stdout)
-}
-
-// parseClusterResourcesFromJSON parses the stdout of `sinfo --json` into a
-// PingResponse value aligned with interlink-hq/interLink#516.  It is a standalone
-// function so it can be exercised in tests without executing an actual sinfo binary.
-// CPU and memory values are expressed as Kubernetes quantity strings so the VK can
-// call resource.ParseQuantity() on them directly.
-func parseClusterResourcesFromJSON(stdout string) (PingResponse, error) {
-	var parsed slurmNodeList
-	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		return PingResponse{}, fmt.Errorf("sinfo --json parse error: %w", err)
-	}
-	if len(parsed.Nodes) == 0 {
-		return PingResponse{}, fmt.Errorf("sinfo --json returned no nodes")
-	}
-
-	var totalCPU, allocCPU, totalMemMB, usedMemMB int64
-	for _, node := range parsed.Nodes {
-		totalCPU += node.CPUs
-		allocCPU += node.AllocCPUs
-		totalMemMB += node.RealMemory
-		// Prefer explicit alloc_memory when available; fall back to real_memory - free_memory.
-		if node.AllocMemory > 0 {
-			usedMemMB += node.AllocMemory
-		} else {
-			usedMemMB += node.RealMemory - node.FreeMemory
-		}
-	}
-
-	return PingResponse{
-		Status: "ok",
-		Resources: &ResourcesResponse{
-			CPU:    fmt.Sprintf("%d", clampToZero(totalCPU-allocCPU)),
-			Memory: fmt.Sprintf("%dMi", clampToZero(totalMemMB-usedMemMB)),
-		},
-	}, nil
-}
-
-// parseClusterResourcesFromText parses the stdout of
-// `sinfo --noheader --format=%c|%m|%e` into a PingResponse value aligned with
-// interlink-hq/interLink#516.  Lines that cannot be parsed are silently skipped.
-// It is a standalone function so it can be exercised in tests without executing an
-// actual sinfo binary.
-//
-// NOTE: unlike parseClusterResourcesFromJSON which reports *available* resources
-// (total minus allocated), this function reports the total installed CPU count and
-// the sum of free memory reported by sinfo.  Plain-text sinfo output does not expose
-// per-node allocated CPU counts, so total CPU is the best approximation available.
-func parseClusterResourcesFromText(stdout string) (PingResponse, error) {
-	var totalCPU, totalMemMB, freeMemMB int64
-	// sinfo -N lists a node once per partition it belongs to.
-	counted := map[string]struct{}{}
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, sinfoTextSeparator)
-		if len(parts) < 4 {
-			continue
-		}
-		node := strings.TrimSpace(parts[0])
-		if node == "" {
-			continue
-		}
-		cpu, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err != nil {
-			continue
-		}
-		mem, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
-		if err != nil {
-			continue
-		}
-		free, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
-		if err != nil {
-			continue
-		}
-		if _, seen := counted[node]; seen {
-			continue
-		}
-		counted[node] = struct{}{}
-		totalCPU += cpu
-		totalMemMB += mem
-		freeMemMB += free
-	}
-
-	return PingResponse{
-		Status: "ok",
-		Resources: &ResourcesResponse{
-			// Total installed CPUs are reported; per-node allocated CPU count is
-			// not available from plain-text sinfo output (requires --json).
-			CPU:    fmt.Sprintf("%d", totalCPU),
-			Memory: fmt.Sprintf("%dMi", freeMemMB),
-		},
-	}, nil
-}
-
-// clampToZero returns val when val >= 0, and 0 otherwise.  It is used to prevent
-// negative resource values that could arise from transient sinfo accounting races.
-func clampToZero(val int64) int64 {
-	if val < 0 {
-		return 0
-	}
-	return val
 }
