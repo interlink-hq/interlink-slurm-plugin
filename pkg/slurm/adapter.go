@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/intertwin-eu/interlink-slurm-plugin/pkg/batchsystem"
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	"github.com/interlink-hq/interlink-slurm-plugin/pkg/batchsystem"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -131,10 +131,8 @@ func (s *SlurmBatchSystem) Delete(ctx context.Context, pod *v1.Pod) error {
 
 // Status retrieves the current status of pods from SLURM.
 func (s *SlurmBatchSystem) Status(ctx context.Context, pods []*v1.Pod) ([]commonIL.PodStatus, error) {
-	// The status logic is complex and tightly coupled with the StatusHandler.
-	// In a full refactoring, this would be extracted into a separate method.
-	// For now, we note that this would call the same underlying SLURM status checking logic.
-	return nil, fmt.Errorf("status check should use StatusHandler directly for now")
+	// Use the extracted GetPodStatuses method from SidecarHandler
+	return s.handler.GetPodStatuses(ctx, pods)
 }
 
 // GetLogs retrieves logs for a specific container in a pod.

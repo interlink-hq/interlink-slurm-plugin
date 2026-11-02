@@ -1,4 +1,4 @@
-module github.com/intertwin-eu/interlink-slurm-plugin
+module github.com/interlink-hq/interlink-slurm-plugin
 
 go 1.27.0
 

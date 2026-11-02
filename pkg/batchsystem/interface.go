@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	commonIL "github.com/intertwin-eu/interlink/pkg/interlink"
+	commonIL "github.com/interlink-hq/interlink/pkg/interlink"
 	v1 "k8s.io/api/core/v1"
 )
 
