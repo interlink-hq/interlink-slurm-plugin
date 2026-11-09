@@ -1,7 +1,9 @@
 package slurm
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -48,6 +50,30 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err = h.deletePod(spanCtx, pod); err != nil {
+		statusCode = http.StatusInternalServerError
+		h.handleError(spanCtx, w, statusCode, err)
+		return
+	}
+
+	commonIL.SetDurationSpan(start, span, commonIL.WithHTTPReturnCode(statusCode))
+
+	w.WriteHeader(statusCode)
+	if statusCode != http.StatusOK {
+		w.Write([]byte("Some errors occurred deleting containers. Check Slurm Sidecar's logs"))
+	} else {
+		w.Write([]byte("All containers for submitted Pods have been deleted"))
+	}
+}
+
+// deletePod cancels the SLURM job backing pod, removes it from the JIDs cache
+// and cleans up its working directories. It is shared by StopHandler and the
+// batchsystem adapter.
+func (h *SidecarHandler) deletePod(ctx context.Context, pod *v1.Pod) error {
+	if pod == nil {
+		return fmt.Errorf("cannot delete a nil pod")
+	}
+
 	filesPath := h.Config.DataRootFolder + pod.Namespace + "-" + string(pod.UID)
 
 	// Resolve the job working directory.
@@ -69,12 +95,8 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		containerDeletePath = filesPath
 	}
 
-	err = deleteContainer(spanCtx, h.Config, string(pod.UID), h.JIDs, containerDeletePath)
-
-	if err != nil {
-		statusCode = http.StatusInternalServerError
-		h.handleError(spanCtx, w, statusCode, err)
-		return
+	if err := deleteContainer(ctx, h.Config, string(pod.UID), h.JIDs, containerDeletePath); err != nil {
+		return err
 	}
 
 	// The job's EXIT trap removes the socket directory, unless the job is killed
@@ -82,7 +104,7 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 	// recomputed, never read from a file the job could have written.
 	if socketDir := socketDirFor(h.Config.SocketDirRoot, string(pod.UID)); socketDir != "" {
 		if rmErr := os.RemoveAll(socketDir); rmErr != nil {
-			log.G(h.Ctx).Warning("Unable to remove socket directory ", socketDir, ": ", rmErr)
+			log.G(ctx).Warning("Unable to remove socket directory ", socketDir, ": ", rmErr)
 		}
 	}
 
@@ -90,20 +112,11 @@ func (h *SidecarHandler) StopHandler(w http.ResponseWriter, r *http.Request) {
 		// deleteContainer already removed containerDeletePath (= workDir).
 		// When a separate metadata directory exists, remove it now.
 		if workDir != filesPath {
-			if err = os.RemoveAll(filesPath); err != nil {
-				statusCode = http.StatusInternalServerError
-				h.handleError(spanCtx, w, statusCode, err)
-				return
+			if err := os.RemoveAll(filesPath); err != nil {
+				return err
 			}
 		}
 	}
 
-	commonIL.SetDurationSpan(start, span, commonIL.WithHTTPReturnCode(statusCode))
-
-	w.WriteHeader(statusCode)
-	if statusCode != http.StatusOK {
-		w.Write([]byte("Some errors occurred deleting containers. Check Slurm Sidecar's logs"))
-	} else {
-		w.Write([]byte("All containers for submitted Pods have been deleted"))
-	}
+	return nil
 }
