@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/intertwin-eu/interlink-slurm-plugin/pkg/batchsystem"
 	slurm "github.com/intertwin-eu/interlink-slurm-plugin/pkg/slurm"
 
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
@@ -163,7 +164,6 @@ func main() {
 
 	log.L = logruslogger.FromLogrus(logrus.NewEntry(logger))
 
-	JobIDs := make(map[string]*slurm.JidStruct)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -186,11 +186,20 @@ func main() {
 
 	log.G(ctx).Debug("Debug level: " + strconv.FormatBool(slurmConfig.VerboseLogging))
 
-	SidecarAPIs := slurm.SidecarHandler{
+	// Build the SLURM backend through the batch system SDK factory. The HTTP
+	// handlers are still served by the underlying SidecarHandler.
+	batchSystem, err := batchsystem.CreateBatchSystem(ctx, batchsystem.FactoryConfig{
+		Type:   batchsystem.BatchSystemSLURM,
 		Config: slurmConfig,
-		JIDs:   &JobIDs,
-		Ctx:    ctx,
+	})
+	if err != nil {
+		log.G(ctx).Fatal(err)
 	}
+	slurmBackend, ok := batchSystem.(*slurm.SlurmBatchSystem)
+	if !ok {
+		log.G(ctx).Fatalf("unexpected batch system implementation %T", batchSystem)
+	}
+	SidecarAPIs := slurmBackend.Handler()
 
 	mutex := http.NewServeMux()
 	mutex.HandleFunc("/status", SidecarAPIs.StatusHandler)
@@ -199,8 +208,9 @@ func main() {
 	mutex.HandleFunc("/getLogs", SidecarAPIs.GetLogsHandler)
 	mutex.HandleFunc("/system-info", SidecarAPIs.SystemInfoHandler)
 
-	SidecarAPIs.CreateDirectories()
-	SidecarAPIs.LoadJIDs()
+	if err := batchSystem.Initialize(ctx); err != nil {
+		log.G(ctx).Fatal(err)
+	}
 
 	if strings.HasPrefix(slurmConfig.Socket, "unix://") {
 		// Create a Unix domain socket and listen for incoming connections.
