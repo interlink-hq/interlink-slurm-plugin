@@ -8,6 +8,36 @@ and this project adheres to
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-16
+
+### Added
+
+- Added `preStop` and `postStart` lifecycle hooks to generated job scripts (#140)
+- Added pod `workingDir` annotation support (#137)
+- Added `envFrom` support for Secret and ConfigMap environment injection (#158)
+- Report allocated compute nodes in pod status and provide each job a private shadow-tunnel socket directory (#148, #166)
+- Pass structured cluster resource data and taints through the ping path (#135)
+
+### Fixed
+
+- Fixed parsing of SLURM annotation flags, including short options with separate values (#116)
+- Preserved newlines in projected volume content written to SLURM jobs (#145)
+- Ran workloads in the mesh network namespace and fixed SLURM resource mapping and overlay-network wrapping regressions (#150, #160)
+- Fixed job ID handling in `squeue`, pod deletion when no SLURM job exists, and the `sinfo` resource probe (#152, #154, #156)
+- Fixed compute-node status lookup, failed-job exit codes, readiness-probe handling, and per-pod job-status caching (#165, #167, #168, #169)
+- Skip unsupported volume mounts without dropping other mounts (#170)
+
+## [0.6.1] - 2026-04-08
+
+### Added
+
+- Added support for SLURM 25 (#127)
+
+### Fixed
+
+- Fixed probe logic (#109)
+- Propagated SLURM submission errors and handled timeout and out-of-memory job states for graceful pod rescheduling (#117, #120)
+
 ## [0.6.0] - 2025-12-06
 
 ### Added
