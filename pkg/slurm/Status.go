@@ -1,6 +1,7 @@
 package slurm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,7 +89,6 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 	var resp []commonIL.PodStatus
 	statusCode := http.StatusOK
 	log.G(h.Ctx).Info("Slurm Sidecar: received GetStatus call")
-	timeNow := time.Now()
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -130,6 +130,37 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp, err = h.podStatuses(spanCtx, req, sessionContextMessage)
+	if err != nil {
+		statusCode = http.StatusInternalServerError
+		h.handleError(spanCtx, w, statusCode, err)
+		return
+	}
+
+	log.G(h.Ctx).Debug(resp)
+
+	w.WriteHeader(statusCode)
+	if statusCode != http.StatusOK {
+		w.Write([]byte("Some errors occurred deleting containers. Check SLURM Sidecar's logs"))
+	} else {
+		bodyBytes, err := json.Marshal(resp)
+		if err != nil {
+			h.handleError(spanCtx, w, statusCode, err)
+			return
+		}
+		w.Write(bodyBytes)
+	}
+}
+
+// podStatuses queries SLURM for the given pods and translates job states into
+// Kubernetes container statuses.  It is the transport-agnostic core shared by
+// StatusHandler (HTTP) and SlurmBatchSystem.Status (batchsystem SDK).
+// Results are cached per pod; see cachedStatuses / storeStatuses.
+func (h *SidecarHandler) podStatuses(ctx context.Context, req []*v1.Pod, sessionContextMessage string) ([]commonIL.PodStatus, error) {
+	span := trace.SpanFromContext(ctx)
+	var resp []commonIL.PodStatus
+	timeNow := time.Now()
+
 	cached, stale := cachedStatuses(req, timeNow)
 	if len(stale) > 0 {
 		if accountCheckDue(timeNow) {
@@ -143,9 +174,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			execReturn.Stdout = strings.ReplaceAll(execReturn.Stdout, "\n", "")
 
 			if execReturn.Stderr != "" {
-				statusCode = http.StatusInternalServerError
-				h.handleError(spanCtx, w, statusCode, errors.New(sessionContextMessage+"unable to retrieve job status: "+execReturn.Stderr))
-				return
+				return nil, errors.New(sessionContextMessage + "unable to retrieve job status: " + execReturn.Stderr)
 			}
 			accountCheckPassed(timeNow)
 		}
@@ -164,7 +193,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			podDirs[uid] = path
 
-			if checkIfJidExists(spanCtx, (h.JIDs), uid) {
+			if checkIfJidExists(ctx, (h.JIDs), uid) {
 				// Eg of output: "R 0"
 				shell := exec.ExecTask{
 					Command: h.Config.Squeuepath,
@@ -184,25 +213,17 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						log.G(h.Ctx).Info(sessionContextMessage, "getting exit status from  "+path+"/run-"+ct.Name+".status")
 						file, err := os.Open(path + "/run-" + ct.Name + ".status")
 						if err != nil {
-							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to retrieve container status: %s", err))
-							log.G(h.Ctx).Error()
-							return
+							return nil, fmt.Errorf(sessionContextMessage+"unable to retrieve container status: %s", err)
 						}
 						defer file.Close()
 						statusb, err := io.ReadAll(file)
 						if err != nil {
-							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to read container status: %s", err))
-							log.G(h.Ctx).Error()
-							return
+							return nil, fmt.Errorf(sessionContextMessage+"unable to read container status: %s", err)
 						}
 
 						status, err := strconv.Atoi(strings.Replace(string(statusb), "\n", "", -1))
 						if err != nil {
-							statusCode = http.StatusInternalServerError
-							h.handleError(spanCtx, w, statusCode, fmt.Errorf(sessionContextMessage+"unable to convert container status: %s", err))
-							log.G(h.Ctx).Error()
+							log.G(h.Ctx).Error(fmt.Errorf(sessionContextMessage+"unable to convert container status: %s", err))
 							status = 500
 						}
 
@@ -247,9 +268,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -268,9 +287,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].StartTime = timeNow
 							f, err := os.Create(path + "/StartedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -284,8 +301,8 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								// Container is ready only if:
 								// 1. Startup probes have completed (or none configured), AND
 								// 2. Readiness probes have succeeded (or none configured)
-								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
-								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
+								startupComplete := checkContainerStartupComplete(ctx, h.Config, path, ct.Name, startupCount)
+								readinessOK := checkContainerReadiness(ctx, h.Config, path, ct.Name, readinessCount)
 								isReady = startupComplete && readinessOK
 							}
 
@@ -300,9 +317,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -327,9 +342,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -348,9 +361,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].StartTime = timeNow
 							f, err := os.Create(path + "/StartedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -364,9 +375,9 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 								// Container is ready only if:
 								// 1. Startup probes have completed (or none configured), AND
 								// 2. Readiness probes have succeeded (or none configured)
-								startupComplete := checkContainerStartupComplete(spanCtx, h.Config, path, ct.Name, startupCount)
-								readinessOK := checkContainerReadiness(spanCtx, h.Config, path, ct.Name, readinessCount)
-								livenessOK := checkContainerLiveness(spanCtx, h.Config, path, ct.Name, livenessCount)
+								startupComplete := checkContainerStartupComplete(ctx, h.Config, path, ct.Name, startupCount)
+								readinessOK := checkContainerReadiness(ctx, h.Config, path, ct.Name, readinessCount)
+								livenessOK := checkContainerLiveness(ctx, h.Config, path, ct.Name, livenessCount)
 								isReady = startupComplete && readinessOK && livenessOK
 
 								log.G(h.Ctx).Debugf("%sContainer %s: startupComplete=%v, readinessOK=%v, liveneessOK=%v, isReady=%v", sessionContextMessage, ct.Name, startupComplete, readinessOK, livenessOK, isReady)
@@ -393,9 +404,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -417,9 +426,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
 							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 						}
 						log.G(h.Ctx).Infof("%sSLURM job %s reached time limit (pod %s/%s); reporting containers as terminated",
@@ -440,9 +447,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							finishedAtStr := (*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")
 							if err := os.WriteFile(path+"/FinishedAt.time", []byte(finishedAtStr), 0o644); err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 						}
 						for _, ct := range pod.Spec.Containers {
@@ -460,9 +465,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 							(*h.JIDs)[uid].EndTime = timeNow
 							f, err := os.Create(path + "/FinishedAt.time")
 							if err != nil {
-								statusCode = http.StatusInternalServerError
-								h.handleError(spanCtx, w, statusCode, err)
-								return
+								return nil, err
 							}
 							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
@@ -507,20 +510,7 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 		storeStatuses(resp, time.Now())
 	}
 	resp = inRequestOrder(req, cached, resp)
-
-	log.G(h.Ctx).Debug(resp)
-
-	w.WriteHeader(statusCode)
-	if statusCode != http.StatusOK {
-		w.Write([]byte("Some errors occurred deleting containers. Check SLURM Sidecar's logs"))
-	} else {
-		bodyBytes, err := json.Marshal(resp)
-		if err != nil {
-			h.handleError(spanCtx, w, statusCode, err)
-			return
-		}
-		w.Write(bodyBytes)
-	}
+	return resp, nil
 }
 
 // squeueStatusArgs builds the per-job status query.

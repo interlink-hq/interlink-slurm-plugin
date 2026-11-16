@@ -192,18 +192,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	)
 
 	// Resolve the job working directory.
-	// Priority: 1) in-memory JIDs cache  2) WorkDir.path file on disk (survives sidecar restarts)
-	// The metadata directory is always at the default DataRootFolder path and is
-	// the reliable location for the WorkDir.path pointer file.
-	metadataPath := h.Config.DataRootFolder + req.Namespace + "-" + req.PodUID
-	path := metadataPath
-	if jid, ok := (*h.JIDs)[req.PodUID]; ok && jid.WorkDir != "" {
-		path = jid.WorkDir
-	} else if workDirBytes, rdErr := os.ReadFile(metadataPath + "/WorkDir.path"); rdErr == nil && len(workDirBytes) > 0 {
-		if workDirPath := strings.TrimSpace(string(workDirBytes)); workDirPath != "" {
-			path = workDirPath
-		}
-	}
+	path := h.resolveLogDir(req.Namespace, req.PodUID)
 	containerOutputPath := path + "/run-" + req.ContainerName + ".out"
 	var output []byte
 	if req.Opts.Timestamps {
@@ -232,34 +221,7 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 	output = append(output, jobOutput...)
 	output = append(output, containerOutput...)
 
-	var returnedLogs string
-
-	if req.Opts.Tail != 0 {
-		var lastLines []string
-
-		splittedLines := strings.Split(string(output), "\n")
-
-		if req.Opts.Tail > len(splittedLines) {
-			lastLines = splittedLines
-		} else {
-			lastLines = splittedLines[len(splittedLines)-req.Opts.Tail-1:]
-		}
-
-		for _, line := range lastLines {
-			returnedLogs += line + "\n"
-		}
-	} else if req.Opts.LimitBytes != 0 {
-		var lastBytes []byte
-		if req.Opts.LimitBytes > len(output) {
-			lastBytes = output
-		} else {
-			lastBytes = output[len(output)-req.Opts.LimitBytes-1:]
-		}
-
-		returnedLogs = string(lastBytes)
-	} else {
-		returnedLogs = string(output)
-	}
+	returnedLogs := trimLogOutput(output, req.Opts.Tail, req.Opts.LimitBytes)
 
 	if req.Opts.Timestamps && (req.Opts.SinceSeconds != 0 || !req.Opts.SinceTime.IsZero()) {
 		temp := returnedLogs
@@ -316,6 +278,55 @@ func (h *SidecarHandler) GetLogsHandler(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			h.logErrorVerbose(sessionContextMessage+"follow mode error", spanCtx, w, err)
 		}
+	}
+}
+
+// resolveLogDir returns the directory holding the job output files for a pod.
+// Priority: 1) in-memory JIDs cache  2) WorkDir.path file on disk (survives
+// sidecar restarts)  3) the default metadata directory under DataRootFolder.
+// The metadata directory is always at the default DataRootFolder path and is
+// the reliable location for the WorkDir.path pointer file.
+func (h *SidecarHandler) resolveLogDir(namespace, podUID string) string {
+	metadataPath := h.Config.DataRootFolder + namespace + "-" + podUID
+	if jid, ok := (*h.JIDs)[podUID]; ok && jid.WorkDir != "" {
+		return jid.WorkDir
+	}
+	if workDirBytes, rdErr := os.ReadFile(metadataPath + "/WorkDir.path"); rdErr == nil && len(workDirBytes) > 0 {
+		if workDirPath := strings.TrimSpace(string(workDirBytes)); workDirPath != "" {
+			return workDirPath
+		}
+	}
+	return metadataPath
+}
+
+// trimLogOutput applies the Tail (in lines) or LimitBytes option to the
+// collected output. Tail takes precedence over LimitBytes; zero disables both.
+func trimLogOutput(output []byte, tail, limitBytes int) string {
+	switch {
+	case tail != 0:
+		var lastLines []string
+
+		splittedLines := strings.Split(string(output), "\n")
+
+		if tail >= len(splittedLines) {
+			lastLines = splittedLines
+		} else {
+			lastLines = splittedLines[len(splittedLines)-tail-1:]
+		}
+
+		var returnedLogs strings.Builder
+		for _, line := range lastLines {
+			returnedLogs.WriteString(line)
+			returnedLogs.WriteString("\n")
+		}
+		return returnedLogs.String()
+	case limitBytes != 0:
+		if limitBytes >= len(output) {
+			return string(output)
+		}
+		return string(output[len(output)-limitBytes-1:])
+	default:
+		return string(output)
 	}
 }
 
