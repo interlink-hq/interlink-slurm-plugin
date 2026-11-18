@@ -693,6 +693,63 @@ func (h *SidecarHandler) LoadJIDs() error {
 	return nil
 }
 
+// enroot reads the image's /etc/environment before it performs any mount, so an env
+// file mounted there is never loaded, and it starts the container without the host
+// environment. Every enroot container with Env or EnvFrom instead gets an enroot
+// configuration script (--conf) whose environ() prints the lines enroot adds to the
+// container's environment: the pod's own variables, and nothing of the host's
+// environment. The quoted here-document keeps the pod's values literal, and no line can
+// end it because every line holds a "=".
+//
+// enroot formats that environment twice (common::envfmt, runtime.sh _do_environ and
+// again after the hooks in _do_hooks), and each pass removes a pair of quotes around a
+// value. Every value is printed inside a pair of single quotes, and one that starts with a
+// quote or a backslash inside two, so the second pass cannot strip the value's own quotes
+// whatever it counts as a trailing space: the hooks, which read the file between the two
+// passes (NVIDIA_*, MELLANOX_*), see plain values unchanged.
+const (
+	enrootEnvConfHead = "environ() {\n  cat <<'INTERLINK_ENV'\n"
+	enrootEnvConfTail = "INTERLINK_ENV\n}\n"
+)
+
+// enrootEnvName is the variable name enroot accepts; it drops any other line.
+var enrootEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// enrootQuotedValue is a value whose own quotes the second common::envfmt pass could strip.
+var enrootQuotedValue = regexp.MustCompile(`^["'\\]`)
+
+// envFileLine renders one variable for the runtime's env file, or reports false when
+// the runtime cannot carry it.
+func envFileLine(Ctx context.Context, runtime, container, name, value string) (string, bool) {
+	if runtime == "enroot" {
+		// enroot's environment file holds one variable per line.
+		if !enrootEnvName.MatchString(name) || strings.Contains(value, "\n") {
+			log.G(Ctx).Warning("-- enroot cannot pass env var " + name + " of container " + container + ": invalid name or a newline in the value; skipped")
+			return "", false
+		}
+		quote := "'"
+		if enrootQuotedValue.MatchString(value) {
+			quote = "''"
+		}
+		return name + "=" + quote + value + quote, true
+	}
+	// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
+	// singularity reads the env-file and parse it like a shell string, so shellescape will escape any quote properly.
+	return name + "=" + shellescape.Quote(value), true
+}
+
+// enrootConfOption returns the first -c or --conf in options, or "".
+func enrootConfOption(options ...string) string {
+	for _, o := range options {
+		for _, word := range splitShellWords(o) {
+			if word == "-c" || word == "--conf" || strings.HasPrefix(word, "--conf=") {
+				return word
+			}
+		}
+	}
+	return ""
+}
+
 func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) ([]string, []string, error) {
 	envs := []string{}
 	// For debugging purpose only
@@ -706,8 +763,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 		envs = append(envs, "--env-file")
 		envs = append(envs, envfilePath)
 	case "enroot":
-		mountEnvs := envfilePath + ":" + "/etc/environment"
-		envs = append(envs, "--mount", mountEnvs)
+		envs = append(envs, "--conf", envfilePath)
+		if word := enrootConfOption(strings.Join(config.EnrootDefaultOptions, " "), podData.Pod.Annotations["slurm-job.vk.io/enroot-options"]); word != "" {
+			log.G(Ctx).Warning("-- Ignoring enroot option " + word + " for container " + container.Name + ": enroot runs only the last --conf, the plugin's, which carries the pod's env")
+		}
 	}
 
 	envfile, err := os.Create(envfilePath)
@@ -717,11 +776,18 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 	}
 	defer envfile.Close()
 
+	if config.ContainerRuntime == "enroot" {
+		if _, err := envfile.WriteString(enrootEnvConfHead); err != nil {
+			log.G(Ctx).Error(err)
+			return nil, nil, err
+		}
+	}
+
 	for _, envVar := range container.Env {
-		// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
-		// singularity reads the env-file and parse it like a shell string, so shellescape will escape any quote properly.
-		tmpValue := shellescape.Quote(envVar.Value)
-		tmp := (envVar.Name + "=" + tmpValue)
+		tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, envVar.Name, envVar.Value)
+		if !ok {
+			continue
+		}
 
 		envs_data = append(envs_data, tmp)
 
@@ -730,7 +796,7 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 			log.G(Ctx).Error(err)
 			return nil, nil, err
 		} else {
-			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " key " + envVar.Name + " value " + tmpValue)
+			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " line " + tmp)
 		}
 	}
 
@@ -753,8 +819,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					return nil, nil, err
 				}
 				for k, v := range secret.Data {
-					tmpValue := shellescape.Quote(string(v))
-					tmp := prefix + k + "=" + tmpValue
+					tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, prefix+k, string(v))
+					if !ok {
+						continue
+					}
 					envs_data = append(envs_data, tmp)
 					_, err := envfile.WriteString(tmp + "\n")
 					if err != nil {
@@ -776,8 +844,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					return nil, nil, err
 				}
 				for k, v := range configMap.Data {
-					tmpValue := shellescape.Quote(v)
-					tmp := prefix + k + "=" + tmpValue
+					tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, prefix+k, v)
+					if !ok {
+						continue
+					}
 					envs_data = append(envs_data, tmp)
 					_, err := envfile.WriteString(tmp + "\n")
 					if err != nil {
@@ -787,6 +857,13 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					log.G(Ctx).Debug("---- Written envfile from configMap " + envFrom.ConfigMapRef.Name + " key " + k)
 				}
 			}
+		}
+	}
+
+	if config.ContainerRuntime == "enroot" {
+		if _, err := envfile.WriteString(enrootEnvConfTail); err != nil {
+			log.G(Ctx).Error(err)
+			return nil, nil, err
 		}
 	}
 
