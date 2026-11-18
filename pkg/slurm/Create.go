@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containerd/containerd/log"
@@ -155,7 +154,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			runtime_command = append(runtime_command, image)
 		case "enroot":
 			containerName := container.Name + string(data.Pod.UID)
-			mounts = strings.ReplaceAll(mounts, ":ro", "")
 			runtime_command = append(runtime_command, mounts)
 			runtime_command = append(runtime_command, containerName)
 		}
