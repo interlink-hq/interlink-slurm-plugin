@@ -155,6 +155,26 @@ func TestProduceGangSLURMScriptSiteLauncher(t *testing.T) {
 	}
 }
 
+// Under enroot only a member's job.sh imports the image: the launcher line imports the
+// head's image first and gives the launcher its path as GANG_IMAGE.
+func TestProduceGangSLURMScriptSiteLauncherEnroot(t *testing.T) {
+	extra := map[string]string{LauncherAnnotation: "mpi"}
+	config := SlurmConfig{BashPath: testBashPath, SiteScriptPath: writeSite(t, testSite), ContainerRuntime: "enroot", EnrootPath: "enroot"}
+	s, dataRoot := renderGang(t, config, extra, []string{"invert_test"}, nil)
+	sqsh := dataRoot + "default-h/mainh.sqsh"
+	want := "( enroot import --output " + sqsh + " /gpfs/images/itwinai.sif && " +
+		"export GANG_IMAGE=" + sqsh + " && mpi-launcher invert_test ) >>"
+	if !strings.Contains(s, want) {
+		t.Errorf("enroot launcher line missing %q\n---\n%s", want, s)
+	}
+
+	config.ContainerRuntime = singularityRuntime
+	s, _ = renderGang(t, config, extra, []string{"invert_test"}, nil)
+	if strings.Contains(s, " import --output ") {
+		t.Errorf("singularity runs the image itself: no enroot import expected\n---\n%s", s)
+	}
+}
+
 func TestProduceGangSLURMScriptTasksPerGPU(t *testing.T) {
 	config := SlurmConfig{BashPath: testBashPath, SiteScriptPath: writeSite(t, testSite)}
 	extra := map[string]string{LauncherAnnotation: "mpi", testFlagsAnnotation: testGres4}
