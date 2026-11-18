@@ -516,9 +516,8 @@ func TestGangNodeShapeTakesLargestMember(t *testing.T) {
 	}
 }
 
-// Every GPUFlag asks for the pod's GPUs on every node, as /estimate does for the
-// same shape: --gpus counts the whole job's, so it is the pod's count times the
-// nodes.
+// Every GPUFlag asks for the pod's GPUs on every node: --gpus counts the whole
+// job's, so it is the pod's count times the nodes.
 func TestGangGPUFlagAsksEveryNode(t *testing.T) {
 	for flag, want := range map[string]string{
 		GPUFlagGres:        testGres4,
@@ -539,9 +538,6 @@ func TestGangGPUFlagAsksEveryNode(t *testing.T) {
 				if !strings.Contains(s, line) {
 					t.Errorf("gang script missing %q\n---\n%s", line, s)
 				}
-			}
-			if est := strings.Join(estimateFlags(config, EstimateRequest{Nodes: 2, GPUsPerNode: 4}), " "); !strings.Contains(est, want) {
-				t.Errorf("estimate flags %q ask for other GPUs than the job's %q", est, want)
 			}
 		})
 	}

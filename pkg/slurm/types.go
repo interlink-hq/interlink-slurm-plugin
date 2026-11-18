@@ -128,10 +128,6 @@ type SlurmConfig struct {
 	// (nvidia.com/gpu, amd.com/gpu): "gres" (--gres=gpu:N, the default),
 	// "gpus-per-node" (--gpus-per-node=N) or "gpus" (--gpus=N).
 	GPUFlag string `yaml:"GPUFlag"`
-	// SiteTimeZone is the IANA time zone Slurm prints its times in (e.g.
-	// "Europe/Paris"), used to read `sbatch --test-only` estimates. Empty => the
-	// plugin's own time zone.
-	SiteTimeZone string `yaml:"SiteTimeZone"`
 }
 
 type CreateStruct struct {

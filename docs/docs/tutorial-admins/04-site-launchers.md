@@ -112,5 +112,4 @@ reaches Slurm: `gres` (`--gres=gpu:N`, the default), `gpus-per-node` or `gpus`. 
 set in a flavor or in the `slurm-job.vk.io/flags` annotation takes precedence.
 
 A group's job gets the pod's GPUs on every node. `gpus` counts the GPUs of the whole job,
-so there the job asks for the pod's count times the number of nodes, as `POST /estimate`
-does for the same shape.
+so there the job asks for the pod's count times the number of nodes.

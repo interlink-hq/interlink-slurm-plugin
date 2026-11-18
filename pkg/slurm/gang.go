@@ -95,7 +95,7 @@ func produceGangSLURMScript(
 		sizeLimits, sizeDefaultCPU, sizeDefaultRAM, head.Flavor, true /*suppressDefaultMem*/)
 	gpusPerNode := gpusPerNodeFromFlags(flags)
 	// GPUFlag gpus counts the GPUs of the whole job, not of a node: the pod's count
-	// is asked for on every node, as /estimate does.
+	// is asked for on every node.
 	if config.GPUFlag == GPUFlagGPUs {
 		if gpus := detectGPUResources(ctx, sizePod.Spec.Containers); gpus > 0 {
 			if i := slices.Index(flags, "--gpus="+strconv.FormatInt(gpus, 10)); i >= 0 {

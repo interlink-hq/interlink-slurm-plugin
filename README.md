@@ -432,7 +432,6 @@ building the docker image (`docker compose up -d --build --force-recreate` will 
 | GangSchedulingEnabled | true or false (the default). When true, `POST /createPodGroup` submits the pods of a group as one `sbatch --nodes=N` job and the ping answer lists the capability `pod-group-create`. `/create` is unchanged. See [Multi-pod jobs and site launchers](docs/docs/tutorial-admins/04-site-launchers.md) |
 | SiteScriptPath | The site file of multi-pod jobs: its top level runs at the start of every one, its `<name>-launcher` functions start them. Default `/etc/interlink/site/site.sh` |
 | GPUFlag | How a pod's GPU request reaches Slurm: `gres` (`--gres=gpu:N`, the default), `gpus-per-node` or `gpus` |
-| SiteTimeZone | IANA time zone Slurm prints its times in, used by `POST /estimate` to read `sbatch --test-only`. Empty: the plugin's own time zone |
 
 ### :wrench: Environment Variables list
 

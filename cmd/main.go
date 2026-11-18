@@ -203,7 +203,6 @@ func main() {
 	mutex.HandleFunc("/delete", SidecarAPIs.StopHandler)
 	mutex.HandleFunc("/getLogs", SidecarAPIs.GetLogsHandler)
 	mutex.HandleFunc("/system-info", SidecarAPIs.SystemInfoHandler)
-	mutex.HandleFunc("/estimate", SidecarAPIs.EstimateHandler)
 
 	SidecarAPIs.CreateDirectories()
 	SidecarAPIs.LoadJIDs()
