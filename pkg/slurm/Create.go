@@ -259,6 +259,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			//os.RemoveAll(filesPath)
 			return
 		}
+		defer pathFile.Close()
 
 		mode := os.FileMode(0770)
 

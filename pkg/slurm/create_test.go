@@ -87,3 +87,57 @@ func TestSubmitHandlerBindsSocketDir(t *testing.T) {
 		})
 	}
 }
+
+// A job script sent by the virtual kubelet is written to jobScript.sh in the job directory;
+// the file must be closed, or a FUSE mount keeps it as .fuse_hidden* after the pod is deleted.
+func TestSubmitHandlerClosesJobScript(t *testing.T) {
+	if _, err := os.ReadDir("/proc/self/fd"); err != nil {
+		t.Skip("needs /proc/self/fd")
+	}
+	sbatch := filepath.Join(t.TempDir(), "sbatch")
+	if err := os.WriteFile(sbatch, []byte("#!/bin/sh\necho 'Submitted batch job 42'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := t.TempDir() + "/"
+	data := commonIL.RetrievedPodData{
+		Pod: v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: socketTestPod, Namespace: metav1.NamespaceDefault, UID: socketTestUID},
+			Spec:       v1.PodSpec{Containers: []v1.Container{{Name: "workload", Image: busyboxImage}}},
+		},
+		JobScript: "#!/bin/sh\necho hello\n",
+	}
+	body, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jids := map[string]*JidStruct{}
+	h := &SidecarHandler{
+		Config: SlurmConfig{
+			Sbatchpath:       sbatch,
+			ContainerRuntime: singularityRuntime,
+			SingularityPath:  singularityRuntime,
+			DataRootFolder:   dataRoot,
+		},
+		JIDs: &jids,
+		Ctx:  context.Background(),
+	}
+	rec := httptest.NewRecorder()
+	h.SubmitHandler(rec, httptest.NewRequest(http.MethodPost, "/create", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("SubmitHandler() code = %d, body %q", rec.Code, rec.Body.String())
+	}
+
+	workDir := dataRoot + metav1.NamespaceDefault + "-" + socketTestUID
+	if raw, err := os.ReadFile(workDir + "/jobScript.sh"); err != nil || string(raw) != data.JobScript {
+		t.Fatalf("jobScript.sh = %q, %v; want %q", raw, err, data.JobScript)
+	}
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fd := range fds {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && strings.HasPrefix(target, workDir+"/") {
+			t.Errorf("left %s open (fd %s)", target, fd.Name())
+		}
+	}
+}
