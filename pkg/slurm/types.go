@@ -146,6 +146,15 @@ const (
 	// `<name>-launcher` function of the site file (SlurmConfig.SiteScriptPath).
 	// Without it, each pod runs its own command on its own node.
 	LauncherAnnotation = "interlink.eu/launcher"
+
+	// GangEndAnnotation, on the head, says when a gang without a launcher ends.
+	// GangEndHead (the default): with rank 0, whose command drives the others,
+	// which start once it listens on MASTER_PORT and are stopped when it ends.
+	// GangEndAll: every rank starts at once and runs its own command to its end;
+	// the gang ends with the last, failed when any rank failed.
+	GangEndAnnotation = "interlink.eu/gang-end"
+	GangEndHead       = "head"
+	GangEndAll        = "all"
 )
 
 // BufferedMember holds everything produceGangSLURMScript needs to render one
