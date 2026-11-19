@@ -154,9 +154,10 @@ func generatePreStopTrap(config SlurmConfig, commands []ContainerCommand) string
 	return sb.String()
 }
 
-// hookTmpBindMountArg is the shell token for the --bind argument that shares
-// a dedicated working-directory sub-folder as /tmp between the postStart hook
-// invocation and the main container launch.
+// hookTmpBindMountArg is the shell token for the --bind (singularity) or
+// --mount (enroot) argument that shares a dedicated working-directory
+// sub-folder as /tmp between the postStart hook invocation and the main
+// container launch.
 //
 // The outer double-quotes are intentional: they allow ${workingPath} to be
 // expanded by the shell at job-script runtime while preserving the bind-spec
@@ -212,7 +213,8 @@ func findTmpBindHostPath(runtimeCmd []string) string {
 // postStart lifecycle hook synchronously before the container is launched.
 //
 // The hook runs inside the container via singularity exec (consistent with
-// executeExecProbe in probes.go) with a 30-second timeout.  If no container
+// executeExecProbe in probes.go), or under enroot via enroot start of the
+// container job.sh created, with a 30-second timeout.  If no container
 // runtime is configured, it falls back to host-side execution.
 // Output is appended to the container's run-<name>.out log so it appears in
 // kubectl logs.
@@ -226,6 +228,9 @@ func findTmpBindHostPath(runtimeCmd []string) string {
 //   - Otherwise a dedicated "${workingPath}/hook-tmp" sub-directory is
 //     created and bound as /tmp in both the hook and the main container
 //     (the main-container injection happens in injectTmpBindMount).
+//
+// enroot mounts a new tmpfs at /tmp on every start, so the same applies there,
+// with enroot's --mount.
 //
 // Returns an empty string when the container has no postStart hook or is an
 // init container.
@@ -241,24 +246,14 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 
 	sb.WriteString(fmt.Sprintf("\n# postStart lifecycle hook for container %s\n", cmd.containerName))
 
-	// Determine the bind-mount arg for /tmp shared between the hook and the
-	// main container.  If the container already mounts /tmp via a volume,
-	// reuse that same host path; otherwise create a dedicated hook-tmp dir.
-	//
-	// Note on quoting: hookTmpBindMountArg wraps the entire spec in double
-	// quotes so the shell expands ${workingPath} at runtime.  For an existing
-	// resolved host path we quote only the path component with shellescape so
-	// that special characters are handled, and append the literal `:/tmp`.
-	// Both forms produce a valid single argument for `singularity --bind`.
-	tmpBindArg := hookTmpBindMountArg
-	if existingHostPath := findTmpBindHostPath(cmd.runtimeCommand); existingHostPath != "" {
-		// The container has an explicit /tmp volume mount.  Use the same host
-		// path in the hook so both see the same directory.
-		tmpBindArg = fmt.Sprintf("%s:/tmp", shellescape.Quote(existingHostPath))
-	} else {
-		// No existing /tmp mount: create the shared directory now.
+	// Determine the mount of /tmp shared between the hook and the main
+	// container.  If the container already mounts /tmp via a volume, reuse
+	// that same host path; otherwise create a dedicated hook-tmp dir.
+	existingHostPath := findTmpBindHostPath(cmd.runtimeCommand)
+	if existingHostPath == "" {
 		sb.WriteString(`mkdir -p "${workingPath}/hook-tmp"` + "\n")
 	}
+	tmpMount := tmpMountArgs(config.ContainerRuntime, existingHostPath)
 
 	sb.WriteString(fmt.Sprintf(
 		`printf "%%s\n" "$(date -Is --utc) Running postStart hook for container %s..." >> %s 2>&1`+"\n",
@@ -271,19 +266,34 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 		for i, arg := range cmd.postStartHook.ExecCommand {
 			quotedArgs[i] = shellescape.Quote(arg)
 		}
-		if imageName != "" && config.SingularityPath != "" {
+		switch {
+		case config.ContainerRuntime == "enroot" && len(cmd.runtimeCommand) > 0:
+			// Run inside the container job.sh created, the last element of the
+			// runtime command, with hookRCFile in place of the image's /etc/rc.
+			parts := []string{hookRCSetup, "&&", shellescape.Quote(config.EnrootPath), "start"}
+			for _, opt := range config.EnrootDefaultOptions {
+				parts = append(parts, shellescape.Quote(opt))
+			}
+			parts = append(parts, "--rc", hookRCFile)
+			parts = append(parts, tmpMount...)
+			parts = append(parts, enrootSocketDirExecArgs, shellescape.Quote(cmd.runtimeCommand[len(cmd.runtimeCommand)-1]), "timeout", "30")
+			parts = append(parts, quotedArgs...)
+			fmt.Fprintf(&sb, "%s >> %s 2>&1 || true\n", strings.Join(parts, " "), outFile)
+			sb.WriteString(`rm -f "$hook_rc"` + "\n")
+		case imageName != "" && config.SingularityPath != "":
 			// Run inside the container via singularity exec — consistent with executeExecProbe.
 			// Add --bind so the hook writes to the same /tmp the container will use.
 			parts := []string{shellescape.Quote(config.SingularityPath), "exec"}
 			for _, opt := range config.SingularityDefaultOptions {
 				parts = append(parts, shellescape.Quote(opt))
 			}
-			parts = append(parts, "--bind", tmpBindArg, socketDirExecArgs)
+			parts = append(parts, tmpMount...)
+			parts = append(parts, socketDirExecArgs)
 			parts = append(parts, shellescape.Quote(imageName), "timeout", "30")
 			parts = append(parts, quotedArgs...)
 			sb.WriteString(fmt.Sprintf("%s >> %s 2>&1 || true\n",
 				strings.Join(parts, " "), outFile))
-		} else {
+		default:
 			// Fallback: run on the host when singularity is not configured
 			sb.WriteString(fmt.Sprintf("timeout 30 %s >> %s 2>&1 || true\n",
 				strings.Join(quotedArgs, " "), outFile))
@@ -308,8 +318,9 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 	return sb.String()
 }
 
-// injectTmpBindMount inserts "--bind" hookTmpBindMountArg before the last
-// element (the container image) in a runtime command slice.
+// injectTmpBindMount inserts the runtime's mount of hook-tmp at /tmp (see
+// tmpMountArgs) before the last element (the container image or, under enroot,
+// the container name) in a runtime command slice.
 //
 // This is used to ensure the main container sees the same /tmp as the postStart
 // hook when singularity's --containall flag is in effect.
@@ -322,7 +333,7 @@ func generatePostStartScript(config SlurmConfig, cmd ContainerCommand) string {
 // If runtimeCmd is empty (which indicates a misconfiguration since the runtime
 // command should always contain at least the image), a warning is logged and
 // the original slice is returned unchanged.
-func injectTmpBindMount(runtimeCmd []string) []string {
+func injectTmpBindMount(runtimeCmd []string, runtime string) []string {
 	if len(runtimeCmd) == 0 {
 		log.G(context.Background()).Warning("injectTmpBindMount: runtimeCmd is empty; skipping /tmp bind mount injection")
 		return runtimeCmd
@@ -335,10 +346,36 @@ func injectTmpBindMount(runtimeCmd []string) []string {
 	}
 	result := make([]string, 0, len(runtimeCmd)+2)
 	result = append(result, runtimeCmd[:len(runtimeCmd)-1]...)
-	result = append(result, "--bind", hookTmpBindMountArg)
+	result = append(result, tmpMountArgs(runtime, "")...)
 	result = append(result, runtimeCmd[len(runtimeCmd)-1])
 	return result
 }
+
+// tmpMountArgs returns the runtime's flag and argument that mount host path
+// hostPath read-write at /tmp, or hook-tmp (hookTmpBindMountArg) when hostPath
+// is empty.  An existing path is quoted with shellescape.
+func tmpMountArgs(runtime, hostPath string) []string {
+	mountFlag := singularityBindFlag
+	if runtime == "enroot" {
+		mountFlag = enrootMountFlag
+	}
+	if hostPath == "" {
+		return []string{mountFlag, hookTmpBindMountArg}
+	}
+	return []string{mountFlag, shellescape.Quote(hostPath) + ":/tmp"}
+}
+
+// hookRCFile is the command script of the enroot start that runs a postStart
+// hook.  The image's /etc/rc runs the image's entrypoint with the command as its
+// arguments; this one runs the hook command itself, as singularity exec does.
+// It is written to TMPDIR (or /tmp), outside the job directory: enroot copies it
+// into its runtime directory preserving permissions, and from a site's shared job
+// filesystem that copy failed ("cp: preserving permissions ... Invalid argument"),
+// so the hook never ran.
+const hookRCFile = `"$hook_rc"`
+
+// hookRCSetup writes hookRCFile; the hook's enroot start runs only if it worked.
+const hookRCSetup = `hook_rc=$(mktemp "${TMPDIR:-/tmp}/interlink-hook-rc.XXXXXX") && printf '%s\n' 'exec "$@"' > "$hook_rc"`
 
 // Flags that bind a host path into the container, per runtime.
 const (
@@ -351,6 +388,9 @@ const (
 // a check can connect to the workload's unix socket. job.slurm exports
 // INTERLINK_SOCKET_DIR before it runs job.sh, where probes and hooks run.
 const socketDirExecArgs = `${INTERLINK_SOCKET_DIR:+--bind "$INTERLINK_SOCKET_DIR:$INTERLINK_SOCKET_DIR" --env "INTERLINK_SOCKET_DIR=$INTERLINK_SOCKET_DIR"}`
+
+// enrootSocketDirExecArgs is socketDirExecArgs for the enroot start of a lifecycle hook.
+const enrootSocketDirExecArgs = `${INTERLINK_SOCKET_DIR:+--mount "$INTERLINK_SOCKET_DIR:$INTERLINK_SOCKET_DIR" --env "INTERLINK_SOCKET_DIR=$INTERLINK_SOCKET_DIR"}`
 
 // injectSocketDir binds the pod's socket directory dir into the container at the
 // same path and sets INTERLINK_SOCKET_DIR to it, inserting both before the last

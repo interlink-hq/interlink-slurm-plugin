@@ -1711,8 +1711,8 @@ highestExitCode=0
 				// When a postStart hook is present, add a shared /tmp bind mount to
 				// the runtime command so the container sees files written by the hook.
 				// Both the hook exec (in generatePostStartScript) and the container
-				// use --bind "${workingPath}/hook-tmp:/tmp".
-				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
+				// mount "${workingPath}/hook-tmp" at /tmp.
+				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand, config.ContainerRuntime)
 			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
