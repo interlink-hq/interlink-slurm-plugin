@@ -126,6 +126,7 @@ func (h *SidecarHandler) createPod(spanCtx context.Context, data commonIL.Retrie
 	if gang {
 		member := gangMemberFromCreate(data.Pod, filesPath, workDir, rendered.runtimeCommands, rendered.resourceLimits, rendered.isDefaultCPU, rendered.isDefaultRAM, rendered.flavor)
 		member.Role = gangRoleFromMeta(data.Pod.ObjectMeta)
+		member.JobScript = data.JobScript != ""
 		gangJID, submitted, gerr := h.bufferGangMember(spanCtx, member, size)
 		if gerr != nil {
 			span.AddEvent("Failed to submit the gang SLURM Job")

@@ -1255,6 +1255,83 @@ func TestReCreateIntoTimedOutGroupKeepsFiles(t *testing.T) {
 	}
 }
 
+// /create renders a member when it arrives, before the head may have: at quorum
+// every member of an enroot group gets the rank variables and the head's mpi-env
+// in its enroot start, as /createPodGroup gives them, and keeps them when its pod
+// is sent again. Its job.sh is written again from the commands it was rendered
+// with, so it stays the one rendered on arrival but for the --env options, also
+// with slurm-job.vk.io/mpi-flags set.
+func TestBufferedEnrootGroupGetsHeadEnv(t *testing.T) {
+	h, dataRoot, _ := newHandlerWithStubs(t, "42")
+	h.Config.ContainerRuntime = enrootRuntime
+	h.Config.EnrootPath = enrootRuntime
+	const mpiFlagsKey = "slurm-job.vk.io/mpi-flags"
+	worker := newGangMemberPod("uid-w", "g1", GangRoleWorker, 2, map[string]string{mpiFlagsKey: "--bind-to core"})
+	head := newGangMemberPod("uid-h", "g1", GangRoleHead, 2, map[string]string{testMPIEnvAnnotation: "NCCL_SOCKET_IFNAME=ib0;FI_PROVIDER=efa", mpiFlagsKey: "--bind-to core"})
+	jobSh := func(uid string) string {
+		t.Helper()
+		raw, err := os.ReadFile(memberDir(dataRoot, uid) + "/job.sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	if rec := submitPod(t, h, worker); rec.Code != http.StatusOK {
+		t.Fatalf("worker: code %d, body %q", rec.Code, rec.Body.String())
+	}
+	onArrival := jobSh("uid-w")
+	if rec := submitPod(t, h, head); rec.Code != http.StatusOK {
+		t.Fatalf("head: code %d, body %q", rec.Code, rec.Body.String())
+	}
+	envOpts := " --env " + strings.Join(h.GangTable[gangKey(testNamespace, "g1")].EnrootEnv, " --env ")
+	if strings.Contains(onArrival, " --env ") {
+		t.Fatalf("the worker's job.sh has --env options before quorum\n%s", onArrival)
+	}
+
+	want := []string{"RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "RAY_ADDRESS", "NCCL_SOCKET_IFNAME=ib0", "FI_PROVIDER=efa"}
+	check := func(when string) {
+		t.Helper()
+		for _, uid := range []string{"uid-w", "uid-h"} {
+			raw := jobSh(uid)
+			starts := 0
+			for _, line := range strings.Split(raw, "\n") {
+				if !strings.Contains(line, " "+enrootRuntime+" start ") {
+					continue
+				}
+				starts++
+				for _, w := range want {
+					if !strings.Contains(line, " --env "+w+" ") {
+						t.Errorf("%s: %s's enroot start lacks --env %s: %s", when, uid, w, line)
+					}
+				}
+			}
+			if starts == 0 {
+				t.Errorf("%s: %s's job.sh has no enroot start\n%s", when, uid, raw)
+			}
+		}
+		got, arrival := strings.Split(strings.ReplaceAll(jobSh("uid-w"), envOpts, ""), "\n"), strings.Split(onArrival, "\n")
+		if len(got) != len(arrival) {
+			t.Errorf("%s: without the --env options the worker's job.sh has %d lines, %d on arrival", when, len(got), len(arrival))
+			return
+		}
+		for i := range got {
+			if got[i] != arrival[i] {
+				t.Errorf("%s: without the --env options line %d of the worker's job.sh is\n%s\non arrival\n%s", when, i+1, got[i], arrival[i])
+			}
+		}
+	}
+	check("at quorum")
+	if raw, err := os.ReadFile(memberDir(dataRoot, "uid-h") + "/job.slurm"); err != nil || !strings.Contains(string(raw), "#SBATCH --nodes=2\n") {
+		t.Fatalf("the head's job.slurm is not the group's (%v)\n%s", err, raw)
+	}
+
+	if rec := submitPod(t, h, worker); rec.Code != http.StatusOK {
+		t.Fatalf("worker sent again: code %d, body %q", rec.Code, rec.Body.String())
+	}
+	check("worker sent again")
+}
+
 // Two namespaces may use the same pod-group name: their pods form two groups and
 // two jobs, and a pod of one never joins the running job of the other.
 func TestBufferKeysGroupsByNamespace(t *testing.T) {

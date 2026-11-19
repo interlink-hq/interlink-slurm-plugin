@@ -2,6 +2,7 @@ package slurm
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,6 +236,33 @@ func TestSiteLauncherGroupOfOne(t *testing.T) {
 	}
 	script := string(raw)
 	for _, want := range []string{"#SBATCH --nodes=1\n", "export GANG_NNODES=1\n", "\n( torchrun-launcher "} {
+		if !strings.Contains(script, want) {
+			t.Errorf("job.slurm lacks %q\n---\n%s", want, script)
+		}
+	}
+}
+
+// The same through /create, as a Kueue pod group of one: the group is complete with
+// its first pod, and one sbatch --nodes=1 runs the head's pre-exec and calls the
+// launcher.
+func TestSiteLauncherKueueGroupOfOne(t *testing.T) {
+	h, dataRoot, _, sbatchCount := newPodGroupHandler(t, "echo 'Submitted batch job 42'")
+	h.Config.SiteScriptPath = writeSite(t, testSite)
+	pod := kueueMemberPod(rankUID(0), testGroup, 0, 1)
+	pod.Annotations[LauncherAnnotation] = testTorchrun
+	pod.Annotations[preExecAnnotation] = "export TUNNEL_SET_UP=1"
+	if rec := submitPod(t, h, pod); rec.Code != http.StatusOK {
+		t.Fatalf("code %d, body %q", rec.Code, rec.Body.String())
+	}
+	if n := countLines(t, sbatchCount); n != 1 {
+		t.Fatalf("sbatch ran %d times, want 1", n)
+	}
+	raw, err := os.ReadFile(memberDir(dataRoot, rankUID(0)) + "/job.slurm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, want := range []string{"#SBATCH --nodes=1\n", "export GANG_NNODES=1\n", "\nexport TUNNEL_SET_UP=1\n", "\n( torchrun-launcher "} {
 		if !strings.Contains(script, want) {
 			t.Errorf("job.slurm lacks %q\n---\n%s", want, script)
 		}

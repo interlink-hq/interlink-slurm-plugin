@@ -207,6 +207,7 @@ type BufferedMember struct {
 	IsDefaultCPU    bool
 	IsDefaultRAM    bool
 	Flavor          *FlavorResolution
+	JobScript       bool // job.sh runs the job script interLink sent (RetrievedPodData.JobScript), not RuntimeCommands
 }
 
 // GangEntry is one gang (keyed by its name in GangTable): its members, and the
@@ -223,6 +224,9 @@ type GangEntry struct {
 	// for them; CreatedAt is when the first one arrived.
 	Buffering bool
 	CreatedAt time.Time
+	// EnrootEnv is the head's gangEnrootEnv, given to the members of a group
+	// that /create receives pod by pod when the group is complete.
+	EnrootEnv []string
 }
 
 type ProbeType string

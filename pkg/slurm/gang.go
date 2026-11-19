@@ -962,6 +962,14 @@ func (h *SidecarHandler) bufferGangMember(ctx context.Context, member *BufferedM
 		log.G(ctx).Infof("Gang '%s': created buffer, size=%d", key, size)
 	}
 
+	// A pod sent again after its group was complete was rendered again without
+	// the group's enroot env.
+	if _, known := entry.Members[member.PodUID]; known {
+		if err := h.writeEnrootEnv(ctx, entry.EnrootEnv, member); err != nil {
+			return "", false, submitFailure(err)
+		}
+	}
+
 	// Idempotency / re-Create safety: if this UID is already buffered, or the gang
 	// is already submitted, do not double-count.
 	if entry.Submitted {
@@ -1026,7 +1034,12 @@ func (h *SidecarHandler) bufferGangMember(ctx context.Context, member *BufferedM
 	log.G(ctx).Infof("Gang '%s': quorum reached (%d/%d), submitting single co-scheduled sbatch", key, len(entry.Members), entry.Size)
 
 	ordered := assignRanks(entry.Members)
-	jid, err := h.submitGang(ctx, entry, ordered)
+	entry.EnrootEnv = gangEnrootEnv(ctx, h.Config.ContainerRuntime, ordered[0].Pod.ObjectMeta)
+	var jid string
+	err := h.writeEnrootEnv(ctx, entry.EnrootEnv, ordered...)
+	if err == nil {
+		jid, err = h.submitGang(ctx, entry, ordered)
+	}
 	if err != nil && !errors.Is(err, errGangSubmitted) {
 		// This member's create fails and its controller replaces it; the others stay
 		// buffered, so the replacement completes the quorum again instead of making
@@ -1048,6 +1061,32 @@ func (h *SidecarHandler) bufferGangMember(ctx context.Context, member *BufferedM
 
 // errGangSubmitted marks a failure after the gang's sbatch ran: its job may run.
 var errGangSubmitted = errors.New("sbatch ran")
+
+// writeEnrootEnv gives the enroot start of every container of each member the
+// `--env` arguments env (the head's gangEnrootEnv) and writes the member's job
+// script again: /create renders a member when it arrives, before the head may
+// have, so without them. A member whose job.sh runs the job script interLink
+// sent is left as renderPod leaves it. A nil env (another runtime) writes
+// nothing. The caller MUST hold h.GangMu; at quorum it runs before
+// produceGangSLURMScript writes the group's job.slurm over the head's.
+func (h *SidecarHandler) writeEnrootEnv(ctx context.Context, env []string, members ...*BufferedMember) error {
+	if env == nil {
+		return nil
+	}
+	for _, m := range members {
+		if m.JobScript {
+			continue
+		}
+		for i := range m.RuntimeCommands {
+			m.RuntimeCommands[i].enrootEnv = env
+		}
+		// Rendering m.RuntimeCommands again relies on produceSLURMScript not changing them.
+		if _, err := produceSLURMScript(ctx, h.Config, m.Pod, m.WorkDir, m.Pod.ObjectMeta, m.RuntimeCommands, m.ResourceLimits, m.IsDefaultCPU, m.IsDefaultRAM, m.Flavor); err != nil {
+			return fmt.Errorf("pod %s: writing its job script with the group's enroot env: %w", m.PodUID, err)
+		}
+	}
+	return nil
+}
 
 // submitGang submits ONE sbatch for the members of entry, ordered by rank, and
 // back-fills every member's JID. A failure after sbatch ran wraps
