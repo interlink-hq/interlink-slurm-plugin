@@ -146,8 +146,9 @@ func TestSubmitHandlerClosesJobScript(t *testing.T) {
 
 // A pod whose containers set no CPU or memory limit gets its flavor's CPUDefault and
 // MemoryDefault in job.slurm, not the 1 CPU / 1 MB fallback. Pod limits and the flags
-// annotation rank above the flavor, as the README documents; pod limits include init
-// containers', since SubmitHandler counts every container.
+// annotation rank above the flavor, as the README documents. An init container's limit
+// alone does not lower the job below the flavor default: the app containers it precedes
+// have no limit.
 func TestSubmitHandlerFlavorDefaults(t *testing.T) {
 	limits := func(cpu, mem string) v1.ResourceRequirements {
 		return v1.ResourceRequirements{Limits: v1.ResourceList{v1.ResourceCPU: resource.MustParse(cpu), v1.ResourceMemory: resource.MustParse(mem)}}
@@ -160,7 +161,8 @@ func TestSubmitHandlerFlavorDefaults(t *testing.T) {
 		cpus, mem string
 	}{
 		{name: "no limits", cpus: "4", mem: "2048"},
-		{name: "init container limits only", init: []v1.Container{{Name: "setup", Image: busyboxImage, Resources: limits("1", "1Gi")}}, cpus: "1", mem: "1024"},
+		{name: "init container limits only", init: []v1.Container{{Name: "setup", Image: busyboxImage, Resources: limits("1", "100Mi")}}, cpus: "4", mem: "2048"},
+		{name: "init container limits above the flavor", init: []v1.Container{{Name: "setup", Image: busyboxImage, Resources: limits("6", "3Gi")}}, cpus: "6", mem: "3072"},
 		{name: "annotation flags", flags: "--cpus-per-task=8 --mem=8192", cpus: "8", mem: "8192"},
 		{name: "init container limits and annotation flags", init: []v1.Container{{Name: "setup", Image: busyboxImage, Resources: limits("16", "16Gi")}}, flags: "--cpus-per-task=8 --mem=8192", cpus: "16", mem: "16384"},
 		{name: "app limits, init container without", init: []v1.Container{{Name: "setup", Image: busyboxImage}}, app: limits("2", "1Gi"), cpus: "2", mem: "1024"},

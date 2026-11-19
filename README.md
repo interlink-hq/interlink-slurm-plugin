@@ -184,8 +184,8 @@ Flavors:
 
 #### Flavor Behavior
 
-- **Default Resources**: Flavor CPU/memory defaults apply ONLY when pod doesn't specify resource limits
-- **Pod Overrides**: If pod specifies resource limits, those take precedence over flavor defaults
+- **Default Resources**: Flavor CPU/memory defaults apply ONLY when no app container specifies resource limits; a limit set only on an init container does not lower the job below the flavor default (the job gets the larger of the two)
+- **Pod Overrides**: If an app container specifies resource limits, those take precedence over flavor defaults
 - **SLURM Flag Priority**: Flavor flags < Annotation flags < Pod resource limits
 - **Flag Deduplication**: Duplicate flags are automatically removed, with later flags overriding earlier ones
 
