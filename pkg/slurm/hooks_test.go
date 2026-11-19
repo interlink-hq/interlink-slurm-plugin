@@ -1,11 +1,16 @@
 package slurm
 
 import (
+	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -519,7 +524,7 @@ func TestInjectTmpBindMount_SkipsWhenTmpAlreadyBound(t *testing.T) {
 		"--bind /host/emptydir:/tmp",
 		"docker://python:3.11-alpine",
 	}
-	got := injectTmpBindMount(runtimeCmd)
+	got := injectTmpBindMount(runtimeCmd, singularityRuntime)
 	// Should return the original slice unchanged
 	if len(got) != len(runtimeCmd) {
 		t.Errorf("injectTmpBindMount should not inject when /tmp already bound: got len %d, want %d", len(got), len(runtimeCmd))
@@ -662,5 +667,215 @@ func TestSocketDirExecArgsExpandOnlyWithADirectory(t *testing.T) {
 	want := "--bind\n/s/1b2c:/s/1b2c\n--env\nINTERLINK_SOCKET_DIR=/s/1b2c\n"
 	if got := run("INTERLINK_SOCKET_DIR=/s/1b2c"); got != want {
 		t.Errorf("with INTERLINK_SOCKET_DIR: got %q, want %q", got, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// postStart hook in the rendered job.sh
+// ---------------------------------------------------------------------------
+
+// fakeEnrootStart stands in for enroot: import and create do nothing, and start reads the
+// options job.sh uses as enroot 4.2.1 does (enroot.in, enroot::start) and, like enroot,
+// prints its usage and exits 1 on any other option. It checks --mount and --env as
+// runtime::start does and logs one line per start to $FAKE_ENROOT_LOG.
+const fakeEnrootStart = `#!/bin/bash
+set -euo pipefail
+[ "$1" = start ] || exit 0
+shift
+rc= mounts= envs=
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -c|--conf) shift 2 ;;
+  --rc) rc=$(cat "$2"); echo "$2" >> "$FAKE_ENROOT_LOG.rc"; shift 2 ;;
+  -m|--mount) [[ "$2" =~ ^[^[:space:]]+(:[^[:space:]]+)*$ ]] || exit 1; mounts+=" $2"; shift 2 ;;
+  -e|--env) [[ "$2" =~ ^[[:alpha:]_][[:alnum:]_]*(=|$) ]] || exit 1; envs+=" $2"; shift 2 ;;
+  -r|--root|-w|--rw) shift ;;
+  --) shift; break ;;
+  -?*) echo "Usage: enroot start [options] [--] NAME|IMAGE [COMMAND] [ARG...]" >&2; exit 1 ;;
+  *) break ;;
+  esac
+done
+name=$1; shift
+printf 'start %s rc=%s mounts=%s env=%s cmd=%s\n' "$name" "$rc" "${mounts# }" "${envs# }" "$(printf '[%s]' "$@")" >> "$FAKE_ENROOT_LOG"
+`
+
+// fakeSingularityLog logs that singularity ran.
+const fakeSingularityLog = `#!/bin/bash
+echo "singularity $*" >> "$FAKE_ENROOT_LOG"
+`
+
+func postStartTestPod() v1.Pod {
+	return v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "hookpod", Namespace: metav1.NamespaceDefault, UID: socketTestUID}}
+}
+
+// postStartTestScript is the shell script of the postStart hook in the job.sh tests.
+const postStartTestScript = "echo hook > /tmp/marker"
+
+func postStartTestHook() *LifecycleHookSpec {
+	return &LifecycleHookSpec{Type: LifecycleHookTypeExec, ExecCommand: []string{"/bin/sh", "-c", postStartTestScript}}
+}
+
+// Under enroot, the postStart exec hook runs in the pod's enroot container with enroot
+// start, with an rc that runs the hook instead of the image's entrypoint, and the hook and
+// the container share /tmp through enroot's --mount: hook-tmp, or the container's own /tmp
+// volume. job.sh runs with a fake enroot that rejects options enroot does not know.
+func TestPostStartHookEnrootJobScript(t *testing.T) {
+	requireBash(t)
+	bin := t.TempDir()
+	for name, script := range map[string]string{"enroot": fakeEnrootStart, "singularity": fakeSingularityLog} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil { //nolint:gosec // the fake runtimes must be executable
+			t.Fatal(err)
+		}
+	}
+	config := SlurmConfig{
+		ContainerRuntime:     enrootRuntime,
+		EnrootPath:           filepath.Join(bin, "enroot"),
+		EnrootDefaultOptions: []string{"--rw"},
+		SingularityPath:      filepath.Join(bin, "singularity"),
+	}
+	pod := postStartTestPod()
+	enrootName := testContainer + string(pod.UID)
+	const socketDirMount = socketTestDir + ":" + socketTestDir
+
+	for _, tc := range []struct {
+		name, mounts, tmpMount string
+		hookTmp                bool
+	}{
+		{name: "hook-tmp", tmpMount: "WORKDIR/hook-tmp:/tmp", hookTmp: true},
+		{name: "tmp volume", mounts: " --mount /host/emptydir:/tmp ", tmpMount: "/host/emptydir:/tmp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			commands := []ContainerCommand{{
+				runtimeCommand: append(prepareRuntimeCommand(config, v1.Container{}, pod.ObjectMeta), tc.mounts, enrootName),
+				containerName:  testContainer,
+				containerImage: busyboxImage,
+				postStartHook:  postStartTestHook(),
+			}}
+			if _, err := produceSLURMScript(context.Background(), config, pod, workDir, pod.ObjectMeta, commands, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+				t.Fatalf("produceSLURMScript() error: %v", err)
+			}
+
+			logFile := filepath.Join(t.TempDir(), "log")
+			nodeTmp := t.TempDir()
+			cmd := exec.Command("bash", "job.sh")
+			cmd.Dir = workDir
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FAKE_ENROOT_LOG=" + logFile, "INTERLINK_SOCKET_DIR=" + socketTestDir, "TMPDIR=" + nodeTmp}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("job.sh failed: %v\n%s", err, out)
+			}
+			raw, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// enroot copies the --rc file preserving permissions, which failed from a
+			// site's shared job filesystem: the file must be in TMPDIR, and removed after.
+			rcPaths, err := os.ReadFile(logFile + ".rc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rcPath := strings.TrimSpace(string(rcPaths))
+			if filepath.Dir(rcPath) != nodeTmp {
+				t.Errorf("--rc file %s, want it in TMPDIR %s, not in the job directory", rcPath, nodeTmp)
+			}
+			if _, err := os.Stat(rcPath); err == nil { //nolint:gosec // the path the fake enroot logged
+				t.Errorf("--rc file %s left behind", rcPath)
+			}
+
+			tmpMount := strings.ReplaceAll(tc.tmpMount, "WORKDIR", workDir)
+			want := []string{
+				"start " + enrootName + ` rc=exec "$@" mounts=` + tmpMount + " " + socketDirMount +
+					" env=INTERLINK_SOCKET_DIR=" + socketTestDir + " cmd=[timeout][30][/bin/sh][-c][" + postStartTestScript + "]",
+				"start " + enrootName + " rc= mounts=" + tmpMount + " env= cmd=[]",
+			}
+			if got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("runtime calls\n%q\nwant\n%q", got, want)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, "hook-tmp")); (err == nil) != tc.hookTmp {
+				t.Errorf("hook-tmp created: %v, want %v", err == nil, tc.hookTmp)
+			}
+		})
+	}
+}
+
+// Under enroot, a postStart httpGet hook runs curl on the host, and the container starts
+// with hook-tmp mounted at /tmp through enroot's --mount, which enroot start accepts.
+func TestPostStartHTTPGetHookEnrootJobScript(t *testing.T) {
+	requireBash(t)
+	bin := t.TempDir()
+	for name, script := range map[string]string{"enroot": fakeEnrootStart, "curl": "#!/bin/bash\necho \"curl $*\" >> \"$FAKE_ENROOT_LOG\"\n"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil { //nolint:gosec // the fakes must be executable
+			t.Fatal(err)
+		}
+	}
+	config := SlurmConfig{
+		ContainerRuntime:     enrootRuntime,
+		EnrootPath:           filepath.Join(bin, "enroot"),
+		EnrootDefaultOptions: []string{"--rw"},
+	}
+	pod := postStartTestPod()
+	enrootName := testContainer + string(pod.UID)
+	workDir := t.TempDir()
+	commands := []ContainerCommand{{
+		runtimeCommand: append(prepareRuntimeCommand(config, v1.Container{}, pod.ObjectMeta), "", enrootName),
+		containerName:  testContainer,
+		containerImage: busyboxImage,
+		postStartHook:  &LifecycleHookSpec{Type: LifecycleHookTypeHTTPGet, HTTPGet: &LifecycleHTTPGetSpec{Scheme: "http", Host: "localhost", Port: 8080, Path: "/ready"}},
+	}}
+	if _, err := produceSLURMScript(context.Background(), config, pod, workDir, pod.ObjectMeta, commands, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() error: %v", err)
+	}
+	logFile := filepath.Join(t.TempDir(), "log")
+	cmd := exec.Command("bash", "job.sh")
+	cmd.Dir = workDir
+	cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "FAKE_ENROOT_LOG=" + logFile}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("job.sh failed: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"curl -f -s --max-time 10 http://localhost:8080/ready",
+		"start " + enrootName + " rc= mounts=" + workDir + "/hook-tmp:/tmp env= cmd=[]",
+	}
+	if got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls\n%q\nwant\n%q", got, want)
+	}
+}
+
+// Under Singularity, job.sh runs the postStart exec hook with singularity exec and binds
+// the same /tmp into the container.
+func TestPostStartHookSingularityJobScript(t *testing.T) {
+	config := SlurmConfig{
+		ContainerRuntime:          singularityRuntime,
+		SingularityPath:           "/usr/bin/singularity",
+		SingularityDefaultOptions: []string{"--containall"},
+	}
+	pod := postStartTestPod()
+	workDir := t.TempDir()
+	commands := []ContainerCommand{{
+		runtimeCommand: append(prepareRuntimeCommand(config, v1.Container{}, pod.ObjectMeta), "", busyboxImage),
+		containerName:  testContainer,
+		containerImage: busyboxImage,
+		postStartHook:  postStartTestHook(),
+	}}
+	if _, err := produceSLURMScript(context.Background(), config, pod, workDir, pod.ObjectMeta, commands, ResourceLimits{CPU: 1, Memory: 1024 * 1024}, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(workDir, "job.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		`mkdir -p "${workingPath}/hook-tmp"`,
+		`/usr/bin/singularity exec --containall --bind "${workingPath}/hook-tmp:/tmp" ` + socketDirExecArgs +
+			` docker://busybox timeout 30 /bin/sh -c '` + postStartTestScript + `' >> "${workingPath}/run-main.out" 2>&1 || true`,
+		`runCtn main /usr/bin/singularity run --containall    --bind "${workingPath}/hook-tmp:/tmp" docker://busybox`,
+	} {
+		if !slices.Contains(strings.Split(string(raw), "\n"), line) {
+			t.Errorf("job.sh has no line\n%s\nin\n%s", line, raw)
+		}
 	}
 }

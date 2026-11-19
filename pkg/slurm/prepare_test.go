@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1285,5 +1286,56 @@ func TestPrepareMountsSkipsPersistentVolumeClaim(t *testing.T) {
 	}
 	if strings.Contains(mounts, "/home/jovyan") {
 		t.Errorf("PVC mount should be skipped, got %q", mounts)
+	}
+}
+
+// enroot takes mounts as fstab entries (--mount): src:dst for read-write, the bind options plus
+// ro for read-only. singularity's --bind makes enroot start fail, and with a ":ro" or ":rw"
+// suffix the entry is not a bind mount.
+func TestPrepareMountsEnroot(t *testing.T) {
+	const ctn = "node"
+	hostDir := t.TempDir()
+	dirOrCreate := v1.HostPathDirectoryOrCreate
+	mode := int32(0o644)
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "alice"},
+		Spec: v1.PodSpec{
+			Volumes: []v1.Volume{
+				{Name: "scratch", VolumeSource: v1.VolumeSource{EmptyDir: &v1.EmptyDirVolumeSource{}}},
+				{Name: "cfg", VolumeSource: v1.VolumeSource{ConfigMap: &v1.ConfigMapVolumeSource{
+					LocalObjectReference: v1.LocalObjectReference{Name: "cfg"}, DefaultMode: &mode}}},
+				{Name: "data", VolumeSource: v1.VolumeSource{HostPath: &v1.HostPathVolumeSource{Path: hostDir, Type: &dirOrCreate}}},
+			},
+			Containers: []v1.Container{{
+				Name: ctn,
+				VolumeMounts: []v1.VolumeMount{
+					{Name: "scratch", MountPath: "/scratch"},
+					{Name: "cfg", MountPath: "/etc/cfg", ReadOnly: true},
+					{Name: "cfg", MountPath: "/etc/cfgrw"},
+					{Name: "data", MountPath: "/data", ReadOnly: true},
+				},
+			}},
+		},
+	}
+	cm := v1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cfg"}, Data: map[string]string{"k": "v"}}
+	podData := &commonIL.RetrievedPodData{Pod: pod, Containers: []commonIL.RetrievedContainer{{Name: ctn, ConfigMaps: []v1.ConfigMap{cm}}}}
+
+	mounts, err := prepareMounts(context.Background(), SlurmConfig{ContainerRuntime: enrootRuntime, ExportPodData: true}, podData, &pod.Spec.Containers[0], t.TempDir())
+
+	if err != nil {
+		t.Fatalf("prepareMounts: %v", err)
+	}
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(` --mount \S+/emptyDirs/scratch:/scratch `),
+		regexp.MustCompile(` --mount \S+/k:/etc/cfg/k:none:x-create=auto,rbind,ro `),
+		regexp.MustCompile(` --mount \S+/k:/etc/cfgrw/k `),
+		regexp.MustCompile(` --mount ` + regexp.QuoteMeta(hostDir) + `:/data:none:x-create=auto,rbind,ro`),
+	} {
+		if !want.MatchString(mounts) {
+			t.Errorf("want %s in %q", want, mounts)
+		}
+	}
+	if strings.Contains(mounts, "--bind") || strings.Contains(mounts, ":rw") || regexp.MustCompile(`:ro( |$)`).MatchString(mounts) {
+		t.Errorf("singularity syntax in an enroot mount: %q", mounts)
 	}
 }

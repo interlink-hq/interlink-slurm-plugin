@@ -693,6 +693,63 @@ func (h *SidecarHandler) LoadJIDs() error {
 	return nil
 }
 
+// enroot reads the image's /etc/environment before it performs any mount, so an env
+// file mounted there is never loaded, and it starts the container without the host
+// environment. Every enroot container with Env or EnvFrom instead gets an enroot
+// configuration script (--conf) whose environ() prints the lines enroot adds to the
+// container's environment: the pod's own variables, and nothing of the host's
+// environment. The quoted here-document keeps the pod's values literal, and no line can
+// end it because every line holds a "=".
+//
+// enroot formats that environment twice (common::envfmt, runtime.sh _do_environ and
+// again after the hooks in _do_hooks), and each pass removes a pair of quotes around a
+// value. Every value is printed inside a pair of single quotes, and one that starts with a
+// quote or a backslash inside two, so the second pass cannot strip the value's own quotes
+// whatever it counts as a trailing space: the hooks, which read the file between the two
+// passes (NVIDIA_*, MELLANOX_*), see plain values unchanged.
+const (
+	enrootEnvConfHead = "environ() {\n  cat <<'INTERLINK_ENV'\n"
+	enrootEnvConfTail = "INTERLINK_ENV\n}\n"
+)
+
+// enrootEnvName is the variable name enroot accepts; it drops any other line.
+var enrootEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// enrootQuotedValue is a value whose own quotes the second common::envfmt pass could strip.
+var enrootQuotedValue = regexp.MustCompile(`^["'\\]`)
+
+// envFileLine renders one variable for the runtime's env file, or reports false when
+// the runtime cannot carry it.
+func envFileLine(Ctx context.Context, runtime, container, name, value string) (string, bool) {
+	if runtime == "enroot" {
+		// enroot's environment file holds one variable per line.
+		if !enrootEnvName.MatchString(name) || strings.Contains(value, "\n") {
+			log.G(Ctx).Warning("-- enroot cannot pass env var " + name + " of container " + container + ": invalid name or a newline in the value; skipped")
+			return "", false
+		}
+		quote := "'"
+		if enrootQuotedValue.MatchString(value) {
+			quote = "''"
+		}
+		return name + "=" + quote + value + quote, true
+	}
+	// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
+	// singularity reads the env-file and parse it like a shell string, so shellescape will escape any quote properly.
+	return name + "=" + shellescape.Quote(value), true
+}
+
+// enrootConfOption returns the first -c or --conf in options, or "".
+func enrootConfOption(options ...string) string {
+	for _, o := range options {
+		for _, word := range splitShellWords(o) {
+			if word == "-c" || word == "--conf" || strings.HasPrefix(word, "--conf=") {
+				return word
+			}
+		}
+	}
+	return ""
+}
+
 func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.RetrievedPodData, container v1.Container, workDir string) ([]string, []string, error) {
 	envs := []string{}
 	// For debugging purpose only
@@ -706,8 +763,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 		envs = append(envs, "--env-file")
 		envs = append(envs, envfilePath)
 	case "enroot":
-		mountEnvs := envfilePath + ":" + "/etc/environment"
-		envs = append(envs, "--mount", mountEnvs)
+		envs = append(envs, "--conf", envfilePath)
+		if word := enrootConfOption(strings.Join(config.EnrootDefaultOptions, " "), podData.Pod.Annotations["slurm-job.vk.io/enroot-options"]); word != "" {
+			log.G(Ctx).Warning("-- Ignoring enroot option " + word + " for container " + container.Name + ": enroot runs only the last --conf, the plugin's, which carries the pod's env")
+		}
 	}
 
 	envfile, err := os.Create(envfilePath)
@@ -717,20 +776,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 	}
 	defer envfile.Close()
 
-	for _, envVar := range container.Env {
-		// The environment variable values can contains all sort of simple/double quote and space and any arbitrary values.
-		// singularity reads the env-file and parse it like a shell string, so shellescape will escape any quote properly.
-		tmpValue := shellescape.Quote(envVar.Value)
-		tmp := (envVar.Name + "=" + tmpValue)
-
-		envs_data = append(envs_data, tmp)
-
-		_, err := envfile.WriteString(tmp + "\n")
-		if err != nil {
+	if config.ContainerRuntime == "enroot" {
+		if _, err := envfile.WriteString(enrootEnvConfHead); err != nil {
 			log.G(Ctx).Error(err)
 			return nil, nil, err
-		} else {
-			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " key " + envVar.Name + " value " + tmpValue)
 		}
 	}
 
@@ -753,8 +802,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					return nil, nil, err
 				}
 				for k, v := range secret.Data {
-					tmpValue := shellescape.Quote(string(v))
-					tmp := prefix + k + "=" + tmpValue
+					tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, prefix+k, string(v))
+					if !ok {
+						continue
+					}
 					envs_data = append(envs_data, tmp)
 					_, err := envfile.WriteString(tmp + "\n")
 					if err != nil {
@@ -776,8 +827,10 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					return nil, nil, err
 				}
 				for k, v := range configMap.Data {
-					tmpValue := shellescape.Quote(v)
-					tmp := prefix + k + "=" + tmpValue
+					tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, prefix+k, v)
+					if !ok {
+						continue
+					}
 					envs_data = append(envs_data, tmp)
 					_, err := envfile.WriteString(tmp + "\n")
 					if err != nil {
@@ -787,6 +840,31 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					log.G(Ctx).Debug("---- Written envfile from configMap " + envFrom.ConfigMapRef.Name + " key " + k)
 				}
 			}
+		}
+	}
+
+	// env goes after envFrom: both runtimes keep the last value of a name, and env takes precedence.
+	for _, envVar := range container.Env {
+		tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, envVar.Name, envVar.Value)
+		if !ok {
+			continue
+		}
+
+		envs_data = append(envs_data, tmp)
+
+		_, err := envfile.WriteString(tmp + "\n")
+		if err != nil {
+			log.G(Ctx).Error(err)
+			return nil, nil, err
+		} else {
+			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " line " + tmp)
+		}
+	}
+
+	if config.ContainerRuntime == "enroot" {
+		if _, err := envfile.WriteString(enrootEnvConfTail); err != nil {
+			log.G(Ctx).Error(err)
+			return nil, nil, err
 		}
 	}
 
@@ -1085,11 +1163,15 @@ func prepareMounts(
 			case "enroot":
 				mountedDataSB.WriteString(" --mount ")
 			}
-			mountedDataSB.WriteString(hostPath + ":" + containerPath)
+			if config.ContainerRuntime == "enroot" {
+				mountedDataSB.WriteString(enrootMount(hostPath, containerPath, volumeMount.ReadOnly))
+			} else {
+				mountedDataSB.WriteString(hostPath + ":" + containerPath)
 
-			// if the read-only flag is set, we add it to the mountedDataSB
-			if volumeMount.ReadOnly {
-				mountedDataSB.WriteString(":ro")
+				// if the read-only flag is set, we add it to the mountedDataSB
+				if volumeMount.ReadOnly {
+					mountedDataSB.WriteString(":ro")
+				}
 			}
 
 		default:
@@ -1629,8 +1711,8 @@ highestExitCode=0
 				// When a postStart hook is present, add a shared /tmp bind mount to
 				// the runtime command so the container sees files written by the hook.
 				// Both the hook exec (in generatePostStartScript) and the container
-				// use --bind "${workingPath}/hook-tmp:/tmp".
-				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand)
+				// mount "${workingPath}/hook-tmp" at /tmp.
+				containerCommand.runtimeCommand = injectTmpBindMount(containerCommand.runtimeCommand, config.ContainerRuntime)
 			}
 			stringToBeWritten.WriteString("runCtn ")
 		}
@@ -1875,9 +1957,21 @@ func deleteContainer(Ctx context.Context, config SlurmConfig, podUID string, JID
 	return nil
 }
 
+// enrootMount is the --mount argument of enroot start for host path src at dst. enroot reads
+// it as an fstab entry with ':' for spaces: src:dst is a bind mount with enroot's default
+// options, rbind,x-create=auto. A third field such as "ro" or "rw" replaces those options,
+// so the entry is no longer a bind mount; a read-only mount keeps them and adds ro.
+func enrootMount(src, dst string, readOnly bool) string {
+	if readOnly {
+		return src + ":" + dst + ":none:x-create=auto,rbind,ro"
+	}
+	return src + ":" + dst
+}
+
 // For simple volume type like configMap, secret, projectedVolumeMap.
 func mountDataSimpleVolume(
 	Ctx context.Context,
+	runtime string,
 	container *v1.Container,
 	path string,
 	span trace.Span,
@@ -1922,6 +2016,9 @@ func mountDataSimpleVolume(
 		}
 
 		bind := fullPath + ":" + containerPath + mode + " "
+		if runtime == "enroot" {
+			bind = enrootMount(fullPath, containerPath, volumeMount.ReadOnly) + " "
+		}
 		volumesHostToContainerPaths = append(volumesHostToContainerPaths, bind)
 
 		if os.Getenv("SHARED_FS") != "true" {
@@ -2036,14 +2133,14 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 				mountDataConfigMapsAsBytes[key] = normalizeVolumeFileContent(retrievedDataObjectCasted.Data[key])
 			}
 			fileMode := os.FileMode(*defaultMode)
-			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)
+			return mountDataSimpleVolume(Ctx, config.ContainerRuntime, container, path, span, volumeMount, mountDataConfigMapsAsBytes, start, volumeType, fileMode)
 
 		case v1.Secret:
 			volumeType := "secrets"
 			log.G(Ctx).Debugf("in mountData() volume found: %s type: %s", volumeMount.Name, volumeType)
 
 			fileMode := os.FileMode(*volume.Secret.DefaultMode)
-			return mountDataSimpleVolume(Ctx, container, path, span, volumeMount, retrievedDataObjectCasted.Data, start, volumeType, fileMode)
+			return mountDataSimpleVolume(Ctx, config.ContainerRuntime, container, path, span, volumeMount, retrievedDataObjectCasted.Data, start, volumeType, fileMode)
 
 		case string:
 			span.AddEvent("Preparing EmptyDirs mount")
@@ -2082,8 +2179,12 @@ func mountData(Ctx context.Context, config SlurmConfig, container *v1.Container,
 				} else {
 					mode = ":rw"
 				}
-				edPath += (":" + volumeMount.MountPath + mode + " ")
-				edPaths = append(edPaths, " --bind "+edPath+" ")
+				if config.ContainerRuntime == "enroot" {
+					edPaths = append(edPaths, " --mount "+enrootMount(edPath, volumeMount.MountPath, volumeMount.ReadOnly)+" ")
+				} else {
+					edPath += (":" + volumeMount.MountPath + mode + " ")
+					edPaths = append(edPaths, " --bind "+edPath+" ")
+				}
 			}
 			duration := time.Now().UnixMicro() - start
 			span.AddEvent("Prepared emptydir mounts", trace.WithAttributes(

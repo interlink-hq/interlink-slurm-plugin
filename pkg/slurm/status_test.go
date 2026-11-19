@@ -421,3 +421,66 @@ func TestStatusCacheIsPerPod(t *testing.T) {
 		t.Errorf("squeue ran %d times, want 3 (one check, one query per pod):\n%s", n, ran)
 	}
 }
+
+// The status handler records StartedAt.time and FinishedAt.time and must close them: on a
+// FUSE mount (sshfs) an unlinked file that is still open stays as .fuse_hidden*, so the pod
+// directory cannot be removed until the garbage collector closes the descriptor.
+func TestStatusClosesTimeFiles(t *testing.T) {
+	const (
+		namespace = "default"
+		podUID    = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+	)
+	if _, err := os.ReadDir("/proc/self/fd"); err != nil {
+		t.Skip("needs /proc/self/fd")
+	}
+	t.Cleanup(resetStatusCache)
+
+	for _, state := range []string{"CD", "CG", "F", "PR", "R", "ST", "CA"} {
+		t.Run(state, func(t *testing.T) {
+			squeue := filepath.Join(t.TempDir(), "squeue")
+			if err := os.WriteFile(squeue, []byte("#!/bin/sh\necho '0:0 "+state+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dataRoot := t.TempDir() + "/"
+			workDir := dataRoot + namespace + "-" + podUID
+			if err := os.MkdirAll(workDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			jids := map[string]*JidStruct{podUID: {JID: "1", PodUID: podUID, PodNamespace: namespace}}
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "time-pod", Namespace: namespace, UID: podUID},
+				Spec:       v1.PodSpec{Containers: []v1.Container{{Name: "main"}}},
+			}
+			body, err := json.Marshal([]*v1.Pod{pod})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &SidecarHandler{
+				Config: SlurmConfig{Squeuepath: squeue, DataRootFolder: dataRoot},
+				JIDs:   &jids,
+				Ctx:    context.Background(),
+			}
+			resetStatusCache()
+			h.StatusHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/status", bytes.NewReader(body)))
+
+			written := 0
+			for _, name := range []string{"StartedAt.time", "FinishedAt.time"} {
+				if _, err := os.Stat(filepath.Join(workDir, name)); err == nil {
+					written++
+				}
+			}
+			if written == 0 {
+				t.Fatalf("state %s wrote neither StartedAt.time nor FinishedAt.time in %s", state, workDir)
+			}
+			fds, err := os.ReadDir("/proc/self/fd")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, fd := range fds {
+				if target, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name())); err == nil && strings.HasPrefix(target, workDir+"/") {
+					t.Errorf("state %s left %s open (fd %s)", state, target, fd.Name())
+				}
+			}
+		})
+	}
+}

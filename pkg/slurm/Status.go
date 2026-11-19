@@ -245,13 +245,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					case "CD":
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
@@ -266,13 +264,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					case "CG":
 						if (*h.JIDs)[uid].StartTime.IsZero() {
 							(*h.JIDs)[uid].StartTime = timeNow
-							f, err := os.Create(path + "/StartedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/StartedAt.time", []byte((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
@@ -298,13 +294,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 						_, err := os.Stat(path + "/FinishedAt.time")
 						if (*h.JIDs)[uid].EndTime.IsZero() && errors.Is(err, os.ErrNotExist) {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
@@ -325,13 +319,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					case "PR":
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
@@ -346,13 +338,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					case "R":
 						if (*h.JIDs)[uid].StartTime.IsZero() {
 							(*h.JIDs)[uid].StartTime = timeNow
-							f, err := os.Create(path + "/StartedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/StartedAt.time", []byte((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].StartTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							// Check probe status for container readiness
@@ -391,13 +381,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					case "ST":
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)
@@ -458,13 +446,11 @@ func (h *SidecarHandler) StatusHandler(w http.ResponseWriter, r *http.Request) {
 					default:
 						if (*h.JIDs)[uid].EndTime.IsZero() {
 							(*h.JIDs)[uid].EndTime = timeNow
-							f, err := os.Create(path + "/FinishedAt.time")
-							if err != nil {
+							if err := os.WriteFile(path+"/FinishedAt.time", []byte((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST")), 0o644); err != nil {
 								statusCode = http.StatusInternalServerError
 								h.handleError(spanCtx, w, statusCode, err)
 								return
 							}
-							f.WriteString((*h.JIDs)[uid].EndTime.Format("2006-01-02 15:04:05.999999999 -0700 MST"))
 						}
 						for _, ct := range pod.Spec.Containers {
 							exitCode, err := getExitCode(h.Ctx, path, ct.Name, exitCodeMatch, stateMatch, sessionContextMessage)

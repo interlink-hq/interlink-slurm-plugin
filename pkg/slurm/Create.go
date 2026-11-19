@@ -2,13 +2,11 @@ package slurm
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"math"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containerd/containerd/log"
@@ -18,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	trace "go.opentelemetry.io/otel/trace"
+	v1 "k8s.io/api/core/v1"
 )
 
 // SubmitHandler generates and submits a SLURM batch script according to provided data.
@@ -96,12 +95,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		cpuLimitFromContainer := int64(math.Ceil(cpuLimitFloat))
 
 		if cpuLimitFromContainer == 0 {
-			// No CPU limit specified in container, check if we should use flavor default
-			if isDefaultCPU && flavor != nil && flavor.CPUDefault > 0 {
-				log.G(h.Ctx).Infof("Max CPU resource not set for %s. Using flavor '%s' default: %d CPU", container.Name, flavor.FlavorName, flavor.CPUDefault)
-				cpuLimit = flavor.CPUDefault
-			} else if isDefaultCPU {
-				log.G(h.Ctx).Warning(errors.New("Max CPU resource not set for " + container.Name + ". Only 1 CPU will be used"))
+			// No CPU limit specified in container; a flavor default is applied after the loop
+			if isDefaultCPU {
 				cpuLimit = 1
 			}
 		} else {
@@ -114,12 +109,8 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if memoryLimitFromContainer == 0 {
-			// No memory limit specified in container, check if we should use flavor default
-			if isDefaultRam && flavor != nil && flavor.MemoryDefault > 0 {
-				log.G(h.Ctx).Infof("Max Memory resource not set for %s. Using flavor '%s' default: %d bytes", container.Name, flavor.FlavorName, flavor.MemoryDefault)
-				memoryLimit = flavor.MemoryDefault
-			} else if isDefaultRam {
-				log.G(h.Ctx).Warning(errors.New("Max Memory resource not set for " + container.Name + ". Only 1MB will be used"))
+			// No memory limit specified in container; a flavor default is applied after the loop
+			if isDefaultRam {
 				memoryLimit = 1024 * 1024
 			}
 		} else {
@@ -155,7 +146,6 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			runtime_command = append(runtime_command, image)
 		case "enroot":
 			containerName := container.Name + string(data.Pod.UID)
-			mounts = strings.ReplaceAll(mounts, ":ro", "")
 			runtime_command = append(runtime_command, mounts)
 			runtime_command = append(runtime_command, containerName)
 		}
@@ -219,6 +209,29 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// A flavor's CPUDefault and MemoryDefault size the job when no app container sets a limit
+	// and the slurm-job.vk.io/flags annotation does not set --cpus-per-task or --mem. An app
+	// container without a limit is not bounded by an init container's limit, so the job gets
+	// the larger of the two.
+	if !anyLimit(data.Pod.Spec.Containers, v1.ResourceCPU) && !annotationSetsFlag(metadata.Annotations, "--cpus-per-task") {
+		if flavor != nil && flavor.CPUDefault > 0 {
+			log.G(h.Ctx).Infof("No app container sets a CPU limit. Using flavor '%s' default: %d CPU", flavor.FlavorName, flavor.CPUDefault)
+			resourceLimits.CPU = max(resourceLimits.CPU, flavor.CPUDefault)
+			isDefaultCPU = false
+		} else if isDefaultCPU {
+			log.G(h.Ctx).Warning("No container sets a CPU limit. Only 1 CPU will be used")
+		}
+	}
+	if !anyLimit(data.Pod.Spec.Containers, v1.ResourceMemory) && !annotationSetsFlag(metadata.Annotations, "--mem") {
+		if flavor != nil && flavor.MemoryDefault > 0 {
+			log.G(h.Ctx).Infof("No app container sets a memory limit. Using flavor '%s' default: %d bytes", flavor.FlavorName, flavor.MemoryDefault)
+			resourceLimits.Memory = max(resourceLimits.Memory, flavor.MemoryDefault)
+			isDefaultRam = false
+		} else if isDefaultRam {
+			log.G(h.Ctx).Warning("No container sets a memory limit. Only 1MB will be used")
+		}
+	}
+
 	span.SetAttributes(
 		attribute.Int64("job.limits.cpu", resourceLimits.CPU),
 		attribute.Int64("job.limits.memory", resourceLimits.Memory),
@@ -259,6 +272,7 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 			//os.RemoveAll(filesPath)
 			return
 		}
+		defer pathFile.Close()
 
 		mode := os.FileMode(0770)
 
@@ -352,4 +366,24 @@ func (h *SidecarHandler) SubmitHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Write(returnedJIDBytes)
 	}
+}
+
+// anyLimit reports whether one of containers sets a limit on resource.
+func anyLimit(containers []v1.Container, resource v1.ResourceName) bool {
+	for _, c := range containers {
+		if q, ok := c.Resources.Limits[resource]; ok && !q.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+// annotationSetsFlag reports whether the slurm-job.vk.io/flags annotation sets flag.
+func annotationSetsFlag(annotations map[string]string, flag string) bool {
+	for _, f := range splitSlurmFlags(annotations["slurm-job.vk.io/flags"]) {
+		if slurmFlagKey(f) == flag {
+			return true
+		}
+	}
+	return false
 }
