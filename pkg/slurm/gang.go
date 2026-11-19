@@ -192,7 +192,9 @@ func produceGangSLURMScript(
 	// clobber the per-rank --env-file that carries MASTER_ADDR/RANK/WORLD_SIZE, so
 	// torch can inject NCCL_* / UCX_* env here without breaking rendezvous). The
 	// exports also stay visible to the host launcher (UCX/PMIx server side) for the
-	// MPI path. Empty/malformed pairs (no '=', empty key) are skipped.
+	// MPI path. Empty/malformed pairs (no '=', empty key) are skipped. enroot
+	// ignores the prefix: each member's job.sh passes the pairs to its enroot
+	// containers instead (gangEnrootEnv).
 	if exports := gangMPIEnvExports(head.Pod.ObjectMeta); len(exports) > 0 {
 		body.WriteString("# --- HPC tuning env (slurm-job.vk.io/mpi-env -> SINGULARITYENV_*; merged into every rank) ---\n")
 		for _, e := range exports {
@@ -282,6 +284,56 @@ func gangNodeShape(ctx context.Context, ordered []*BufferedMember) (v1.Pod, Reso
 		}
 	}
 	return pod, limits, defaultCPU, defaultRAM
+}
+
+// gangRankEnv are the variables emitGangPerRankLaunch sets for each rank with
+// `srun --export`; the two lists must match.
+var gangRankEnv = []string{"RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "RAY_ADDRESS"}
+
+// gangEnrootEnv returns the shell-quoted `enroot start --env` arguments of every
+// container of a gang member, or nil for any other runtime: enroot starts a
+// container without the host environment, where Singularity keeps it. A rank
+// variable is passed by name, and enroot copies it from the rank's environment.
+// The head's mpi-env pairs are passed with their values, except one named like a
+// rank variable, which keeps the rank's value. enroot removes a pair of quotes
+// around a value twice (common::envfmt), so a value that starts with a quote or
+// a backslash is wrapped in two pairs; one with a newline, which enroot would
+// split into separate variables, is skipped.
+func gangEnrootEnv(ctx context.Context, runtime string, head metav1.ObjectMeta) []string {
+	if runtime != "enroot" {
+		return nil
+	}
+	args := slices.Clone(gangRankEnv)
+	names, values := gangMPIEnv(head)
+	for i, k := range names {
+		v := values[i]
+		if slices.Contains(gangRankEnv, k) {
+			continue
+		}
+		if strings.Contains(v, "\n") {
+			log.G(ctx).Warningf("enroot cannot pass mpi-env %s: a newline in the value; skipped", k)
+			continue
+		}
+		if strings.HasPrefix(v, `"`) || strings.HasPrefix(v, "'") || strings.HasPrefix(v, `\`) {
+			v = "''" + v + "''"
+		}
+		args = append(args, shellescape.Quote(k+"="+v))
+	}
+	return args
+}
+
+// withEnrootEnv inserts `--env ARG` for each arg before the last element (the
+// container name) of an enroot start command.
+func withEnrootEnv(runtimeCmd, args []string) []string {
+	if len(args) == 0 || len(runtimeCmd) == 0 {
+		return runtimeCmd
+	}
+	result := make([]string, 0, len(runtimeCmd)+2*len(args))
+	result = append(result, runtimeCmd[:len(runtimeCmd)-1]...)
+	for _, a := range args {
+		result = append(result, "--env", a)
+	}
+	return append(result, runtimeCmd[len(runtimeCmd)-1])
 }
 
 // emitGangPerRankLaunch renders the DEFAULT per-rank launch section (Ray/torch):
@@ -481,10 +533,6 @@ func emitGangSocketDirs(body *strings.Builder, root string, ordered []*BufferedM
 	body.WriteString("trap " + shellescape.Quote("rm -rf "+strings.Join(dirs, " ")) + " EXIT\n\n")
 }
 
-// gangMPIEnvExports parses the head pod's slurm-job.vk.io/mpi-env annotation
-// ("K=V;K=V") into a slice of `export SINGULARITYENV_<K>=<shellescaped V>` lines.
-// Empty or malformed pairs (no '=', empty key) are skipped. Returns nil when the
-// annotation is absent or yields no valid pairs.
 // isShellEnvName reports whether s is a valid POSIX shell/env variable name:
 // [A-Za-z_][A-Za-z0-9_]*. Used to reject unsafe mpi-env keys before they are
 // interpolated (unquoted) into an `export` statement.
@@ -505,12 +553,26 @@ func isShellEnvName(s string) bool {
 	return true
 }
 
+// gangMPIEnvExports parses the head pod's slurm-job.vk.io/mpi-env annotation
+// ("K=V;K=V") into a slice of `export SINGULARITYENV_<K>=<shellescaped V>` lines.
+// Empty or malformed pairs (no '=', empty key) are skipped. Returns nil when the
+// annotation is absent or yields no valid pairs.
 func gangMPIEnvExports(metadata metav1.ObjectMeta) []string {
+	names, values := gangMPIEnv(metadata)
+	var out []string
+	for i, k := range names {
+		out = append(out, "export SINGULARITYENV_"+k+"="+shellescape.Quote(values[i]))
+	}
+	return out
+}
+
+// gangMPIEnv returns the names and values of the valid pairs of the
+// slurm-job.vk.io/mpi-env annotation.
+func gangMPIEnv(metadata metav1.ObjectMeta) (names, values []string) {
 	raw := strings.TrimSpace(metadata.Annotations["slurm-job.vk.io/mpi-env"])
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
-	var out []string
 	for _, pair := range strings.Split(raw, ";") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
@@ -528,9 +590,9 @@ func gangMPIEnvExports(metadata metav1.ObjectMeta) []string {
 		if !isShellEnvName(k) {
 			continue
 		}
-		out = append(out, "export SINGULARITYENV_"+k+"="+shellescape.Quote(v))
+		names, values = append(names, k), append(values, v)
 	}
-	return out
+	return names, values
 }
 
 // slurmJobGone classifies one squeue probe of a submitted gang's JID and

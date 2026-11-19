@@ -242,6 +242,7 @@ type ContainerCommand struct {
 	startupProbes    []ProbeCommand
 	preStopHook      *LifecycleHookSpec // optional preStop lifecycle hook
 	postStartHook    *LifecycleHookSpec // optional postStart lifecycle hook
+	enrootEnv        []string           // enroot start --env arguments of a gang member (gangEnrootEnv)
 }
 
 // TaintConfig holds the configuration for a Kubernetes taint to be applied to the

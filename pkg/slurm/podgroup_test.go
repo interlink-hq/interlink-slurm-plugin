@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -140,6 +141,127 @@ func TestCreatePodGroupSubmitsOneJob(t *testing.T) {
 	}
 	if _, ok := h.GangTable[testGroup]; ok {
 		t.Fatal("the gang entry outlived its members")
+	}
+}
+
+// fakeEnrootEnv stands for enroot: start writes each --env to a file as enroot's
+// runtime::_do_environ does, formats the file twice with common::envfmt of enroot
+// 4.2.1 (src/common.sh), as _do_environ and _do_hooks do, and prints it. The other
+// commands do nothing.
+const fakeEnrootEnv = `[ "$1" = start ] || exit 0
+shift
+env=$(mktemp)
+trap 'rm -f "$env"' EXIT
+while [ $# -gt 1 ]; do
+  if [ "$1" = --env ]; then
+    printf '%s\n' "$2" | awk '{ print /=/ ? $0 : $0"="ENVIRON[$0] }' >> "$env"
+    shift
+  fi
+  shift
+done
+for pass in 1 2; do
+  sed -i -e 's/^[[:space:]]\+//' -e '/^#\|^$/d' -e '/^[[:alpha:]_][[:alnum:]_]*=/!d' -e '/^ENROOT_/d' \
+    -e 's/^\([[:alpha:]_][[:alnum:]_]*\)=[\"\x27]\(.*\)[\"\x27][[:space:]]*$/\1=\2/' "$env"
+done
+cat "$env"`
+
+// enroot starts a container without the host environment: every container of a
+// gang member gets the rank's variables by name, which enroot resolves in the
+// rank's environment, and the gang's mpi-env with its values. A single pod gets
+// none of them.
+func TestCreatePodGroupEnrootPassesRankEnv(t *testing.T) {
+	h, dataRoot, _, _ := newPodGroupHandler(t, "echo 'Submitted batch job 42'")
+	h.Config.ContainerRuntime = enrootRuntime
+	h.Config.EnrootPath = writeStubScript(t, t.TempDir(), enrootRuntime, fakeEnrootEnv)
+	req := podGroupRequest(2)
+	req.Pods[0].Pod.Annotations = map[string]string{testMPIEnvAnnotation: "NCCL_DEBUG=INFO;RANK=7;" +
+		`DQ="q";BS=\a\;SPECIAL=it's "q" $HOME \x;NL=a` + "\n" + "b"}
+	createdJIDs(t, postPodGroup(t, h, req))
+
+	raw, err := os.ReadFile(memberDir(dataRoot, rankUID(0)) + "/job.slurm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	if strings.Contains(script, "export NCCL_DEBUG=") {
+		t.Errorf("job.slurm exports the mpi-env in the batch shell\n%s", script)
+	}
+	// Every variable gangEnrootEnv passes by name is one the rank's srun sets.
+	for _, line := range strings.Split(script, "\n") {
+		if !strings.Contains(line, "--export=ALL,") {
+			continue
+		}
+		for _, name := range gangRankEnv {
+			if !strings.Contains(line, ","+name+"=") {
+				t.Errorf("the rank's srun does not set %s: %s", name, line)
+			}
+		}
+	}
+
+	worker := memberDir(dataRoot, rankUID(1))
+	raw, err = os.ReadFile(worker + "/job.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := " --env RANK --env WORLD_SIZE --env MASTER_ADDR --env MASTER_PORT --env RAY_ADDRESS --env NCCL_DEBUG=INFO "
+	if !strings.Contains(string(raw), want) {
+		t.Fatalf("the worker's enroot start lacks %q\n%s", want, raw)
+	}
+
+	// The worker's job.sh, run as its rank's srun runs it, with a host value of an
+	// mpi-env name that the container must not get.
+	cmd := exec.Command(testBashPath, "job.sh")
+	cmd.Dir = worker
+	cmd.Env = append(os.Environ(), "RANK=1", "WORLD_SIZE=2", "MASTER_ADDR=10.0.0.1", "MASTER_PORT=29500",
+		"RAY_ADDRESS=10.0.0.1:29500", "NCCL_DEBUG=WARN")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("job.sh: %v\n%s", err, out)
+	}
+	raw, err = os.ReadFile(worker + "/run-" + testGangContainer + ".out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := "\n" + string(raw)
+	for _, want := range []string{"RANK=1", "WORLD_SIZE=2", "MASTER_ADDR=10.0.0.1", "MASTER_PORT=29500",
+		"RAY_ADDRESS=10.0.0.1:29500", "NCCL_DEBUG=INFO", `DQ="q"`, `BS=\a\`, `SPECIAL=it's "q" $HOME \x`} {
+		if !strings.Contains(got, "\n"+want+"\n") {
+			t.Errorf("the container does not get %s\n%s", want, raw)
+		}
+	}
+	for _, unwanted := range []string{"\nRANK=7\n", "\nNL="} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("the container gets %q\n%s", strings.TrimSpace(unwanted), raw)
+		}
+	}
+
+	single := newGangPod("single", nil)
+	if rec := submitPod(t, h, single); rec.Code != http.StatusOK {
+		t.Fatalf("single pod: code %d, body %q", rec.Code, rec.Body.String())
+	}
+	raw, err = os.ReadFile(memberDir(dataRoot, "single") + "/job.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "--env RANK") {
+		t.Errorf("a single pod's enroot start gets the rank variables\n%s", raw)
+	}
+}
+
+// Singularity keeps the host environment: a gang member's job.sh passes nothing.
+func TestCreatePodGroupSingularityPassesNoEnv(t *testing.T) {
+	h, dataRoot, _, _ := newPodGroupHandler(t, "echo 'Submitted batch job 42'")
+	req := podGroupRequest(2)
+	req.Pods[0].Pod.Annotations = map[string]string{testMPIEnvAnnotation: "NCCL_DEBUG=INFO"}
+	createdJIDs(t, postPodGroup(t, h, req))
+
+	for rank := 0; rank < 2; rank++ {
+		raw, err := os.ReadFile(memberDir(dataRoot, rankUID(rank)) + "/job.sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "--env RANK") || strings.Contains(string(raw), "--env NCCL_DEBUG") {
+			t.Errorf("rank %d: singularity is given the gang's variables\n%s", rank, raw)
+		}
 	}
 }
 

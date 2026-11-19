@@ -152,8 +152,9 @@ func (h *SidecarHandler) createPodGroup(ctx context.Context, req PodGroupCreateR
 			}
 		}
 	}
+	enrootEnv := gangEnrootEnv(ctx, h.Config.ContainerRuntime, pods[0].Pod.ObjectMeta)
 	for i, data := range pods {
-		p, cerr := h.renderPod(ctx, data)
+		p, cerr := h.renderPod(ctx, data, enrootEnv)
 		if cerr != nil {
 			removeRendered()
 			return nil, cerr

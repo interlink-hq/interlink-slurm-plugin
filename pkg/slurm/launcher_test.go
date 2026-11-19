@@ -21,7 +21,7 @@ const (
 	testNV               = "--nv"
 	testTrainScript      = "train.py"
 	testNamespace        = "default"
-	testContainer        = "main"
+	testGangContainer    = "main"
 )
 
 // testRay is a launcher the test site does not define.

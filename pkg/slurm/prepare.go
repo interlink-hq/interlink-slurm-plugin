@@ -1708,7 +1708,7 @@ highestExitCode=0
 		}
 		stringToBeWritten.WriteString(containerCommand.containerName)
 		stringToBeWritten.WriteString(" ")
-		stringToBeWritten.WriteString(strings.Join(containerCommand.runtimeCommand[:], " "))
+		stringToBeWritten.WriteString(strings.Join(withEnrootEnv(containerCommand.runtimeCommand, containerCommand.enrootEnv), " "))
 
 		if containerCommand.containerCommand != nil {
 			// Case the pod specified a container entrypoint array to override.

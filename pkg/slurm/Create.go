@@ -95,7 +95,7 @@ type renderedPod struct {
 func (h *SidecarHandler) createPod(spanCtx context.Context, data commonIL.RetrievedPodData) (CreateStruct, *createError) {
 	span := trace.SpanFromContext(spanCtx)
 
-	rendered, cerr := h.renderPod(spanCtx, data)
+	rendered, cerr := h.renderPod(spanCtx, data, nil)
 	if cerr != nil {
 		return CreateStruct{}, cerr
 	}
@@ -134,9 +134,10 @@ func (h *SidecarHandler) createPod(spanCtx context.Context, data commonIL.Retrie
 	return CreateStruct{PodUID: string(data.Pod.UID), PodJID: jid}, nil
 }
 
-// renderPod writes the pod's directories, files and own job script. A failure
+// renderPod writes the pod's directories, files and own job script. enrootEnv is
+// the `enroot start --env` arguments of its containers (gangEnrootEnv). A failure
 // removes what it wrote where SubmitHandler always did.
-func (h *SidecarHandler) renderPod(spanCtx context.Context, data commonIL.RetrievedPodData) (*renderedPod, *createError) {
+func (h *SidecarHandler) renderPod(spanCtx context.Context, data commonIL.RetrievedPodData, enrootEnv []string) (*renderedPod, *createError) {
 	span := trace.SpanFromContext(spanCtx)
 	fail := func(code int, err error) (*renderedPod, *createError) {
 		return nil, &createError{code: code, err: err}
@@ -300,6 +301,7 @@ func (h *SidecarHandler) renderPod(spanCtx context.Context, data commonIL.Retrie
 			containerImage:   image,
 			preStopHook:      preStopHook,
 			postStartHook:    postStartHook,
+			enrootEnv:        enrootEnv,
 		})
 	}
 

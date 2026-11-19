@@ -32,7 +32,7 @@ func newGangPod(uid string, annotations map[string]string) v1.Pod {
 			UID:         types.UID(uid),
 			Annotations: annotations,
 		},
-		Spec: v1.PodSpec{Containers: []v1.Container{{Name: testContainer, Image: busyboxImage}}},
+		Spec: v1.PodSpec{Containers: []v1.Container{{Name: testGangContainer, Image: busyboxImage}}},
 	}
 }
 
@@ -365,7 +365,7 @@ func TestSinglePodRunningStatusUnaffected(t *testing.T) {
 	(*h.JIDs)[uid] = &JidStruct{PodUID: uid, PodNamespace: testNamespace, JID: "42"} // Gang=false
 
 	pod := v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: testNamespace, UID: types.UID(uid)}}
-	pod.Spec.Containers = []v1.Container{{Name: testContainer}}
+	pod.Spec.Containers = []v1.Container{{Name: testGangContainer}}
 	body, err := json.Marshal([]*v1.Pod{&pod})
 	if err != nil {
 		t.Fatal(err)
@@ -743,7 +743,7 @@ func mkGangMemberWithRC(t *testing.T, dataRoot, uid string, extra map[string]str
 	t.Helper()
 	m := mkMember(t, dataRoot, uid, extra)
 	m.RuntimeCommands = []ContainerCommand{{
-		containerName: testContainer,
+		containerName: testGangContainer,
 		// runtimeCommand mirrors Create.go: singularity exec <opts> <mounts> <SIF>.
 		// The SIF path is the LAST element (rc.runtimeCommand already includes it).
 		runtimeCommand:   []string{singularityRuntime, string(ProbeTypeExec), testNV, "--no-home", "", "", "/gpfs/images/itwinai.sif"},
