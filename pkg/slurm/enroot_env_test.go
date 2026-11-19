@@ -2,6 +2,7 @@ package slurm
 
 import (
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,6 +263,56 @@ func TestCreateEnvFileEnrootEnvFrom(t *testing.T) {
 	slices.Sort(got)
 	if want := []string{"CM_URL='quoted' $HOME", "SECRET_VALUE=my-secret"}; !slices.Equal(got, want) {
 		t.Errorf("environment %q, want %q", got, want)
+	}
+}
+
+// As in Kubernetes, env wins over envFrom for a name in both, and among envFrom sources the
+// last one wins. Both runtimes keep the last line of a name: singularity evaluates the env
+// file as a shell script, and enroot-switchroot sets the lines of the environment file in order.
+func TestCreateEnvFileEnvOverridesEnvFrom(t *testing.T) {
+	requireBash(t)
+	// IN_BOTH is set by env and by both envFrom sources, IN_SOURCES by both sources.
+	const inBoth, inSources = "IN_BOTH", "IN_SOURCES"
+	container := v1.Container{
+		Name: testContainer,
+		Env:  []v1.EnvVar{{Name: inBoth, Value: "env"}},
+		EnvFrom: []v1.EnvFromSource{
+			{SecretRef: &v1.SecretEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: "s"}}},
+			{ConfigMapRef: &v1.ConfigMapEnvSource{LocalObjectReference: v1.LocalObjectReference{Name: "c"}}},
+		},
+	}
+	data := envTestPodData(container)
+	data.Containers[0].Secrets = []v1.Secret{{ObjectMeta: metav1.ObjectMeta{Name: "s"}, Data: map[string][]byte{inBoth: []byte("secret"), inSources: []byte("first")}}}
+	data.Containers[0].ConfigMaps = []v1.ConfigMap{{ObjectMeta: metav1.ObjectMeta{Name: "c"}, Data: map[string]string{inBoth: "configmap", inSources: "last"}}}
+
+	for _, tc := range []struct{ runtime, script string }{
+		{singularityRuntime, `set -euo pipefail; source "$1"; printf 'IN_BOTH=%s\nIN_SOURCES=%s\n' "$IN_BOTH" "$IN_SOURCES" > "$2"`},
+		{enrootRuntime, enrootEnvfmt + `set -euo pipefail; source "$1"; environ > "$2"; enroot_envfmt "$2"; enroot_envfmt "$2"`},
+	} {
+		t.Run(tc.runtime, func(t *testing.T) {
+			workDir := t.TempDir()
+			if _, _, err := createEnvFile(context.Background(), SlurmConfig{ContainerRuntime: tc.runtime}, data, container, workDir); err != nil {
+				t.Fatalf("createEnvFile() error: %v", err)
+			}
+			out := filepath.Join(workDir, "environ")
+			cmd := exec.Command("bash", "-c", tc.script, "bash", workDir+"/main_envfile.properties", out) //nolint:gosec // tc.script is one of the scripts above
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+			if b, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("reading the env file failed: %v\n%s", err, b)
+			}
+			raw, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+				name, value, _ := strings.Cut(line, "=")
+				got[name] = value
+			}
+			if want := map[string]string{inBoth: "env", inSources: "last"}; !maps.Equal(got, want) {
+				t.Errorf("environment %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -783,23 +783,6 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 		}
 	}
 
-	for _, envVar := range container.Env {
-		tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, envVar.Name, envVar.Value)
-		if !ok {
-			continue
-		}
-
-		envs_data = append(envs_data, tmp)
-
-		_, err := envfile.WriteString(tmp + "\n")
-		if err != nil {
-			log.G(Ctx).Error(err)
-			return nil, nil, err
-		} else {
-			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " line " + tmp)
-		}
-	}
-
 	// Handle envFrom: inject all key-value pairs from referenced Secrets and ConfigMaps.
 	retrievedContainer, err := getRetrievedContainer(&podData, container.Name)
 	if err != nil {
@@ -857,6 +840,24 @@ func createEnvFile(Ctx context.Context, config SlurmConfig, podData commonIL.Ret
 					log.G(Ctx).Debug("---- Written envfile from configMap " + envFrom.ConfigMapRef.Name + " key " + k)
 				}
 			}
+		}
+	}
+
+	// env goes after envFrom: both runtimes keep the last value of a name, and env takes precedence.
+	for _, envVar := range container.Env {
+		tmp, ok := envFileLine(Ctx, config.ContainerRuntime, container.Name, envVar.Name, envVar.Value)
+		if !ok {
+			continue
+		}
+
+		envs_data = append(envs_data, tmp)
+
+		_, err := envfile.WriteString(tmp + "\n")
+		if err != nil {
+			log.G(Ctx).Error(err)
+			return nil, nil, err
+		} else {
+			log.G(Ctx).Debug("---- Written envfile file " + envfilePath + " line " + tmp)
 		}
 	}
 
