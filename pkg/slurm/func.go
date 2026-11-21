@@ -188,6 +188,26 @@ func NewSlurmConfig() (SlurmConfig, error) {
 			SlurmConfigInst.Sinfopath = "/usr/bin/sinfo"
 		}
 
+		// Gang scheduling. Off by default; opt in via config or the
+		// GANGSCHEDULINGENABLED env var.
+		if os.Getenv("GANGSCHEDULINGENABLED") != "" {
+			SlurmConfigInst.GangSchedulingEnabled = os.Getenv("GANGSCHEDULINGENABLED") == "true"
+		}
+		if os.Getenv("SITESCRIPTPATH") != "" {
+			SlurmConfigInst.SiteScriptPath = os.Getenv("SITESCRIPTPATH")
+		}
+		if os.Getenv("GPUFLAG") != "" {
+			SlurmConfigInst.GPUFlag = os.Getenv("GPUFLAG")
+		}
+		switch SlurmConfigInst.GPUFlag {
+		case "", GPUFlagGres, GPUFlagGPUsPerNode, GPUFlagGPUs:
+		default:
+			return SlurmConfigInst, fmt.Errorf("GPUFlag %q: want %q, %q or %q", SlurmConfigInst.GPUFlag, GPUFlagGres, GPUFlagGPUsPerNode, GPUFlagGPUs)
+		}
+		if SlurmConfigInst.GangSchedulingEnabled {
+			log.G(context.Background()).Info("Gang scheduling ENABLED (pod groups through /createPodGroup)")
+		}
+
 		SlurmConfigInst.set = true
 
 		if len(SlurmConfigInst.SingularityDefaultOptions) == 0 {

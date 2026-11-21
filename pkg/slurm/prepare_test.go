@@ -1287,3 +1287,82 @@ func TestPrepareMountsSkipsPersistentVolumeClaim(t *testing.T) {
 		t.Errorf("PVC mount should be skipped, got %q", mounts)
 	}
 }
+
+// TestProduceSLURMScriptSinglePodGolden locks the exact single-pod job.slurm
+// #SBATCH header and overall structure so the buildSbatchFlags extraction (and
+// any future refactor) is regression-guarded. If this test changes, the
+// single-pod on-the-wire script changed and that must be a deliberate decision.
+func TestProduceSLURMScriptSinglePodGolden(t *testing.T) {
+	ctx := context.Background()
+	workingDir := t.TempDir()
+
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "golden-pod",
+			Namespace: "default",
+			UID:       "11111111-2222-3333-4444-555555555555",
+			Annotations: map[string]string{
+				"slurm-job.vk.io/flags": "-A myacct -p mypart",
+			},
+		},
+	}
+	config := SlurmConfig{BashPath: "/bin/bash"}
+	resourceLimits := ResourceLimits{
+		CPU:    4,
+		Memory: 2 * 1024 * 1024 * 1024, // 2Gi -> --mem=2048
+	}
+
+	if _, err := produceSLURMScript(ctx, config, pod, workingDir, pod.ObjectMeta, nil, resourceLimits, false, false, nil); err != nil {
+		t.Fatalf("produceSLURMScript() unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(workingDir, "job.slurm"))
+	if err != nil {
+		t.Fatalf("read job.slurm: %v", err)
+	}
+	content := string(raw)
+
+	// Golden header: exact lines and exact order (CPU/mem flags are highest
+	// priority and appended after the annotation flags).
+	wantHeaderInOrder := []string{
+		"#!/bin/bash",
+		"#SBATCH --job-name=11111111-2222-3333-4444-555555555555",
+		"#SBATCH --output=" + workingDir + "/job.out",
+		"#SBATCH -A myacct",
+		"#SBATCH -p mypart",
+		"#SBATCH --cpus-per-task=4",
+		"#SBATCH --mem=2048",
+	}
+	lastIdx := -1
+	for _, want := range wantHeaderInOrder {
+		idx := strings.Index(content, want)
+		if idx == -1 {
+			t.Errorf("golden job.slurm missing header line %q\n---\n%s", want, content)
+			continue
+		}
+		if idx <= lastIdx {
+			t.Errorf("golden job.slurm header line %q out of expected order\n---\n%s", want, content)
+		}
+		lastIdx = idx
+	}
+
+	// A single-pod job must NOT carry any gang directives.
+	for _, forbidden := range []string{"--nodes=", "--ntasks-per-node=", "scontrol show hostnames", "MASTER_ADDR"} {
+		if strings.Contains(content, forbidden) {
+			t.Errorf("single-pod golden job.slurm unexpectedly contains gang directive %q", forbidden)
+		}
+	}
+
+	// Structural markers of the job.sh functions block (via the job.slurm which
+	// references job.sh); assert the job.sh has the expected scaffolding.
+	jobSh, err := os.ReadFile(filepath.Join(workingDir, "job.sh"))
+	if err != nil {
+		t.Fatalf("read job.sh: %v", err)
+	}
+	shContent := string(jobSh)
+	for _, marker := range []string{"highestExitCode=0", "runCtn()", "waitCtns", "endScript"} {
+		if !strings.Contains(shContent, marker) {
+			t.Errorf("golden job.sh missing structural marker %q", marker)
+		}
+	}
+}
